@@ -201,6 +201,13 @@ func main() {
 						Name:  "listen",
 						Usage: "Listen address (e.g. ws://0.0.0.0:8080)",
 					},
+					&cli.StringFlag{
+						Name:    "prefix",
+						Aliases: []string{"P"},
+						Value:   "v1",
+						Usage:   "HTTP upgrade path prefix",
+						EnvVars: []string{"WSTUNNEL_HTTP_UPGRADE_PATH_PREFIX"},
+					},
 					&cli.UintFlag{
 						Name:  "socket-so-mark",
 						Usage: "(linux only) Mark network packet with SO_MARK",

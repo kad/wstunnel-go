@@ -20,6 +20,11 @@ test: ## Run tests
 	@echo "Running tests..."
 	go test -v -race ./...
 
+.PHONY: test-interop
+test-interop: build ## Run interoperability tests with original Rust wstunnel
+	@echo "Running interoperability tests..."
+	go test -v ./tests/tester/...
+
 .PHONY: lint
 lint: ## Run linter
 	@echo "Running golangci-lint..."

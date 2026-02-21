@@ -11,6 +11,8 @@ The project targets **Go version 1.25** or above. This is specified in the `go.m
 The project follows a standard Go project layout:
 -   `cmd/wstunnel-go/main.go`: Contains the main application entry point.
 -   `pkg/`: Contains internal packages for client, server, protocol, and tunnel logic.
+-   `internal/`: Contains internal packages shared between `cmd` and `pkg`.
+-   `tests/tester/`: Contains the interoperability testing tool.
 
 ## 3. Dependency Management
 
@@ -25,6 +27,7 @@ The `Makefile` provides convenient targets for common development tasks:
 -   `all`: (Default) Builds the application. Equivalent to `make build`.
 -   `build`: Compiles the `wstunnel-go` binary and places it in the `./bin` directory.
 -   `test`: Runs all unit and integration tests with verbose output and race detection (`go test -v -race ./...`).
+-   `test-interop`: Runs end-to-end interoperability tests between `wstunnel-go` and the original Rust `wstunnel` implementation.
 -   `lint`: Executes `golangci-lint` to analyze the codebase for potential issues.
 -   `vet`: Runs `go vet` for static analysis.
 -   `fmt`: Formats all Go source files using `go fmt`.
@@ -39,35 +42,31 @@ The `Makefile` provides convenient targets for common development tasks:
 
 The project uses `golangci-lint` for static code analysis.
 -   **Execution:** Run `make lint` locally. If the tool is not installed, run `make install-tools`.
--   **CI Integration:** `golangci-lint` is automatically run in CI using the latest recommended version.
+-   **CI Integration:** `golangci-lint` is automatically run in CI using `golangci/golangci-lint-action@v9` and version `v2.10.1`.
 
 ## 6. Testing
 
-All code changes should be accompanied by appropriate tests.
+### Unit and Integration Tests
 -   **Execution:** Tests are run using `go test -v -race ./...`. The `-race` flag enables the data race detector.
--   **CI Integration:** Tests are automatically executed in the Continuous Integration workflow.
+-   **CI Integration:** These tests are automatically executed in the CI workflow.
+
+### Interoperability Testing
+-   **Purpose:** To validate compatibility with the original Rust `wstunnel` implementation.
+-   **Execution:** Run `make test-interop`.
+-   **Requirements:** Requires the Rust `wstunnel` binary at `/home/kad/repositories/github.com/kad/wstunnel/target/release/wstunnel`.
+-   **Scope:** Tests various client/server combinations (Go-Go, Go-Rust, Rust-Go) across both WebSocket and HTTP/2 transports.
 
 ## 7. GitHub Workflows
 
 The project utilizes GitHub Actions for Continuous Integration and Continuous Delivery.
 
 ### `ci.yml` (Continuous Integration)
-
--   **Triggers:** Pushes to the `main` branch and all Pull Requests targeting `main`.
--   **Jobs:**
-    -   `lint`: Runs `golangci-lint` using `golangci/golangci-lint-action@v9`.
-    -   `test`: Runs `go mod tidy`, `go mod verify`, and `go test -v -race ./...`.
-    -   `build`: Builds the application using `make build`.
--   **Go Version:** Uses Go `1.25`.
+-   **Triggers:** Pushes to `main` and Pull Requests targeting `main`.
+-   **Jobs:** `lint`, `test`, `build`.
 
 ### `release.yml` (Release Workflow)
-
--   **Triggers:** Pushes of tags matching `v*` (e.g., `v1.0.0`).
--   **Jobs:**
-    -   `lint`: (Dependent on `ci.yml`'s `lint` job) Ensures code quality before release.
-    -   `test`: (Dependent on `ci.yml`'s `test` job) Verifies all tests pass before release.
-    -   `release`: Uses `goreleaser/goreleaser-action@v6` to build and publish releases to GitHub.
--   **Go Version:** Uses Go `1.25`.
+-   **Triggers:** Pushes of tags matching `v*`.
+-   **Jobs:** `lint`, `test`, `release` (using `goreleaser`).
 
 ## 8. Transports
 
@@ -77,17 +76,17 @@ The project supports multiple transport protocols for tunneling:
 -   **HTTP/2:** Provides full-duplex streaming over HTTP/2 POST requests. Uses `Cookie` header for JWT authentication.
 
 ### Client Configuration
-Use the `--transport` (or `-t`) flag to specify the transport:
+Use the `--transport` (or `-t`) flag to specify the transport for the **Go client**:
 ```bash
 wstunnel-go client -t http2 ...
 ```
+The **Rust client** determines the transport based on the server URL scheme (e.g., `ws://` for WebSocket, `http://` for HTTP/2).
 
 ### Server Configuration
-The server automatically detects the transport and protocol version. No specific configuration is needed to enable HTTP/2 support, provided the underlying connection supports it (e.g., via ALPN in TLS).
+The server automatically detects the transport and protocol version. No specific configuration is needed to enable HTTP/2 support.
 
 ## 9. Goreleaser Configuration
 
-The project uses `goreleaser` for automated releases.
 -   **Configuration File:** `.goreleaser.yaml`.
--   **Purpose:** Defines how to build binaries for different platforms (Linux, Windows, macOS) and architectures (amd64, arm64), create archives (`tar.gz`, `zip`), generate checksums, and manage snapshots.
--   **Local Testing:** The `make goreleaser-test` target can be used to test the configuration locally without publishing.
+-   **Purpose:** Automates cross-platform builds and releases.
+-   **Local Testing:** Use `make goreleaser-test`.
