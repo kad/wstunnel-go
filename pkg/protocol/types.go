@@ -102,7 +102,7 @@ func (c *Credentials) UnmarshalJSON(data []byte) error {
 }
 
 type JwtTunnelConfig struct {
-	ID            string        `json:"id"`
+	ID            string        `json:"id,omitempty"`
 	Protocol      LocalProtocol `json:"p"`
 	Remote        string        `json:"r"`
 	Port          uint16        `json:"rp"`

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,8 @@ import (
 	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 type Config struct {
@@ -68,6 +71,14 @@ func NewServer(config Config) *Server {
 func (s *Server) Start() error {
 	slog.Info("Server starting", "listen_addr", s.Config.ListenAddr)
 
+	bindAddr := s.Config.ListenAddr
+	if strings.Contains(bindAddr, "://") {
+		u, err := url.Parse(bindAddr)
+		if err == nil {
+			bindAddr = u.Host
+		}
+	}
+
 	var lc net.ListenConfig
 	if s.Config.SocketSoMark != 0 {
 		lc.Control = func(network, address string, c syscall.RawConn) error {
@@ -77,12 +88,19 @@ func (s *Server) Start() error {
 		}
 	}
 
-	ln, err := lc.Listen(context.Background(), "tcp", s.Config.ListenAddr)
+	ln, err := lc.Listen(context.Background(), "tcp", bindAddr)
 	if err != nil {
 		return err
 	}
 
-	return http.Serve(ln, s.mux)
+	h2s := &http2.Server{}
+	handler := h2c.NewHandler(s.mux, h2s)
+	srv := &http.Server{
+		Addr:    bindAddr,
+		Handler: handler,
+	}
+
+	return srv.Serve(ln)
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
