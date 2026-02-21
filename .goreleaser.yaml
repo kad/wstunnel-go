@@ -1,0 +1,41 @@
+# .goreleaser.yaml
+# The .goreleaser.yaml file is a configuration file used by Goreleaser to
+# define how to build, package, and release Go projects.
+
+project_name: wstunnel-go
+
+builds:
+  - main: ./cmd/wstunnel-go
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - formats: [tar.gz]
+    # this name template makes the OS and Arch part of the filename.
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+    # use zip for windows archives
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ .Tag }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+# You can add more configuration here, e.g., for Docker images, publishing to GitHub releases, etc.
