@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -108,6 +109,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if tokenStr == "" {
+		// Try Cookie header for HTTP/2
+		tokenStr = r.Header.Get("Cookie")
+	}
+
+	if tokenStr == "" {
 		http.Error(w, "Missing authorization token", http.StatusUnauthorized)
 		return
 	}
@@ -129,6 +135,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Forbidden by restrictions", http.StatusForbidden)
 			return
 		}
+	}
+
+	// If HTTP/2 and not a websocket upgrade, handle as HTTP/2 tunnel
+	isWebsocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
+	if r.ProtoAtLeast(2, 0) && !isWebsocket {
+		s.handleHttp2Connection(w, r, claims)
+		return
 	}
 
 	// Upgrade to WebSocket
@@ -196,4 +209,59 @@ func (s *Server) handleConnection(wsConn *websocket.Conn, claims *protocol.JwtTu
 	}
 
 	slog.Warn("Unsupported protocol", "proto", claims.Protocol)
+}
+
+func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, claims *protocol.JwtTunnelConfig) {
+	w.WriteHeader(http.StatusOK)
+	if f, ok := w.(http.Flusher); ok {
+		f.Flush()
+	}
+
+	slog.Info("Accepted HTTP/2 tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port)
+	rwc := &http2ReadWriteCloser{r.Body, w}
+
+	// Forward Tunnel
+	if claims.Protocol.Tcp != nil || claims.Protocol.Udp != nil || claims.Protocol.Socks5 != nil || claims.Protocol.HttpProxy != nil || claims.Protocol.Unix != nil {
+		var targetAddr string
+		network := "tcp"
+
+		if claims.Protocol.Unix != nil {
+			targetAddr = claims.Protocol.Unix.Path
+			network = "unix"
+		} else {
+			targetAddr = net.JoinHostPort(claims.Remote, fmt.Sprintf("%d", claims.Port))
+			if claims.Protocol.Udp != nil {
+				network = "udp"
+			}
+		}
+
+		conn, err := net.DialTimeout(network, targetAddr, 10*time.Second)
+		if err != nil {
+			slog.Error("Failed to connect to target", "network", network, "target", targetAddr, "err", err)
+			_ = rwc.Close()
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		tunnel.PipeBiDir(conn, rwc)
+		return
+	}
+
+	// Reverse Tunnel
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+		s.rvMgr.HandleClientH2(rwc, claims)
+		return
+	}
+
+	slog.Warn("Unsupported protocol for HTTP/2", "proto", claims.Protocol)
+	_ = rwc.Close()
+}
+
+type http2ReadWriteCloser struct {
+	io.ReadCloser
+	io.Writer
+}
+
+func (h *http2ReadWriteCloser) Close() error {
+	return h.ReadCloser.Close()
 }

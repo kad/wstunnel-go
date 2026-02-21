@@ -34,6 +34,7 @@ type tunnelListener struct {
 
 type waitingConn struct {
 	wsConn *websocket.Conn
+	h2Conn io.ReadWriteCloser
 	done   chan struct{}
 }
 
@@ -44,7 +45,7 @@ func NewReverseTunnelManager(socketSoMark uint32) *ReverseTunnelManager {
 	}
 }
 
-func (m *ReverseTunnelManager) HandleClient(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
+func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelConfig) (*tunnelListener, string, error) {
 	var bindAddr string
 	var isUnix bool
 	var network string
@@ -60,6 +61,7 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *websocket.Conn, claims *prot
 	}
 
 	m.mu.Lock()
+	defer m.mu.Unlock()
 	tl, ok := m.listeners[bindAddr]
 	if !ok {
 		// Start new listener
@@ -74,10 +76,7 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *websocket.Conn, claims *prot
 
 		ln, err := lc.Listen(context.Background(), network, bindAddr)
 		if err != nil {
-			slog.Error("Reverse tunnel: failed to listen", "network", network, "addr", bindAddr, "err", err)
-			m.mu.Unlock()
-			_ = wsConn.Close()
-			return
+			return nil, bindAddr, err
 		}
 		tl = &tunnelListener{
 			addr:     bindAddr,
@@ -90,7 +89,16 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *websocket.Conn, claims *prot
 		m.listeners[bindAddr] = tl
 		go m.runListener(tl)
 	}
-	m.mu.Unlock()
+	return tl, bindAddr, nil
+}
+
+func (m *ReverseTunnelManager) HandleClient(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
+	tl, bindAddr, err := m.getOrCreateListener(claims)
+	if err != nil {
+		slog.Error("Reverse tunnel: failed to listen", "addr", bindAddr, "err", err)
+		_ = wsConn.Close()
+		return
+	}
 
 	wait := &waitingConn{
 		wsConn: wsConn,
@@ -105,6 +113,29 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *websocket.Conn, claims *prot
 		_ = wsConn.Close()
 	}
 }
+
+func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims *protocol.JwtTunnelConfig) {
+	tl, bindAddr, err := m.getOrCreateListener(claims)
+	if err != nil {
+		slog.Error("Reverse tunnel: failed to listen", "addr", bindAddr, "err", err)
+		_ = h2Conn.Close()
+		return
+	}
+
+	wait := &waitingConn{
+		h2Conn: h2Conn,
+		done:   make(chan struct{}),
+	}
+
+	select {
+	case tl.waiting <- wait:
+		slog.Info("Reverse tunnel (H2): client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
+		<-wait.done
+	case <-tl.quit:
+		_ = h2Conn.Close()
+	}
+}
+
 
 func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 	defer func() { _ = tl.ln.Close() }()
@@ -149,7 +180,11 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	defer close(wait.done)
 
 	slog.Info("Reverse tunnel: forwarding connection to client", "addr", tl.addr, "target_host", targetHost, "target_port", targetPort)
-	tunnel.Pipe(conn, wait.wsConn)
+	if wait.wsConn != nil {
+		tunnel.Pipe(conn, wait.wsConn)
+	} else {
+		tunnel.PipeBiDir(conn, wait.h2Conn)
+	}
 }
 
 func (m *ReverseTunnelManager) handleSocks5Handshake(conn net.Conn) (string, uint16, error) {

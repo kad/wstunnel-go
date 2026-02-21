@@ -3,6 +3,7 @@ package client
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
+	"golang.org/x/net/http2"
 )
 
 type Config struct {
@@ -48,7 +50,13 @@ type Config struct {
 	DnsResolverPreferIpv4                  bool              `yaml:"dns_resolver_prefer_ipv4"`
 	LocalToRemote                          []string          `yaml:"local_to_remote"`
 	RemoteToLocal                          []string          `yaml:"remote_to_local"`
+	Transport                              string            `yaml:"transport"`
 }
+
+const (
+	TransportWebsocket = "websocket"
+	TransportHttp2     = "http2"
+)
 
 type Client struct {
 	Config Config
@@ -151,6 +159,118 @@ func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, 
 	}
 
 	return conn, resp, nil
+}
+
+func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (io.ReadWriteCloser, *http.Response, error) {
+	requestID := uuid.New().String()
+	token, err := c.generateJWT(requestID, p, remoteHost, remotePort)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate JWT: %w", err)
+	}
+
+	u, err := url.Parse(c.Config.ServerURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid server url: %w", err)
+	}
+	switch u.Scheme {
+	case "ws":
+		u.Scheme = "http"
+	case "wss":
+		u.Scheme = "https"
+	}
+	u.Path = fmt.Sprintf("/%s/events", c.Config.PathPrefix)
+
+	pr, pw := io.Pipe()
+	req, err := http.NewRequest("POST", u.String(), pr)
+	if err != nil {
+		_ = pw.Close()
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Cookie", token)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Add custom headers from CLI
+	for k, v := range c.Config.Headers {
+		req.Header.Set(k, v)
+	}
+	// Add custom headers from file (overrides CLI)
+	fileHeaders := c.loadHttpHeaders()
+	for k, v := range fileHeaders {
+		req.Header.Set(k, v)
+	}
+
+	// Add basic auth if configured
+	if c.Config.HttpUpgradeCredentials != "" {
+		req.Header.Set("Authorization", c.Config.HttpUpgradeCredentials)
+	}
+
+	tr := &http2.Transport{
+		AllowHTTP: true,
+		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+			return c.dialTransport(ctx)
+		},
+	}
+	httpClient := &http.Client{Transport: tr}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		_ = pw.Close()
+		return nil, nil, fmt.Errorf("failed to send request: %w", err)
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		_ = pw.Close()
+		_ = resp.Body.Close()
+		return nil, resp, fmt.Errorf("server rejected request: %s", resp.Status)
+	}
+
+	return &tunnelReadWriteCloser{
+		ReadCloser: resp.Body,
+		Writer:     pw,
+	}, resp, nil
+}
+
+type tunnelReadWriteCloser struct {
+	io.ReadCloser
+	io.Writer
+}
+
+func (t *tunnelReadWriteCloser) Close() error {
+	e1 := t.ReadCloser.Close()
+	var e2 error
+	if closer, ok := t.Writer.(io.Closer); ok {
+		e2 = closer.Close()
+	}
+	if e1 != nil {
+		return e1
+	}
+	return e2
+}
+
+type tunnelStream struct {
+	ws  *websocket.Conn
+	h2  io.ReadWriteCloser
+	r   *http.Response
+	err error
+}
+
+func (ts *tunnelStream) Close() {
+	if ts.ws != nil {
+		_ = ts.ws.Close()
+	}
+	if ts.h2 != nil {
+		_ = ts.h2.Close()
+	}
+}
+
+func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string, remotePort uint16) *tunnelStream {
+	if c.Config.Transport == TransportHttp2 {
+		h2, resp, err := c.connectToHttp2(p, remoteHost, remotePort)
+		return &tunnelStream{h2: h2, r: resp, err: err}
+	}
+	ws, resp, err := c.connectToWstunnel(p, remoteHost, remotePort)
+	return &tunnelStream{ws: ws, r: resp, err: err}
 }
 
 func (c *Client) StartTunnel(ltr *protocol.LocalToRemote) {
@@ -271,18 +391,21 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 
 			// For forward SOCKS5, the server just needs to open a TCP connection to the target
 			tcpProto := protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{ProxyProtocol: false}}
-			wsConn, _, err := c.connectToWstunnel(tcpProto, targetHost, targetPort)
-			if err != nil {
-				slog.Error("Failed to connect to wstunnel for SOCKS5", "err", err)
+			ts := c.connectToTransport(tcpProto, targetHost, targetPort)
+			if ts.err != nil {
+				slog.Error("Failed to connect to transport for SOCKS5", "err", ts.err)
 				return
 			}
-			defer func() { _ = wsConn.Close() }()
+			defer ts.Close()
 
-			wsConn.SetPingHandler(func(appData string) error {
-				return wsConn.WriteMessage(websocket.PongMessage, []byte(appData))
-			})
-
-			tunnel.Pipe(c_net, wsConn)
+			if ts.ws != nil {
+				ts.ws.SetPingHandler(func(appData string) error {
+					return ts.ws.WriteMessage(websocket.PongMessage, []byte(appData))
+				})
+				tunnel.Pipe(c_net, ts.ws)
+			} else {
+				tunnel.PipeBiDir(c_net, ts.h2)
+			}
 		}(conn)
 	}
 }
@@ -341,18 +464,21 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 
 	// For HTTP Proxy, we tunnel TCP to target
 	tcpProto := protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{ProxyProtocol: false}}
-	wsConn, _, err := c.connectToWstunnel(tcpProto, targetHost, uint16(targetPort))
-	if err != nil {
-		slog.Error("Failed to connect to wstunnel for HTTP Proxy", "err", err)
+	ts := c.connectToTransport(tcpProto, targetHost, uint16(targetPort))
+	if ts.err != nil {
+		slog.Error("Failed to connect to transport for HTTP Proxy", "err", ts.err)
 		return
 	}
-	defer func() { _ = wsConn.Close() }()
+	defer ts.Close()
 
-	wsConn.SetPingHandler(func(appData string) error {
-		return wsConn.WriteMessage(websocket.PongMessage, []byte(appData))
-	})
-
-	tunnel.Pipe(conn, wsConn)
+	if ts.ws != nil {
+		ts.ws.SetPingHandler(func(appData string) error {
+			return ts.ws.WriteMessage(websocket.PongMessage, []byte(appData))
+		})
+		tunnel.Pipe(conn, ts.ws)
+	} else {
+		tunnel.PipeBiDir(conn, ts.h2)
+	}
 }
 
 func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
@@ -360,9 +486,9 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 	delay := 1 * time.Second
 
 	for {
-		wsConn, resp, err := c.connectToWstunnel(ltr.Protocol, ltr.Remote, ltr.Port)
-		if err != nil {
-			slog.Error("Reverse tunnel: failed to connect to server", "err", err, "retry_in", delay)
+		ts := c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
+		if ts.err != nil {
+			slog.Error("Reverse tunnel: failed to connect to transport", "err", ts.err, "retry_in", delay)
 			time.Sleep(delay)
 			delay *= 2
 			if delay > maxDelay {
@@ -377,8 +503,8 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 		targetPort := ltr.Port
 		targetProto := ltr.Protocol
 
-		cookieStr := resp.Header.Get("Set-Cookie")
-		if cookieStr != "" {
+		if ts.r.Header.Get("Set-Cookie") != "" {
+			cookieStr := ts.r.Header.Get("Set-Cookie")
 			claims := &protocol.JwtTunnelConfig{}
 			_, _, err := jwt.NewParser().ParseUnverified(cookieStr, claims)
 			if err == nil && claims.Remote != "" {
@@ -389,6 +515,7 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 		}
 
 		var localConn net.Conn
+		var err error
 		if targetProto.Unix != nil || targetProto.ReverseUnix != nil {
 			path := ""
 			if targetProto.Unix != nil {
@@ -403,15 +530,19 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 
 		if err != nil {
 			slog.Error("Reverse tunnel: failed to connect to local destination", "host", targetHost, "port", targetPort, "err", err)
-			_ = wsConn.Close()
+			ts.Close()
 			time.Sleep(1 * time.Second)
 			continue
 		}
 
 		slog.Info("Reverse tunnel established", "target_host", targetHost, "target_port", targetPort)
-		tunnel.Pipe(localConn, wsConn)
+		if ts.ws != nil {
+			tunnel.Pipe(localConn, ts.ws)
+		} else {
+			tunnel.PipeBiDir(localConn, ts.h2)
+		}
 		_ = localConn.Close()
-		_ = wsConn.Close()
+		ts.Close()
 		slog.Info("Reverse tunnel closed")
 	}
 }
@@ -435,18 +566,21 @@ func (c *Client) runTcpTunnel(ltr *protocol.LocalToRemote) {
 
 		go func(c_net net.Conn) {
 			defer func() { _ = c_net.Close() }()
-			wsConn, _, err := c.connectToWstunnel(ltr.Protocol, ltr.Remote, ltr.Port)
-			if err != nil {
-				slog.Error("Failed to connect to wstunnel", "err", err)
+			ts := c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
+			if ts.err != nil {
+				slog.Error("Failed to connect to transport", "err", ts.err)
 				return
 			}
-			defer func() { _ = wsConn.Close() }()
+			defer ts.Close()
 
-			wsConn.SetPingHandler(func(appData string) error {
-				return wsConn.WriteMessage(websocket.PongMessage, []byte(appData))
-			})
-
-			tunnel.Pipe(c_net, wsConn)
+			if ts.ws != nil {
+				ts.ws.SetPingHandler(func(appData string) error {
+					return ts.ws.WriteMessage(websocket.PongMessage, []byte(appData))
+				})
+				tunnel.Pipe(c_net, ts.ws)
+			} else {
+				tunnel.PipeBiDir(c_net, ts.h2)
+			}
 		}(conn)
 	}
 }
@@ -467,7 +601,7 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 
 	slog.Info("UDP Listener started", "local", ltr.Local, "remote", ltr.Remote, "port", ltr.Port)
 
-	clients := make(map[string]*websocket.Conn)
+	clients := make(map[string]*tunnelStream)
 	var mu sync.Mutex
 
 	buf := make([]byte, 64*1024)
@@ -479,88 +613,111 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 		}
 
 		mu.Lock()
-		ws, ok := clients[srcAddr.String()]
+		ts, ok := clients[srcAddr.String()]
 		if !ok {
-			var err error
-			ws, _, err = c.connectToWstunnel(ltr.Protocol, ltr.Remote, ltr.Port)
-			if err != nil {
-				slog.Error("Failed to connect to wstunnel for UDP", "err", err)
+			ts = c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
+			if ts.err != nil {
+				slog.Error("Failed to connect to transport for UDP", "err", ts.err)
 				mu.Unlock()
 				continue
 			}
-			clients[srcAddr.String()] = ws
+			clients[srcAddr.String()] = ts
 
-			go func(wsConn *websocket.Conn, dest *net.UDPAddr) {
+			go func(ts *tunnelStream, dest *net.UDPAddr) {
 				defer func() {
 					mu.Lock()
 					delete(clients, dest.String())
 					mu.Unlock()
-					_ = wsConn.Close()
+					ts.Close()
 				}()
-				for {
-					messageType, p, err := wsConn.ReadMessage()
-					if err != nil {
-						return
+
+				if ts.ws != nil {
+					for {
+						messageType, p, err := ts.ws.ReadMessage()
+						if err != nil {
+							return
+						}
+						if messageType == websocket.BinaryMessage {
+							_, _ = conn.WriteToUDP(p, dest)
+						}
 					}
-					if messageType == websocket.BinaryMessage {
-						_, _ = conn.WriteToUDP(p, dest)
+				} else {
+					buf := make([]byte, 64*1024)
+					for {
+						n, err := ts.h2.Read(buf)
+						if n > 0 {
+							_, _ = conn.WriteToUDP(buf[:n], dest)
+						}
+						if err != nil {
+							return
+						}
 					}
 				}
-			}(ws, srcAddr)
+			}(ts, srcAddr)
 		}
 		mu.Unlock()
 
-		err = ws.WriteMessage(websocket.BinaryMessage, buf[:n])
+		if ts.ws != nil {
+			err = ts.ws.WriteMessage(websocket.BinaryMessage, buf[:n])
+		} else {
+			_, err = ts.h2.Write(buf[:n])
+		}
+
 		if err != nil {
-			slog.Error("Failed to write to WS for UDP", "err", err)
+			slog.Error("Failed to write to transport for UDP", "err", err)
 			mu.Lock()
 			delete(clients, srcAddr.String())
 			mu.Unlock()
-			_ = ws.Close()
+			ts.Close()
 		}
 	}
 }
 
 func (c *Client) runStdioTunnel(ltr *protocol.LocalToRemote) {
-	wsConn, _, err := c.connectToWstunnel(ltr.Protocol, ltr.Remote, ltr.Port)
-	if err != nil {
-		slog.Error("Failed to connect to wstunnel for Stdio", "err", err)
+	ts := c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
+	if ts.err != nil {
+		slog.Error("Failed to connect to transport for Stdio", "err", ts.err)
 		return
 	}
-	defer func() { _ = wsConn.Close() }()
+	defer ts.Close()
 
-	var wg sync.WaitGroup
-	wg.Add(2)
+	if ts.ws != nil {
+		var wg sync.WaitGroup
+		wg.Add(2)
 
-	go func() {
-		defer wg.Done()
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := os.Stdin.Read(buf)
-			if n > 0 {
-				err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 32*1024)
+			for {
+				n, err := os.Stdin.Read(buf)
+				if n > 0 {
+					err = ts.ws.WriteMessage(websocket.BinaryMessage, buf[:n])
+					if err != nil {
+						return
+					}
+				}
 				if err != nil {
 					return
 				}
 			}
-			if err != nil {
-				return
-			}
-		}
-	}()
+		}()
 
-	go func() {
-		defer wg.Done()
-		for {
-			messageType, p, err := wsConn.ReadMessage()
-			if err != nil {
-				return
+		go func() {
+			defer wg.Done()
+			for {
+				messageType, p, err := ts.ws.ReadMessage()
+				if err != nil {
+					return
+				}
+				if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
+					_, _ = os.Stdout.Write(p)
+				}
 			}
-			if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
-				_, _ = os.Stdout.Write(p)
-			}
-		}
-	}()
+		}()
 
-	wg.Wait()
+		wg.Wait()
+	} else {
+		// HTTP/2 is already a ReadWriteCloser
+		tunnel.PipeBiDir(os.Stdin, ts.h2)
+	}
 }

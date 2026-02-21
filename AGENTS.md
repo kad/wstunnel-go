@@ -69,7 +69,23 @@ The project utilizes GitHub Actions for Continuous Integration and Continuous De
     -   `release`: Uses `goreleaser/goreleaser-action@v6` to build and publish releases to GitHub.
 -   **Go Version:** Uses Go `1.25`.
 
-## 8. Goreleaser Configuration
+## 8. Transports
+
+The project supports multiple transport protocols for tunneling:
+
+-   **WebSocket:** (Default) Standard WebSocket-based transport. Uses `Sec-WebSocket-Protocol` header for JWT authentication.
+-   **HTTP/2:** Provides full-duplex streaming over HTTP/2 POST requests. Uses `Cookie` header for JWT authentication.
+
+### Client Configuration
+Use the `--transport` (or `-t`) flag to specify the transport:
+```bash
+wstunnel-go client -t http2 ...
+```
+
+### Server Configuration
+The server automatically detects the transport and protocol version. No specific configuration is needed to enable HTTP/2 support, provided the underlying connection supports it (e.g., via ALPN in TLS).
+
+## 9. Goreleaser Configuration
 
 The project uses `goreleaser` for automated releases.
 -   **Configuration File:** `.goreleaser.yaml`.

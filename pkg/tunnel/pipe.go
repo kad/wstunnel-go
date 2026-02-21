@@ -17,7 +17,9 @@ func Pipe(tcpConn net.Conn, wsConn *websocket.Conn) {
 	// TCP -> WebSocket
 	go func() {
 		defer wg.Done()
-		defer func() { _ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")) }()
+		defer func() {
+			_ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		}()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := tcpConn.Read(buf)
@@ -62,7 +64,9 @@ func PipeRW(rw io.ReadWriteCloser, wsConn *websocket.Conn) {
 	// RW -> WebSocket
 	go func() {
 		defer wg.Done()
-		defer func() { _ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")) }()
+		defer func() {
+			_ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		}()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := rw.Read(buf)
@@ -94,6 +98,30 @@ func PipeRW(rw io.ReadWriteCloser, wsConn *websocket.Conn) {
 				}
 			}
 		}
+	}()
+
+	wg.Wait()
+}
+
+// PipeBiDir pipes data between two ReadWriteCloser objects.
+func PipeBiDir(rwc1, rwc2 io.ReadWriteCloser) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// rwc1 -> rwc2
+	go func() {
+		defer wg.Done()
+		defer func() { _ = rwc1.Close() }()
+		defer func() { _ = rwc2.Close() }()
+		_, _ = io.Copy(rwc2, rwc1)
+	}()
+
+	// rwc2 -> rwc1
+	go func() {
+		defer wg.Done()
+		defer func() { _ = rwc1.Close() }()
+		defer func() { _ = rwc2.Close() }()
+		_, _ = io.Copy(rwc1, rwc2)
 	}()
 
 	wg.Wait()

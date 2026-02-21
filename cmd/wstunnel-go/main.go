@@ -183,6 +183,13 @@ func main() {
 						Usage:   "Prioritize IPv4 for DNS lookup",
 						EnvVars: []string{"WSTUNNEL_DNS_PREFER_IPV4"},
 					},
+					&cli.StringFlag{
+						Name:    "transport",
+						Aliases: []string{"t"},
+						Value:   "websocket",
+						Usage:   "Transport protocol to use for server connection (websocket, http2)",
+						EnvVars: []string{"WSTUNNEL_TRANSPORT"},
+					},
 				},
 				Action: runClient,
 			},
@@ -356,6 +363,7 @@ func runClient(c *cli.Context) error {
 		DnsResolverPreferIpv4:                  c.Bool("dns-resolver-prefer-ipv4"),
 		LocalToRemote:                          c.StringSlice("local-to-remote"),
 		RemoteToLocal:                          c.StringSlice("remote-to-local"),
+		Transport:                              c.String("transport"),
 	}
 
 	// Override from config file if provided
