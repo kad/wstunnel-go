@@ -48,6 +48,9 @@ func (c *Conn) Subprotocol() string {
 }
 
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
+	c.muw.Lock()
+	defer c.muw.Unlock()
+
 	// Frame format:
 	// 0: FIN(1) | RSV(0) | Opcode(4)
 	// 1: MASK(1) | Len(7)
@@ -109,6 +112,9 @@ func (c *Conn) WriteMessage(messageType int, data []byte) error {
 }
 
 func (c *Conn) ReadMessage() (int, []byte, error) {
+	c.mur.Lock()
+	defer c.mur.Unlock()
+
 	for {
 		// Read header
 		b0, err := c.bufr.ReadByte()
@@ -163,7 +169,10 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 
 		if opcode == PingMessage {
 			// Auto-reply pong?
-			if err := c.WriteMessage(PongMessage, payload); err != nil {
+			c.mur.Unlock()
+			err := c.WriteMessage(PongMessage, payload)
+			c.mur.Lock()
+			if err != nil {
 				return 0, nil, err
 			}
 			continue
