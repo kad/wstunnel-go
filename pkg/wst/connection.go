@@ -3,6 +3,7 @@ package wst
 import (
 	"bufio"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -155,7 +156,10 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 		}
 
 		// Read payload
-		payload := make([]byte, length)
+		if length < 0 || length > 1024*1024*10 { // Max 10MB to prevent OOM
+			return 0, nil, fmt.Errorf("payload length %d is out of bounds", length)
+		}
+		payload := make([]byte, int(length))
 		if _, err := io.ReadFull(c.bufr, payload); err != nil {
 			return 0, nil, err
 		}

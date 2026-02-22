@@ -191,8 +191,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Selection of subprotocol (simplified)
-	if strings.Contains(r.Header.Get("Sec-WebSocket-Protocol"), "v1") {
-		upgrader.Subprotocols = []string{"v1"}
+	for _, subprotocol := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+		if strings.TrimSpace(subprotocol) == "v1" {
+			upgrader.Subprotocols = []string{"v1"}
+			break
+		}
 	}
 
 	wsConn, err := upgrader.Upgrade(w, r, nil)
