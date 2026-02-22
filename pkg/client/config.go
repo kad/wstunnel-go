@@ -124,11 +124,13 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 	curr := ""
 	inBrackets := false
 	for _, r := range info {
-		if r == '[' {
+		switch r {
+		case '[':
 			inBrackets = true
-		} else if r == ']' {
+		case ']':
 			inBrackets = false
 		}
+
 		if r == ':' && !inBrackets {
 			parts_info = append(parts_info, curr)
 			curr = ""

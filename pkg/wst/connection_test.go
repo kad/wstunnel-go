@@ -9,8 +9,8 @@ import (
 func TestConn_ReadWriteMessage(t *testing.T) {
 	// Use net.Pipe to test real-ish connection
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	c := NewConn(client, true)  // Client masks
 	s := NewConn(server, false) // Server doesn't mask
@@ -72,8 +72,8 @@ func TestConn_ReadWriteMessage(t *testing.T) {
 
 func TestConn_LargeMessage(t *testing.T) {
 	client, server := net.Pipe()
-	defer client.Close()
-	defer server.Close()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
 
 	c := NewConn(client, false)
 	s := NewConn(server, false)
