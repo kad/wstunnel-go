@@ -2,48 +2,102 @@
 
 A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstunnel), designed for high performance, ease of use, and library integration.
 
-## Description
+`wstunnel-go` allows you to tunnel any traffic through a WebSocket or HTTP/2 connection, effectively bypassing restrictive firewalls and proxies that only allow HTTP/HTTPS traffic.
 
-`wstunnel-go` allows you to tunnel any traffic through a WebSocket connection, effectively bypassing restrictive firewalls and proxies that only allow HTTP/HTTPS traffic.
+## Features
 
-This version is a complete port of the original Rust implementation, maintaining full protocol compatibility and CLI parity while offering Go-specific benefits like a modular library design and structured logging with `slog`.
+- **Protocol Support**: TCP, UDP, SOCKS5 (with auth), HTTP Proxy (CONNECT, with auth), Unix domain sockets, and Stdio.
+- **TProxy Support**: Transparent proxying for TCP and UDP on Linux.
+- **Reverse Tunneling**: Support for both static and dynamic reverse tunnels.
+- **Transports**: Secure WebSocket (default) or full-duplex streaming over HTTP/2.
+- **Security**: 
+  - TLS (wss://) with certificate verification.
+  - mTLS with client certificates.
+  - ECH (Encrypted Client Hello) and SNI (Server Name Indication) override/disable.
+  - JWT-based authentication (fully compatible with Rust version).
+  - YAML-based restriction rules for server-side control.
+- **Modern Architecture**:
+  - Fully multi-threaded using Go's efficient goroutines.
+  - Structured logging with `log/slog`.
+  - Modular library design for easy integration into other Go projects.
+  - Proxy Protocol support for preserving client IP through proxies.
+- **Interoperability**: Maintains full protocol compatibility and CLI parity with the original Rust implementation.
 
-### What to expect:
-*   **Protocol Interoperability**: Fully compatible with the original Rust `wstunnel` server and client.
-*   **Modular Library**: Can be used as a standalone CLI or integrated into your own Go applications as a library.
-*   **High Performance**: Multi-threaded and optimized for low-latency data transfer.
-*   **Rich Features**: Supports TCP, UDP, SOCKS5, HTTP Proxy, Stdio, and Unix sockets.
-*   **Reverse Tunneling**: Support for both static and dynamic reverse tunnels.
-*   **Security**: Supports TLS (wss://), mTLS with client certificates, and YAML-based restriction rules.
-*   **Modern Logging**: Uses `log/slog` for structured, level-based logging.
+## Installation
 
-## Command Line Usage
+### Prerequisites
+
+- **Go version 1.25** or above.
+- `make` (optional, for convenient building).
+
+### Build from Source
+
+```bash
+git clone https://github.com/kad/wstunnel-go.git
+cd wstunnel-go
+make build
+# Binary will be available in ./bin/wstunnel-go
+```
+
+Alternatively, using standard Go commands:
+
+```bash
+go build -o wstunnel-go ./cmd/wstunnel-go
+```
+
+## Usage
+
+### Client Mode
 
 `wstunnel-go` provides a CLI that mirrors the original tool's arguments.
 
-### Client Mode
 ```bash
-wstunnel-go client [OPTIONS] <ws[s]://wstunnel.server.com[:port]>
-
-# Example: Forward local SOCKS5 to remote server
+# Forward local SOCKS5 to remote server
 wstunnel-go client -L socks5://127.0.0.1:1080 wss://my-server.com
 
-# Example: Forward local port to remote destination
+# Forward local port to remote destination
 wstunnel-go client -L tcp://8080:google.com:443 wss://my-server.com
+
+# Use HTTP/2 transport
+wstunnel-go client -L tcp://8080:google.com:443 https://my-server.com
 ```
 
 ### Server Mode
+
 ```bash
-wstunnel-go server [OPTIONS] [ws[s]://0.0.0.0[:port]]
+# Start a basic server listening on port 8080
+wstunnel-go server ws://0.0.0.0:8080
 
-# Example: Start a basic server
-wstunnel-go server --listen 0.0.0.0:8080
-
-# Example: Start server with mTLS and restrictions
+# Start server with mTLS and restriction rules
 wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-client-ca-certs ca.pem --restrict-config rules.yaml
 ```
 
-## Library Usage
+## Configuration
+
+`wstunnel-go` can be configured via command-line flags, environment variables, or a YAML configuration file.
+
+### YAML Configuration Example
+
+```yaml
+mode: client # or server
+log_lvl: INFO
+no_color: false
+client:
+  remote_addr: wss://my-server.com
+  local_to_remote:
+    - "tcp://8080:google.com:443"
+    - "socks5://127.0.0.1:1080"
+server:
+  remote_addr: ws://0.0.0.0:8080
+  restrict_config: /etc/wstunnel/rules.yaml
+```
+
+Run with config file:
+```bash
+wstunnel-go --config my-config.yaml
+```
+
+## API Reference (Library Usage)
 
 You can use `wstunnel-go` as a library in your own project:
 
@@ -56,6 +110,7 @@ import (
 func main() {
     config := client.Config{
         ServerURL: "wss://my-server.com",
+        Transport: "websocket",
         // ... other config
     }
     c := client.NewClient(config)
@@ -67,23 +122,14 @@ func main() {
         },
     }
     
-    c.StartTunnel(ltr)
+    go c.StartTunnel(ltr)
+    select {}
 }
-```
-
-## How to Build
-
-Ensure you have Go 1.21+ installed.
-
-```bash
-cd wstunnel-go
-go build ./cmd/wstunnel-go
-./wstunnel-go --help
 ```
 
 ## Status & Interoperability
 
-| Feature | Status | Interop |
+| Feature | Status | Interop (Rust) |
 | :--- | :---: | :---: |
 | TCP Forward/Reverse | ✅ | ✅ |
 | UDP Forward/Reverse | ✅ | ✅ |
@@ -94,10 +140,22 @@ go build ./cmd/wstunnel-go
 | Stdio Tunneling | ✅ | ✅ |
 | YAML Restrictions | ✅ | ✅ |
 | mTLS | ✅ | ✅ |
-| HTTP/2 Transport | ❌ | - |
+| HTTP/2 Transport | ✅ | ✅ |
+| TProxy (Linux) | ✅ | ✅ |
 
 ⚠️ *Note: Reverse SOCKS5 is functional but uses a simplified handshake compared to the Rust version.*
 
+### Performance Metrics
+
+*Benchmarks are currently being finalized and will be published here once complete.*
+
+## Contributing
+
+Contributions are welcome! Please ensure you follow the project's coding standards:
+1.  Run `make fmt` to format code.
+2.  Run `make lint` and `make vet` for static analysis.
+3.  Ensure all tests pass with `make test`.
+
 ## License
 
-Same as the original project. See [LICENSE](../LICENSE).
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
