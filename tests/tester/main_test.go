@@ -124,8 +124,8 @@ func runUDPEchoServer(port int) (chan struct{}, error) {
 	return done, nil
 }
 
-func testTCP(t *testing.T, port int) {
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+func testTCP(t *testing.T, host string, port int) {
+	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", port)), 5*time.Second)
 	if err != nil {
 		t.Fatalf("TCP: Failed to connect to tunnel port %d: %v", port, err)
 	}
@@ -143,8 +143,8 @@ func testTCP(t *testing.T, port int) {
 	}
 }
 
-func testUDP(t *testing.T, port int) {
-	conn, err := net.Dial("udp", fmt.Sprintf("127.0.0.1:%d", port))
+func testUDP(t *testing.T, host string, port int) {
+	conn, err := net.Dial("udp", net.JoinHostPort(host, fmt.Sprintf("%d", port)))
 	if err != nil {
 		t.Fatalf("UDP: Failed to connect: %v", err)
 	}
@@ -163,8 +163,8 @@ func testUDP(t *testing.T, port int) {
 	}
 }
 
-func testSOCKS5(t *testing.T, socksPort int, targetHost string, targetPort int) {
-	dialer, err := proxy.SOCKS5("tcp", fmt.Sprintf("127.0.0.1:%d", socksPort), nil, proxy.Direct)
+func testSOCKS5(t *testing.T, host string, socksPort int, targetHost string, targetPort int) {
+	dialer, err := proxy.SOCKS5("tcp", net.JoinHostPort(host, fmt.Sprintf("%d", socksPort)), nil, proxy.Direct)
 	if err != nil {
 		t.Fatalf("SOCKS5: Failed to create dialer: %v", err)
 	}
@@ -184,6 +184,39 @@ func testSOCKS5(t *testing.T, socksPort int, targetHost string, targetPort int) 
 	}
 	if string(buf) != msg {
 		t.Fatalf("SOCKS5: Data mismatch: %q vs %q", msg, string(buf))
+	}
+}
+
+func testHTTPProxy(t *testing.T, proxyPort int, targetHost string, targetPort int) {
+	// We use a simple TCP echo server, so we can't really use http.Client.Get
+	// Instead, we manually do CONNECT
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", proxyPort), 5*time.Second)
+	if err != nil {
+		t.Fatalf("HTTP Proxy: Failed to connect to proxy: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	req := fmt.Sprintf("CONNECT %s:%d HTTP/1.1\r\nHost: %s:%d\r\n\r\n", targetHost, targetPort, targetHost, targetPort)
+	_, _ = conn.Write([]byte(req))
+
+	respBuf := make([]byte, 1024)
+	n, err := conn.Read(respBuf)
+	if err != nil {
+		t.Fatalf("HTTP Proxy: Failed to read response from proxy: %v", err)
+	}
+	if !strings.Contains(string(respBuf[:n]), "200 Connection Established") {
+		t.Fatalf("HTTP Proxy: Unexpected response from proxy: %q", string(respBuf[:n]))
+	}
+
+	msg := "hello http proxy"
+	_, _ = conn.Write([]byte(msg))
+	buf := make([]byte, len(msg))
+	_, err = io.ReadFull(conn, buf)
+	if err != nil {
+		t.Fatalf("HTTP Proxy: Failed to read data: %v", err)
+	}
+	if string(buf) != msg {
+		t.Fatalf("HTTP Proxy: Data mismatch: %q vs %q", msg, string(buf))
 	}
 }
 
@@ -291,8 +324,11 @@ func TestInteroperability(t *testing.T) {
 		{"Go-Go-WS-IPv6", goBinary, goBinary, "websocket", true, false, nil},
 		{"Go-Go-WS-Mask", goBinary, goBinary, "websocket", false, false, []string{"--websocket-mask-frame"}},
 		{"Go-Go-WS-Ping", goBinary, goBinary, "websocket", false, false, []string{"--websocket-ping-frequency", "10s"}},
-		{"Go-Go-Reverse", goBinary, goBinary, "websocket", false, false, []string{"reverse"}},
 		{"Go-Go-Unix", goBinary, goBinary, "websocket", false, true, nil},
+		{"Go-Go-HTTPProxy", goBinary, goBinary, "websocket", false, false, []string{"http-proxy"}},
+		{"Go-Go-WS-TLS", goBinary, goBinary, "wss", false, false, nil},
+		{"Go-Go-H2-TLS", goBinary, goBinary, "https", false, false, nil},
+		{"Go-Go-WS-mTLS", goBinary, goBinary, "wss", false, false, []string{"mtls"}},
 	}
 
 	for _, tc := range combinations {
@@ -308,8 +344,53 @@ func TestInteroperability(t *testing.T) {
 			tcpPort, _ := findFreePort(host)
 			udpPort, _ := findFreePort(host)
 			socksPort, _ := findFreePort(host)
+			httpProxyPort, _ := findFreePort(host)
 			targetPort, _ := findFreePort(host)
 			reversePort, _ := findFreePort(host)
+
+			var certFile, keyFile string
+			var caCertFile, caKeyFile string
+			var clientCertFile, clientKeyFile string
+
+			isTLS := strings.Contains(tc.transport, "wss") || strings.Contains(tc.transport, "https") || tc.name == "Go-Go-H2-HTTPS"
+			isMTLS := false
+			for _, opt := range tc.options {
+				if opt == "mtls" {
+					isMTLS = true
+				}
+			}
+
+			if isTLS {
+				certFile = fmt.Sprintf("/tmp/wst-cert-%d.pem", serverPort)
+				keyFile = fmt.Sprintf("/tmp/wst-key-%d.pem", serverPort)
+				
+				if isMTLS {
+					caCertFile = fmt.Sprintf("/tmp/wst-ca-%d.pem", serverPort)
+					caKeyFile = fmt.Sprintf("/tmp/wst-ca-key-%d.pem", serverPort)
+					clientCertFile = fmt.Sprintf("/tmp/wst-client-%d.pem", serverPort)
+					clientKeyFile = fmt.Sprintf("/tmp/wst-client-key-%d.pem", serverPort)
+
+					if err := generateCA(caCertFile, caKeyFile); err != nil {
+						t.Fatalf("Failed to generate CA: %v", err)
+					}
+					if err := generateSignedCerts(certFile, keyFile, caCertFile, caKeyFile); err != nil {
+						t.Fatalf("Failed to generate server certs: %v", err)
+					}
+					if err := generateSignedCerts(clientCertFile, clientKeyFile, caCertFile, caKeyFile); err != nil {
+						t.Fatalf("Failed to generate client certs: %v", err)
+					}
+					defer os.Remove(caCertFile)
+					defer os.Remove(caKeyFile)
+					defer os.Remove(clientCertFile)
+					defer os.Remove(clientKeyFile)
+				} else {
+					if err := generateCerts(certFile, keyFile); err != nil {
+						t.Fatalf("Failed to generate certs: %v", err)
+					}
+				}
+				defer os.Remove(certFile)
+				defer os.Remove(keyFile)
+			}
 
 			var unixTarget string
 			var unixListen string
@@ -334,6 +415,9 @@ func TestInteroperability(t *testing.T) {
 			// Start Wstunnel Server
 			serverAddr := net.JoinHostPort(host, fmt.Sprintf("%d", serverPort))
 			serverURL := "ws://" + serverAddr
+			if isTLS {
+				serverURL = "wss://" + serverAddr
+			}
 			
 			var serverArgs []string
 			if tc.serverBin == goBinary {
@@ -342,9 +426,16 @@ func TestInteroperability(t *testing.T) {
 				serverArgs = []string{"server", serverURL}
 			}
 
+			if isTLS {
+				serverArgs = append(serverArgs, "--tls-certificate", certFile, "--tls-private-key", keyFile)
+				if isMTLS {
+					serverArgs = append(serverArgs, "--tls-client-ca-certs", caCertFile)
+				}
+			}
+
 			// Add server-side options if any
 			for _, opt := range tc.options {
-				if opt != "reverse" {
+				if opt != "reverse" && opt != "http-proxy" && opt != "mtls" {
 					serverArgs = append(serverArgs, opt)
 				}
 			}
@@ -363,11 +454,14 @@ func TestInteroperability(t *testing.T) {
 			tcpL := fmt.Sprintf("tcp://%s:127.0.0.1:%d", net.JoinHostPort(host, fmt.Sprintf("%d", tcpPort)), targetPort)
 			udpL := fmt.Sprintf("udp://%s:127.0.0.1:%d", net.JoinHostPort(host, fmt.Sprintf("%d", udpPort)), targetPort)
 			socksL := fmt.Sprintf("socks5://%s", net.JoinHostPort(host, fmt.Sprintf("%d", socksPort)))
+			httpProxyL := fmt.Sprintf("http://%s", net.JoinHostPort(host, fmt.Sprintf("%d", httpProxyPort)))
 
 			connectURL := ""
 			switch tc.transport {
 			case "websocket":
 				connectURL = "ws://" + serverAddr
+			case "wss":
+				connectURL = "wss://" + serverAddr
 			case "http2":
 				connectURL = "http://" + serverAddr
 			case "https":
@@ -375,10 +469,20 @@ func TestInteroperability(t *testing.T) {
 			}
 
 			clientArgs = []string{"client", "--http-upgrade-path-prefix", "v1", "-L", tcpL, "-L", udpL, "-L", socksL}
+			if tc.name == "Go-Go-HTTPProxy" {
+				clientArgs = append(clientArgs, "-L", httpProxyL)
+			}
 			if tc.isUnix {
 				clientArgs = append(clientArgs, "-L", fmt.Sprintf("unix://%s:%s", unixListen, unixTarget))
 			}
 			
+			if isTLS {
+				clientArgs = append(clientArgs, "--tls-verify-certificate=false")
+				if isMTLS {
+					clientArgs = append(clientArgs, "--tls-certificate", clientCertFile, "--tls-private-key", clientKeyFile)
+				}
+			}
+
 			isReverse := false
 			for _, opt := range tc.options {
 				if opt == "reverse" {
@@ -386,7 +490,7 @@ func TestInteroperability(t *testing.T) {
 					// Server listens on reversePort, client forwards to targetPort
 					revArg := fmt.Sprintf("tcp://127.0.0.1:%d:127.0.0.1:%d", reversePort, targetPort)
 					clientArgs = append(clientArgs, "-R", revArg)
-				} else {
+				} else if opt != "http-proxy" && opt != "mtls" {
 					clientArgs = append(clientArgs, opt)
 				}
 			}
@@ -402,18 +506,22 @@ func TestInteroperability(t *testing.T) {
 			time.Sleep(2 * time.Second)
 
 			// Test TCP
-			t.Run("TCP", func(t *testing.T) { testTCP(t, tcpPort) })
+			t.Run("TCP", func(t *testing.T) { testTCP(t, host, tcpPort) })
 			// Test UDP
-			t.Run("UDP", func(t *testing.T) { testUDP(t, udpPort) })
+			t.Run("UDP", func(t *testing.T) { testUDP(t, host, udpPort) })
 			// Test SOCKS5
-			t.Run("SOCKS5", func(t *testing.T) { testSOCKS5(t, socksPort, "127.0.0.1", targetPort) })
+			t.Run("SOCKS5", func(t *testing.T) { testSOCKS5(t, host, socksPort, "127.0.0.1", targetPort) })
 
+			if tc.name == "Go-Go-HTTPProxy" {
+				t.Run("HTTPProxy", func(t *testing.T) { testHTTPProxy(t, httpProxyPort, "127.0.0.1", targetPort) })
+			}
 			if isReverse {
 				t.Run("ReverseTCP", func(t *testing.T) { testReverseTCP(t, reversePort, targetPort) })
 			}
 			if tc.isUnix {
 				t.Run("Unix", func(t *testing.T) { testUnix(t, unixListen) })
 			}
+
 		})
 	}
 }

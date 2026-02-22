@@ -295,7 +295,51 @@ func (c *Client) StartTunnel(ltr *protocol.LocalToRemote) {
 		return
 	}
 
+	if ltr.Protocol.Unix != nil {
+		c.runUnixTunnel(ltr)
+		return
+	}
+
 	c.runTcpTunnel(ltr)
+}
+
+func (c *Client) runUnixTunnel(ltr *protocol.LocalToRemote) {
+	_ = os.Remove(ltr.Local)
+	listener, err := net.Listen("unix", ltr.Local)
+	if err != nil {
+		slog.Error("Unix: failed to listen", "path", ltr.Local, "err", err)
+		return
+	}
+	defer func() { _ = listener.Close() }()
+
+	slog.Info("Unix Listener started", "path", ltr.Local, "server", c.Config.ServerURL)
+
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			slog.Warn("Unix: failed to accept", "err", err)
+			continue
+		}
+
+		go func(c_net net.Conn) {
+			defer func() { _ = c_net.Close() }()
+			ts := c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
+			if ts.err != nil {
+				slog.Error("Failed to connect to transport for Unix", "err", ts.err)
+				return
+			}
+			defer ts.Close()
+
+			if ts.ws != nil {
+				ts.ws.SetPingHandler(func(appData string) error {
+					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
+				})
+				tunnel.Pipe(c_net, ts.ws)
+			} else {
+				tunnel.PipeBiDir(c_net, ts.h2)
+			}
+		}(conn)
+	}
 }
 
 func (c *Client) handleSocks5(conn net.Conn) (string, uint16, error) {
