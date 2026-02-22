@@ -51,8 +51,13 @@ func TestConn_ReadWriteMessage(t *testing.T) {
 	
 	clientDone := make(chan struct{})
 	go func() {
-		// Client reads the Ping, handles it (sends Pong), and we might get an error if we don't expect more
-		_, _, _ = c.ReadMessage() 
+		// Client reads the Ping, handles it (sends Pong).
+		opcode, _, err := c.ReadMessage() 
+		if err != nil {
+			// ignore error on close
+		} else if opcode != PingMessage {
+			t.Errorf("Client ReadMessage() opcode = %v, want %v", opcode, PingMessage)
+		}
 		close(clientDone)
 	}()
 
@@ -67,6 +72,7 @@ func TestConn_ReadWriteMessage(t *testing.T) {
 	if string(payload) != "ping" {
 		t.Errorf("Server ReadMessage() payload = %s, want ping", string(payload))
 	}
+
 	<-clientDone
 }
 
