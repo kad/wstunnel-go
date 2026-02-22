@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log/slog"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -331,16 +330,6 @@ func runClient(c *cli.Context) error {
 		return fmt.Errorf("server URL is required")
 	}
 
-	u, err := url.Parse(serverURL)
-	if err != nil {
-		return fmt.Errorf("invalid server URL: %w", err)
-	}
-
-	transport := "websocket"
-	if u.Scheme == "http" || u.Scheme == "https" {
-		transport = "http2"
-	}
-
 	headers := make(map[string]string)
 	for _, h := range c.StringSlice("header") {
 		parts := strings.SplitN(h, ":", 2)
@@ -374,7 +363,6 @@ func runClient(c *cli.Context) error {
 		DnsResolverPreferIpv4:                  c.Bool("dns-resolver-prefer-ipv4"),
 		LocalToRemote:                          c.StringSlice("local-to-remote"),
 		RemoteToLocal:                          c.StringSlice("remote-to-local"),
-		Transport:                              transport,
 	}
 
 	// Override from config file if provided

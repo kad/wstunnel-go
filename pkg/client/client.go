@@ -50,13 +50,7 @@ type Config struct {
 	DnsResolverPreferIpv4                  bool              `yaml:"dns_resolver_prefer_ipv4"`
 	LocalToRemote                          []string          `yaml:"local_to_remote"`
 	RemoteToLocal                          []string          `yaml:"remote_to_local"`
-	Transport                              string            `yaml:"transport"`
 }
-
-const (
-	TransportWebsocket = "websocket"
-	TransportHttp2     = "http2"
-)
 
 type Client struct {
 	Config Config
@@ -266,7 +260,12 @@ func (ts *tunnelStream) Close() {
 }
 
 func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string, remotePort uint16) *tunnelStream {
-	if c.Config.Transport == TransportHttp2 {
+	u, err := url.Parse(c.Config.ServerURL)
+	if err != nil {
+		return &tunnelStream{err: fmt.Errorf("invalid server URL: %w", err)}
+	}
+
+	if u.Scheme == "http" || u.Scheme == "https" {
 		h2, resp, err := c.connectToHttp2(p, remoteHost, remotePort)
 		return &tunnelStream{h2: h2, r: resp, err: err}
 	}

@@ -3,13 +3,37 @@ package wst
 import (
 	"bufio"
 	"context"
+	"crypto/sha1"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
+
+const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+func generateAcceptKey(clientKey string) string {
+	h := sha1.New()
+	h.Write([]byte(clientKey))
+	h.Write([]byte(websocketGUID))
+	return base64.StdEncoding.EncodeToString(h.Sum(nil))
+}
+
+// tokenContains returns true if token is present in header value.
+// token is compared in a case-insensitive manner.
+func tokenContains(header, token string) bool {
+	parts := strings.Split(header, ",")
+	for _, part := range parts {
+		if strings.EqualFold(strings.TrimSpace(part), token) {
+			return true
+		}
+	}
+	return false
+}
 
 type Upgrader struct {
 	CheckOrigin  func(r *http.Request) bool
@@ -17,6 +41,26 @@ type Upgrader struct {
 }
 
 func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeader http.Header) (*Conn, error) {
+	// Validate required upgrade headers
+	if r.Method != "GET" {
+		return nil, fmt.Errorf("websocket: method is not GET")
+	}
+	if !tokenContains(r.Header.Get("Connection"), "upgrade") {
+		return nil, fmt.Errorf("websocket: connection header is not 'upgrade'")
+	}
+	if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+		return nil, fmt.Errorf("websocket: upgrade header is not 'websocket'")
+	}
+	if r.Header.Get("Sec-WebSocket-Version") != "13" {
+		return nil, fmt.Errorf("websocket: unsupported websocket version")
+	}
+
+	clientKey := r.Header.Get("Sec-WebSocket-Key")
+	if clientKey == "" {
+		return nil, fmt.Errorf("websocket: client key header is missing or empty")
+	}
+
+	acceptKey := generateAcceptKey(clientKey)
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		return nil, fmt.Errorf("response writer does not support hijacking")
@@ -31,7 +75,7 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 	resp := "HTTP/1.1 101 Switching Protocols\r\n" +
 		"Upgrade: websocket\r\n" +
 		"Connection: Upgrade\r\n" +
-		"Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n" // Fixed mock accept key for simplicity/speed
+		fmt.Sprintf("Sec-WebSocket-Accept: %s\r\n", acceptKey) // Use generated accept key
 
 	if len(u.Subprotocols) > 0 {
 		resp += fmt.Sprintf("Sec-WebSocket-Protocol: %s\r\n", u.Subprotocols[0])
@@ -57,6 +101,7 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 type Dialer struct {
 	NetDialContext   func(ctx context.Context, network, addr string) (net.Conn, error)
 	HandshakeTimeout time.Duration
+	TLSClientConfig  *tls.Config
 }
 
 var DefaultDialer = &Dialer{
@@ -111,10 +156,17 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 	// So we should do the same.
 
 	if u.Scheme == "wss" || u.Scheme == "https" {
-		// Check if conn is already TLS? No easy way.
-		// Assume NetDialContext returns TCP conn.
-		// We wrap it.
-		tlsConfig := &tls.Config{InsecureSkipVerify: true, ServerName: host}
+		var tlsConfig *tls.Config
+		if d.TLSClientConfig != nil {
+			tlsConfig = d.TLSClientConfig
+		} else {
+			tlsConfig = &tls.Config{} // Default secure config
+		}
+		// Ensure ServerName is set for TLS.
+		if tlsConfig.ServerName == "" {
+			tlsConfig.ServerName = host
+		}
+		
 		tlsConn := tls.Client(conn, tlsConfig)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = conn.Close()

@@ -120,7 +120,7 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 	// For simplicity and alignment with Rust, let's look for the first protocol separator '://' (already handled)
 	// then split the rest by ':' but being careful about IPv6 brackets.
 	
-	var parts_info []string
+	var partsInfo []string
 	curr := ""
 	inBrackets := false
 	for _, r := range info {
@@ -132,31 +132,31 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 		}
 
 		if r == ':' && !inBrackets {
-			parts_info = append(parts_info, curr)
+			partsInfo = append(partsInfo, curr)
 			curr = ""
 		} else {
 			curr += string(r)
 		}
 	}
-	parts_info = append(parts_info, curr)
+	partsInfo = append(partsInfo, curr)
 
-	switch len(parts_info) {
+	switch len(partsInfo) {
 	case 1: // port
-		localPort = parts_info[0]
+		localPort = partsInfo[0]
 	case 2: // bind:port OR port:host (ambiguous, assume bind:port for dynamic, port:host if we had a way to know)
 		// wstunnel usually treats it as bind:port if it's dynamic
-		localBind = parts_info[0]
-		localPort = parts_info[1]
+		localBind = partsInfo[0]
+		localPort = partsInfo[1]
 	case 3: // port:host:port
-		localPort = parts_info[0]
-		remoteHost = parts_info[1]
-		rp, _ := strconv.ParseUint(parts_info[2], 10, 16)
+		localPort = partsInfo[0]
+		remoteHost = partsInfo[1]
+		rp, _ := strconv.ParseUint(partsInfo[2], 10, 16)
 		remotePort = uint16(rp)
 	case 4: // bind:port:host:port
-		localBind = parts_info[0]
-		localPort = parts_info[1]
-		remoteHost = parts_info[2]
-		rp, _ := strconv.ParseUint(parts_info[3], 10, 16)
+		localBind = partsInfo[0]
+		localPort = partsInfo[1]
+		remoteHost = partsInfo[2]
+		rp, _ := strconv.ParseUint(partsInfo[3], 10, 16)
 		remotePort = uint16(rp)
 	default:
 		return nil, fmt.Errorf("invalid tunnel format: %s", info)
