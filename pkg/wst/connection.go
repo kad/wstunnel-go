@@ -167,7 +167,8 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 			}
 		}
 
-		if opcode == PingMessage {
+		switch opcode {
+		case PingMessage:
 			// Auto-reply pong?
 			c.mur.Unlock()
 			err := c.WriteMessage(PongMessage, payload)
@@ -175,14 +176,14 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 			if err != nil {
 				return 0, nil, err
 			}
-			continue
-		} else if opcode == PongMessage {
-			continue
-		} else if opcode == CloseMessage {
+			return PingMessage, payload, nil
+		case PongMessage:
+			return PongMessage, payload, nil
+		case CloseMessage:
 			return CloseMessage, nil, io.EOF
+		default:
+			return opcode, payload, nil
 		}
-
-		return opcode, payload, nil
 	}
 }
 
