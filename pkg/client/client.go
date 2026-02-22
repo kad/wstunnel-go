@@ -19,9 +19,9 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
-	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
+	"github.com/kad/wstunnel-go/pkg/wst"
 	"golang.org/x/net/http2"
 )
 
@@ -107,7 +107,7 @@ func (c *Client) loadHttpHeaders() map[string]string {
 	return headers
 }
 
-func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (*websocket.Conn, *http.Response, error) {
+func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (*wst.Conn, *http.Response, error) {
 	requestID := uuid.New().String()
 	token, err := c.generateJWT(requestID, p, remoteHost, remotePort)
 	if err != nil {
@@ -142,8 +142,9 @@ func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, 
 		header.Set("Authorization", c.Config.HttpUpgradeCredentials)
 	}
 
-	dialer := websocket.DefaultDialer
-	dialer.HandshakeTimeout = 10 * time.Second
+	dialer := &wst.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+	}
 
 	// Use pool if available, or dial transport directly
 	dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
@@ -249,7 +250,7 @@ func (t *tunnelReadWriteCloser) Close() error {
 }
 
 type tunnelStream struct {
-	ws  *websocket.Conn
+	ws  *wst.Conn
 	h2  io.ReadWriteCloser
 	r   *http.Response
 	err error
@@ -400,7 +401,7 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 
 			if ts.ws != nil {
 				ts.ws.SetPingHandler(func(appData string) error {
-					return ts.ws.WriteMessage(websocket.PongMessage, []byte(appData))
+					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
 				})
 				tunnel.Pipe(c_net, ts.ws)
 			} else {
@@ -473,7 +474,7 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 
 	if ts.ws != nil {
 		ts.ws.SetPingHandler(func(appData string) error {
-			return ts.ws.WriteMessage(websocket.PongMessage, []byte(appData))
+			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
 		})
 		tunnel.Pipe(conn, ts.ws)
 	} else {
@@ -575,7 +576,7 @@ func (c *Client) runTcpTunnel(ltr *protocol.LocalToRemote) {
 
 			if ts.ws != nil {
 				ts.ws.SetPingHandler(func(appData string) error {
-					return ts.ws.WriteMessage(websocket.PongMessage, []byte(appData))
+					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
 				})
 				tunnel.Pipe(c_net, ts.ws)
 			} else {
@@ -637,7 +638,7 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 						if err != nil {
 							return
 						}
-						if messageType == websocket.BinaryMessage {
+						if messageType == wst.BinaryMessage {
 							_, _ = conn.WriteToUDP(p, dest)
 						}
 					}
@@ -658,7 +659,7 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 		mu.Unlock()
 
 		if ts.ws != nil {
-			err = ts.ws.WriteMessage(websocket.BinaryMessage, buf[:n])
+			err = ts.ws.WriteMessage(wst.BinaryMessage, buf[:n])
 		} else {
 			_, err = ts.h2.Write(buf[:n])
 		}
@@ -691,7 +692,7 @@ func (c *Client) runStdioTunnel(ltr *protocol.LocalToRemote) {
 			for {
 				n, err := os.Stdin.Read(buf)
 				if n > 0 {
-					err = ts.ws.WriteMessage(websocket.BinaryMessage, buf[:n])
+					err = ts.ws.WriteMessage(wst.BinaryMessage, buf[:n])
 					if err != nil {
 						return
 					}
@@ -709,7 +710,7 @@ func (c *Client) runStdioTunnel(ltr *protocol.LocalToRemote) {
 				if err != nil {
 					return
 				}
-				if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
+				if messageType == wst.BinaryMessage || messageType == wst.TextMessage {
 					_, _ = os.Stdout.Write(p)
 				}
 			}

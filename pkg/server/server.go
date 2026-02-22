@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
+	"github.com/kad/wstunnel-go/pkg/wst"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
@@ -163,17 +163,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Upgrade to WebSocket
-	upgrader := websocket.Upgrader{
+	upgrader := wst.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
 	}
 
-	// Selection of subprotocol
-	requestedProtocols := websocket.Subprotocols(r)
-	for _, p := range requestedProtocols {
-		if p == "v1" {
-			upgrader.Subprotocols = []string{"v1"}
-			break
-		}
+	// Selection of subprotocol (simplified)
+	if strings.Contains(r.Header.Get("Sec-WebSocket-Protocol"), "v1") {
+		upgrader.Subprotocols = []string{"v1"}
 	}
 
 	wsConn, err := upgrader.Upgrade(w, r, nil)
@@ -186,12 +182,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	go s.handleConnection(wsConn, claims)
 }
 
-func (s *Server) handleConnection(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
+func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelConfig) {
 	defer func() { _ = wsConn.Close() }()
 
 	// Handle PING from client
 	wsConn.SetPingHandler(func(appData string) error {
-		return wsConn.WriteMessage(websocket.PongMessage, []byte(appData))
+		return wsConn.WriteMessage(wst.PongMessage, []byte(appData))
 	})
 
 	// Forward Tunnel

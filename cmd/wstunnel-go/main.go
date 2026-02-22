@@ -137,8 +137,8 @@ func main() {
 						EnvVars: []string{"WSTUNNEL_HTTP_PROXY_PASSWORD"},
 					},
 					&cli.StringFlag{
-						Name:    "prefix",
-						Aliases: []string{"P", "http-upgrade-path-prefix"},
+						Name:    "http-upgrade-path-prefix",
+						Aliases: []string{"prefix", "P"},
 						Value:   "v1",
 						Usage:   "HTTP upgrade path prefix",
 						EnvVars: []string{"WSTUNNEL_HTTP_UPGRADE_PATH_PREFIX"},
@@ -202,8 +202,8 @@ func main() {
 						Usage: "Listen address (e.g. ws://0.0.0.0:8080)",
 					},
 					&cli.StringFlag{
-						Name:    "prefix",
-						Aliases: []string{"P"},
+						Name:    "http-upgrade-path-prefix",
+						Aliases: []string{"prefix", "P"},
 						Value:   "v1",
 						Usage:   "HTTP upgrade path prefix",
 						EnvVars: []string{"WSTUNNEL_HTTP_UPGRADE_PATH_PREFIX"},
@@ -347,7 +347,7 @@ func runClient(c *cli.Context) error {
 
 	config := &client.Config{
 		ServerURL:                              serverURL,
-		PathPrefix:                             c.String("prefix"),
+		PathPrefix:                             c.String("http-upgrade-path-prefix"),
 		Headers:                                headers,
 		MaskFrame:                              c.Bool("websocket-mask-frame"),
 		PingFrequency:                          c.Duration("websocket-ping-frequency"),
@@ -439,7 +439,7 @@ func runServer(c *cli.Context) error {
 
 	config := &server.Config{
 		ListenAddr:                     listenAddr,
-		PathPrefix:                     c.String("prefix"),
+		PathPrefix:                     c.String("http-upgrade-path-prefix"),
 		SocketSoMark:                   uint32(c.Uint("socket-so-mark")),
 		WebsocketPingFrequency:         c.Duration("websocket-ping-frequency"),
 		WebsocketMaskFrame:             c.Bool("websocket-mask-frame"),

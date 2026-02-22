@@ -88,5 +88,16 @@ The server automatically detects the transport and protocol version. No specific
 ## 9. Goreleaser Configuration
 
 -   **Configuration File:** `.goreleaser.yaml`.
--   **Purpose:** Automates cross-platform builds and releases.
--   **Local Testing:** Use `make goreleaser-test`.
+- **Purpose:** Automates cross-platform builds and releases.
+- **Local Testing:** Use `make goreleaser-test`.
+
+## 10. Development Cycle
+
+To maintain a high standard of code quality, every completed coding task should include a mandatory verification cycle before it is considered finished. This cycle ensures the codebase is always in good shape and follows established conventions.
+
+1.  **Format:** Run `make fmt` to ensure consistent code styling.
+2.  **Build:** Run `make build` to verify that the project compiles successfully.
+3.  **Vet:** Run `make vet` to perform static analysis and catch common Go programming errors.
+4.  **Lint:** Run `make lint` to ensure the code adheres to all project-specific linting rules.
+
+Following this cycle consistently helps prevent regressions and maintains a professional, high-quality codebase.
