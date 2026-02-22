@@ -44,8 +44,8 @@ func (p *WstunnelProcess) Stop() {
 	}
 }
 
-func findFreePort() (int, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+func findFreePort(host string) (int, error) {
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		return 0, err
 	}
@@ -198,12 +198,12 @@ func TestInteroperability(t *testing.T) {
 	// Create a clean environment for processes to avoid unintended proxy usage.
 	var cleanEnv []string
 	for _, env := range os.Environ() {
-		upperEnv := strings.ToUpper(env)
-		if !strings.HasPrefix(upperEnv, "HTTP_PROXY=") &&
-			!strings.HasPrefix(upperEnv, "HTTPS_PROXY=") &&
-			!strings.HasPrefix(upperEnv, "ALL_PROXY=") &&
-			!strings.HasPrefix(upperEnv, "NO_PROXY=") {
-			cleanEnv = append(cleanEnv, env)
+		parts := strings.SplitN(env, "=", 2)
+		if len(parts) > 0 {
+			key := strings.ToUpper(parts[0])
+			if !strings.HasSuffix(key, "_PROXY") {
+				cleanEnv = append(cleanEnv, env)
+			}
 		}
 	}
 
@@ -212,22 +212,30 @@ func TestInteroperability(t *testing.T) {
 		serverBin string
 		clientBin string
 		transport string
+		ipv6      bool
 	}{
-		{"Go-Go-WS", goBinary, goBinary, "websocket"},
-		{"Go-Rust-WS", goBinary, rustBinary, "websocket"},
-		{"Rust-Go-WS", rustBinary, goBinary, "websocket"},
-		{"Go-Go-H2", goBinary, goBinary, "http2"},
-		{"Go-Rust-H2", goBinary, rustBinary, "http2"},
-		{"Rust-Go-H2", rustBinary, goBinary, "http2"},
+		{"Go-Go-WS", goBinary, goBinary, "websocket", false},
+		{"Go-Rust-WS", goBinary, rustBinary, "websocket", false},
+		{"Rust-Go-WS", rustBinary, goBinary, "websocket", false},
+		{"Go-Go-H2", goBinary, goBinary, "http2", false},
+		{"Go-Rust-H2", goBinary, rustBinary, "http2", false},
+		{"Rust-Go-H2", rustBinary, goBinary, "http2", false},
+		{"Go-Go-H2-HTTPS", goBinary, goBinary, "https", false},
+		{"Go-Go-WS-IPv6", goBinary, goBinary, "websocket", true},
 	}
 
 	for _, tc := range combinations {
 		t.Run(tc.name, func(t *testing.T) {
-			serverPort, _ := findFreePort()
-			tcpPort, _ := findFreePort()
-			udpPort, _ := findFreePort()
-			socksPort, _ := findFreePort()
-			targetPort, _ := findFreePort()
+			host := "127.0.0.1"
+			if tc.ipv6 {
+				host = "::1"
+			}
+
+			serverPort, _ := findFreePort(host)
+			tcpPort, _ := findFreePort(host)
+			udpPort, _ := findFreePort(host)
+			socksPort, _ := findFreePort(host)
+			targetPort, _ := findFreePort(host)
 
 			// Start Echo Server (TCP)
 			echoDone, _ := runEchoServer(targetPort)
@@ -238,13 +246,16 @@ func TestInteroperability(t *testing.T) {
 			defer func() { _ = udpEchoDone }()
 
 			// Start Wstunnel Server
+			serverAddr := net.JoinHostPort(host, fmt.Sprintf("%d", serverPort))
+			serverURL := "ws://" + serverAddr
+			
 			var serverArgs []string
-			serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
 			if tc.serverBin == goBinary {
-				serverArgs = []string{"server", "--prefix", "v1", "--listen", "ws://" + serverAddr}
+				serverArgs = []string{"server", "--http-upgrade-path-prefix", "v1", serverURL}
 			} else {
-				serverArgs = []string{"server", "ws://" + serverAddr} // Rust server takes address as direct arg
+				serverArgs = []string{"server", serverURL}
 			}
+			
 			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs, cleanEnv)
 			if err != nil {
 				t.Fatalf("Failed to start server: %v", err)
@@ -255,24 +266,23 @@ func TestInteroperability(t *testing.T) {
 
 			// Start Wstunnel Client
 			var clientArgs []string
-			tcpL := fmt.Sprintf("tcp://127.0.0.1:%d:127.0.0.1:%d", tcpPort, targetPort)
-			udpL := fmt.Sprintf("udp://127.0.0.1:%d:127.0.0.1:%d", udpPort, targetPort)
-			socksL := fmt.Sprintf("socks5://127.0.0.1:%d", socksPort)
+			// Use RFC 2732 brackets for IPv6 in tunnel arguments
+			tcpL := fmt.Sprintf("tcp://%s:127.0.0.1:%d", net.JoinHostPort(host, fmt.Sprintf("%d", tcpPort)), targetPort)
+			udpL := fmt.Sprintf("udp://%s:127.0.0.1:%d", net.JoinHostPort(host, fmt.Sprintf("%d", udpPort)), targetPort)
+			socksL := fmt.Sprintf("socks5://%s", net.JoinHostPort(host, fmt.Sprintf("%d", socksPort)))
 
-			serverURL := ""
-			if tc.transport == "websocket" {
-				serverURL = "ws://" + serverAddr
-			} else {
-				serverURL = "http://" + serverAddr
+			connectURL := ""
+			switch tc.transport {
+			case "websocket":
+				connectURL = "ws://" + serverAddr
+			case "http2":
+				connectURL = "http://" + serverAddr
+			case "https":
+				connectURL = "https://" + serverAddr
 			}
 
-			if tc.clientBin == goBinary {
-				clientArgs = []string{"client", "-t", tc.transport, "-L", tcpL, "-L", udpL, "-L", socksL, serverURL}
-			} else {
-				// Rust client: transport is part of the URL scheme, and prefix for Rust is fixed to v1.
-				clientArgs = []string{"client", "--http-upgrade-path-prefix", "v1", "-L", tcpL, "-L", udpL, "-L", socksL, serverURL}
-			}
-
+			clientArgs = []string{"client", "--http-upgrade-path-prefix", "v1", "-L", tcpL, "-L", udpL, "-L", socksL, connectURL}
+			
 			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs, cleanEnv)
 			if err != nil {
 				t.Fatalf("Failed to start client: %v", err)

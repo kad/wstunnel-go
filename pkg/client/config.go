@@ -115,7 +115,29 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 	remoteHost := "0.0.0.0"
 	var remotePort uint16
 
-	parts_info := strings.Split(info, ":")
+	// Robust parsing of [bind:]port[:host:port]
+	// If it contains brackets, it has an IPv6 bind or host
+	// For simplicity and alignment with Rust, let's look for the first protocol separator '://' (already handled)
+	// then split the rest by ':' but being careful about IPv6 brackets.
+	
+	var parts_info []string
+	curr := ""
+	inBrackets := false
+	for _, r := range info {
+		if r == '[' {
+			inBrackets = true
+		} else if r == ']' {
+			inBrackets = false
+		}
+		if r == ':' && !inBrackets {
+			parts_info = append(parts_info, curr)
+			curr = ""
+		} else {
+			curr += string(r)
+		}
+	}
+	parts_info = append(parts_info, curr)
+
 	switch len(parts_info) {
 	case 1: // port
 		localPort = parts_info[0]
@@ -139,8 +161,8 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 	}
 
 	ltr := &protocol.LocalToRemote{
-		Local:  net.JoinHostPort(localBind, localPort),
-		Remote: remoteHost,
+		Local:  net.JoinHostPort(strings.Trim(localBind, "[]"), localPort),
+		Remote: strings.Trim(remoteHost, "[]"),
 		Port:   remotePort,
 	}
 

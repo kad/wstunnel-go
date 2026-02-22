@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -183,13 +184,6 @@ func main() {
 						Usage:   "Prioritize IPv4 for DNS lookup",
 						EnvVars: []string{"WSTUNNEL_DNS_PREFER_IPV4"},
 					},
-					&cli.StringFlag{
-						Name:    "transport",
-						Aliases: []string{"t"},
-						Value:   "websocket",
-						Usage:   "Transport protocol to use for server connection (websocket, http2)",
-						EnvVars: []string{"WSTUNNEL_TRANSPORT"},
-					},
 				},
 				Action: runClient,
 			},
@@ -197,10 +191,6 @@ func main() {
 				Name:  "server",
 				Usage: "Run wstunnel server",
 				Flags: []cli.Flag{
-					&cli.StringFlag{
-						Name:  "listen",
-						Usage: "Listen address (e.g. ws://0.0.0.0:8080)",
-					},
 					&cli.StringFlag{
 						Name:    "http-upgrade-path-prefix",
 						Aliases: []string{"prefix", "P"},
@@ -337,6 +327,20 @@ func runClient(c *cli.Context) error {
 		serverURL = c.Args().First()
 	}
 
+	if serverURL == "" {
+		return fmt.Errorf("server URL is required")
+	}
+
+	u, err := url.Parse(serverURL)
+	if err != nil {
+		return fmt.Errorf("invalid server URL: %w", err)
+	}
+
+	transport := "websocket"
+	if u.Scheme == "http" || u.Scheme == "https" {
+		transport = "http2"
+	}
+
 	headers := make(map[string]string)
 	for _, h := range c.StringSlice("header") {
 		parts := strings.SplitN(h, ":", 2)
@@ -370,7 +374,7 @@ func runClient(c *cli.Context) error {
 		DnsResolverPreferIpv4:                  c.Bool("dns-resolver-prefer-ipv4"),
 		LocalToRemote:                          c.StringSlice("local-to-remote"),
 		RemoteToLocal:                          c.StringSlice("remote-to-local"),
-		Transport:                              c.String("transport"),
+		Transport:                              transport,
 	}
 
 	// Override from config file if provided
@@ -430,11 +434,10 @@ func runServer(c *cli.Context) error {
 	var listenAddr string
 	if c.Args().Len() >= 1 {
 		listenAddr = c.Args().First()
-	} else {
-		listenAddr = c.String("listen")
-		if listenAddr == "" {
-			listenAddr = "ws://0.0.0.0:8080"
-		}
+	}
+
+	if listenAddr == "" {
+		listenAddr = "ws://0.0.0.0:8080"
 	}
 
 	config := &server.Config{
