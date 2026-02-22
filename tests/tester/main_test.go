@@ -379,17 +379,17 @@ func TestInteroperability(t *testing.T) {
 					if err := generateSignedCerts(clientCertFile, clientKeyFile, caCertFile, caKeyFile); err != nil {
 						t.Fatalf("Failed to generate client certs: %v", err)
 					}
-					defer os.Remove(caCertFile)
-					defer os.Remove(caKeyFile)
-					defer os.Remove(clientCertFile)
-					defer os.Remove(clientKeyFile)
+					defer func() { _ = os.Remove(caCertFile) }()
+					defer func() { _ = os.Remove(caKeyFile) }()
+					defer func() { _ = os.Remove(clientCertFile) }()
+					defer func() { _ = os.Remove(clientKeyFile) }()
 				} else {
 					if err := generateCerts(certFile, keyFile); err != nil {
 						t.Fatalf("Failed to generate certs: %v", err)
 					}
 				}
-				defer os.Remove(certFile)
-				defer os.Remove(keyFile)
+				defer func() { _ = os.Remove(certFile) }()
+				defer func() { _ = os.Remove(keyFile) }()
 			}
 
 			var unixTarget string
@@ -397,8 +397,8 @@ func TestInteroperability(t *testing.T) {
 			if tc.isUnix {
 				unixTarget = fmt.Sprintf("/tmp/wst-target-%d.sock", serverPort)
 				unixListen = fmt.Sprintf("/tmp/wst-listen-%d.sock", serverPort)
-				defer os.Remove(unixTarget)
-				defer os.Remove(unixListen)
+				defer func() { _ = os.Remove(unixTarget) }()
+				defer func() { _ = os.Remove(unixListen) }()
 
 				echoDone, _ := runUnixEchoServer(unixTarget)
 				defer func() { _ = echoDone }()

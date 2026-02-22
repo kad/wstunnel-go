@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"sync"
 )
 
 // Message types
@@ -21,6 +22,8 @@ type Conn struct {
 	bufr    *bufio.Reader
 	bufw    *bufio.Writer
 	masking bool
+	muw     sync.Mutex
+	mur     sync.Mutex
 }
 
 func NewConn(conn net.Conn, masking bool) *Conn {
