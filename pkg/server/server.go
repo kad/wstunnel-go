@@ -2,12 +2,15 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"syscall"
 	"time"
@@ -98,6 +101,26 @@ func (s *Server) Start() error {
 	srv := &http.Server{
 		Addr:    bindAddr,
 		Handler: handler,
+	}
+
+	if s.Config.TlsCertificate != "" && s.Config.TlsPrivateKey != "" {
+		tlsConfig := &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+
+		if s.Config.TlsClientCaCerts != "" {
+			caCert, err := os.ReadFile(s.Config.TlsClientCaCerts)
+			if err != nil {
+				return fmt.Errorf("failed to read client CA certs: %w", err)
+			}
+			caCertPool := x509.NewCertPool()
+			caCertPool.AppendCertsFromPEM(caCert)
+			tlsConfig.ClientCAs = caCertPool
+			tlsConfig.ClientAuth = tls.RequireAndVerifyClientCert
+		}
+
+		srv.TLSConfig = tlsConfig
+		return srv.ServeTLS(ln, s.Config.TlsCertificate, s.Config.TlsPrivateKey)
 	}
 
 	return srv.Serve(ln)
