@@ -68,7 +68,6 @@ func startProcess(name string, binary string, args []string, env []string) (*Wst
 	go func() { _, _ = io.Copy(os.Stdout, stdout) }()
 	go func() { _, _ = io.Copy(os.Stderr, stderr) }()
 
-	fmt.Printf("[%s] Starting: %s %v\n", name, binary, args)
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return nil, err
@@ -429,10 +428,9 @@ func TestInteroperability(t *testing.T) {
 			}
 			
 			var serverArgs []string
+			serverArgs = []string{"server"}
 			if tc.serverBin == goBinary {
-				serverArgs = []string{"server", "--http-upgrade-path-prefix", "v1", serverURL}
-			} else {
-				serverArgs = []string{"server", serverURL}
+				serverArgs = append(serverArgs, "--http-upgrade-path-prefix", "v1")
 			}
 
 			if isTLS {
@@ -440,17 +438,15 @@ func TestInteroperability(t *testing.T) {
 				if isMTLS {
 					serverArgs = append(serverArgs, "--tls-client-ca-certs", caCertFile)
 				}
-				if tc.name == "Go-Go-H2-HTTPS" { // For this specific test case, relax server cert verification
-					serverArgs = append(serverArgs, "--tls-verify-certificate=false")
-				}
 			}
 
 			// Add server-side options if any
 			for _, opt := range tc.options {
-				if opt != "reverse" && opt != "http-proxy" && opt != "mtls" {
+				if opt != "reverse" && opt != "http-proxy" && opt != "mtls" { // These are client options
 					serverArgs = append(serverArgs, opt)
 				}
 			}
+			serverArgs = append(serverArgs, serverURL) // serverURL is now the positional argument
 			
 			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs, cleanEnv)
 			if err != nil {
@@ -480,7 +476,11 @@ func TestInteroperability(t *testing.T) {
 				connectURL = "https://" + serverAddr
 			}
 
-			clientArgs = []string{"client", "--http-upgrade-path-prefix", "v1", "-L", tcpL, "-L", udpL, "-L", socksL}
+			clientArgs = []string{"client"}
+			if tc.clientBin == goBinary {
+				clientArgs = append(clientArgs, "--http-upgrade-path-prefix", "v1")
+			}
+			clientArgs = append(clientArgs, "-L", tcpL, "-L", udpL, "-L", socksL)
 			if tc.name == "Go-Go-HTTPProxy" {
 				clientArgs = append(clientArgs, "-L", httpProxyL)
 			}
@@ -506,8 +506,7 @@ func TestInteroperability(t *testing.T) {
 					clientArgs = append(clientArgs, opt)
 				}
 			}
-
-			clientArgs = append(clientArgs, connectURL)
+			clientArgs = append(clientArgs, connectURL) // connectURL is now the positional argument
 			
 			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs, cleanEnv)
 			if err != nil {

@@ -323,7 +323,11 @@ func setupLogging(level string) {
 func runClient(c *cli.Context) error {
 	var serverURL string
 	if c.Args().Len() >= 1 {
-		serverURL = c.Args().First()
+		serverURL = c.Args().Get(c.Args().Len() - 1) // Get the last argument
+	}
+
+	if serverURL == "" {
+		return fmt.Errorf("server URL is required")
 	}
 
 	if serverURL == "" {
@@ -421,7 +425,11 @@ func startClient(c *cli.Context, config *client.Config) error {
 func runServer(c *cli.Context) error {
 	var listenAddr string
 	if c.Args().Len() >= 1 {
-		listenAddr = c.Args().First()
+		listenAddr = c.Args().Get(c.Args().Len() - 1) // Get the last argument
+	}
+
+	if listenAddr == "" {
+		listenAddr = "ws://0.0.0.0:8080"
 	}
 
 	if listenAddr == "" {
