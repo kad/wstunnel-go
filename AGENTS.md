@@ -43,6 +43,7 @@ The `Makefile` provides convenient targets for common development tasks:
 The project uses `golangci-lint` for static code analysis.
 -   **Execution:** Run `make lint` locally. If the tool is not installed, run `make install-tools`.
 -   **CI Integration:** `golangci-lint` is automatically run in CI using `golangci/golangci-lint-action@v9` and version `v2.10.1`.
+-   **Integrity:** After implementation and before declaring something done, verify that there are no lint errors.
 
 ## 6. Testing
 

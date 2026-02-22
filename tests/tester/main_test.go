@@ -187,6 +187,71 @@ func testSOCKS5(t *testing.T, socksPort int, targetHost string, targetPort int) 
 	}
 }
 
+func testReverseTCP(t *testing.T, listenPort int, echoServerPort int) {
+	// In reverse tunnel, the client listens on echoServerPort and forwards to server's listenPort.
+	// But in wstunnel terms, -R tcp://listenPort:localhost:echoServerPort
+	// means the SERVER listens on listenPort and forwards to client, which forwards to localhost:echoServerPort.
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", listenPort), 5*time.Second)
+	if err != nil {
+		t.Fatalf("Reverse TCP: Failed to connect to server-side listen port %d: %v", listenPort, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	msg := "hello reverse tcp"
+	_, _ = conn.Write([]byte(msg))
+	buf := make([]byte, len(msg))
+	_, err = io.ReadFull(conn, buf)
+	if err != nil {
+		t.Fatalf("Reverse TCP: Failed to read: %v", err)
+	}
+	if string(buf) != msg {
+		t.Fatalf("Reverse TCP: Data mismatch: %q vs %q", msg, string(buf))
+	}
+}
+
+func runUnixEchoServer(path string) (chan struct{}, error) {
+	_ = os.Remove(path)
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		defer func() { _ = ln.Close() }()
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func(c net.Conn) {
+				defer func() { _ = c.Close() }()
+				_, _ = io.Copy(c, c)
+			}(conn)
+		}
+	}()
+	return done, nil
+}
+
+func testUnix(t *testing.T, path string) {
+	conn, err := net.DialTimeout("unix", path, 5*time.Second)
+	if err != nil {
+		t.Fatalf("Unix: Failed to connect to socket %s: %v", path, err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	msg := "hello unix"
+	_, _ = conn.Write([]byte(msg))
+	buf := make([]byte, len(msg))
+	_, err = io.ReadFull(conn, buf)
+	if err != nil {
+		t.Fatalf("Unix: Failed to read: %v", err)
+	}
+	if string(buf) != msg {
+		t.Fatalf("Unix: Data mismatch: %q vs %q", msg, string(buf))
+	}
+}
+
 func TestInteroperability(t *testing.T) {
 	if rustBinary == "" { // Check if exec.LookPath found the binary
 		t.Skipf("Rust binary 'wstunnel' not found in PATH. Skipping Rust interoperability tests.")
@@ -213,19 +278,27 @@ func TestInteroperability(t *testing.T) {
 		clientBin string
 		transport string
 		ipv6      bool
+		isUnix    bool
+		options   []string
 	}{
-		{"Go-Go-WS", goBinary, goBinary, "websocket", false},
-		{"Go-Rust-WS", goBinary, rustBinary, "websocket", false},
-		{"Rust-Go-WS", rustBinary, goBinary, "websocket", false},
-		{"Go-Go-H2", goBinary, goBinary, "http2", false},
-		{"Go-Rust-H2", goBinary, rustBinary, "http2", false},
-		{"Rust-Go-H2", rustBinary, goBinary, "http2", false},
-		{"Go-Go-H2-HTTPS", goBinary, goBinary, "https", false},
-		{"Go-Go-WS-IPv6", goBinary, goBinary, "websocket", true},
+		{"Go-Go-WS", goBinary, goBinary, "websocket", false, false, nil},
+		{"Go-Rust-WS", goBinary, rustBinary, "websocket", false, false, nil},
+		{"Rust-Go-WS", rustBinary, goBinary, "websocket", false, false, nil},
+		{"Go-Go-H2", goBinary, goBinary, "http2", false, false, nil},
+		{"Go-Rust-H2", goBinary, rustBinary, "http2", false, false, nil},
+		{"Rust-Go-H2", rustBinary, goBinary, "http2", false, false, nil},
+		{"Go-Go-H2-HTTPS", goBinary, goBinary, "https", false, false, nil},
+		{"Go-Go-WS-IPv6", goBinary, goBinary, "websocket", true, false, nil},
+		{"Go-Go-WS-Mask", goBinary, goBinary, "websocket", false, false, []string{"--websocket-mask-frame"}},
+		{"Go-Go-WS-Ping", goBinary, goBinary, "websocket", false, false, []string{"--websocket-ping-frequency", "10s"}},
+		{"Go-Go-Reverse", goBinary, goBinary, "websocket", false, false, []string{"reverse"}},
+		{"Go-Go-Unix", goBinary, goBinary, "websocket", false, true, nil},
 	}
 
 	for _, tc := range combinations {
+		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			host := "127.0.0.1"
 			if tc.ipv6 {
 				host = "::1"
@@ -236,6 +309,19 @@ func TestInteroperability(t *testing.T) {
 			udpPort, _ := findFreePort(host)
 			socksPort, _ := findFreePort(host)
 			targetPort, _ := findFreePort(host)
+			reversePort, _ := findFreePort(host)
+
+			var unixTarget string
+			var unixListen string
+			if tc.isUnix {
+				unixTarget = fmt.Sprintf("/tmp/wst-target-%d.sock", serverPort)
+				unixListen = fmt.Sprintf("/tmp/wst-listen-%d.sock", serverPort)
+				defer os.Remove(unixTarget)
+				defer os.Remove(unixListen)
+
+				echoDone, _ := runUnixEchoServer(unixTarget)
+				defer func() { _ = echoDone }()
+			}
 
 			// Start Echo Server (TCP)
 			echoDone, _ := runEchoServer(targetPort)
@@ -254,6 +340,13 @@ func TestInteroperability(t *testing.T) {
 				serverArgs = []string{"server", "--http-upgrade-path-prefix", "v1", serverURL}
 			} else {
 				serverArgs = []string{"server", serverURL}
+			}
+
+			// Add server-side options if any
+			for _, opt := range tc.options {
+				if opt != "reverse" {
+					serverArgs = append(serverArgs, opt)
+				}
 			}
 			
 			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs, cleanEnv)
@@ -281,7 +374,24 @@ func TestInteroperability(t *testing.T) {
 				connectURL = "https://" + serverAddr
 			}
 
-			clientArgs = []string{"client", "--http-upgrade-path-prefix", "v1", "-L", tcpL, "-L", udpL, "-L", socksL, connectURL}
+			clientArgs = []string{"client", "--http-upgrade-path-prefix", "v1", "-L", tcpL, "-L", udpL, "-L", socksL}
+			if tc.isUnix {
+				clientArgs = append(clientArgs, "-L", fmt.Sprintf("unix://%s:%s", unixListen, unixTarget))
+			}
+			
+			isReverse := false
+			for _, opt := range tc.options {
+				if opt == "reverse" {
+					isReverse = true
+					// Server listens on reversePort, client forwards to targetPort
+					revArg := fmt.Sprintf("tcp://127.0.0.1:%d:127.0.0.1:%d", reversePort, targetPort)
+					clientArgs = append(clientArgs, "-R", revArg)
+				} else {
+					clientArgs = append(clientArgs, opt)
+				}
+			}
+
+			clientArgs = append(clientArgs, connectURL)
 			
 			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs, cleanEnv)
 			if err != nil {
@@ -297,6 +407,13 @@ func TestInteroperability(t *testing.T) {
 			t.Run("UDP", func(t *testing.T) { testUDP(t, udpPort) })
 			// Test SOCKS5
 			t.Run("SOCKS5", func(t *testing.T) { testSOCKS5(t, socksPort, "127.0.0.1", targetPort) })
+
+			if isReverse {
+				t.Run("ReverseTCP", func(t *testing.T) { testReverseTCP(t, reversePort, targetPort) })
+			}
+			if tc.isUnix {
+				t.Run("Unix", func(t *testing.T) { testUnix(t, unixListen) })
+			}
 		})
 	}
 }
