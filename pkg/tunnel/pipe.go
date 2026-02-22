@@ -5,12 +5,12 @@ import (
 	"net"
 	"sync"
 
-	"github.com/gorilla/websocket"
+	"github.com/kad/wstunnel-go/pkg/wst"
 )
 
 // Pipe pipes data between a TCP connection and a WebSocket connection.
 // It closes both connections when done.
-func Pipe(tcpConn net.Conn, wsConn *websocket.Conn) {
+func Pipe(tcpConn net.Conn, wsConn *wst.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -18,13 +18,13 @@ func Pipe(tcpConn net.Conn, wsConn *websocket.Conn) {
 	go func() {
 		defer wg.Done()
 		defer func() {
-			_ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			_ = wsConn.WriteMessage(wst.CloseMessage, wst.FormatCloseMessage(wst.CloseNormalClosure, ""))
 		}()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := tcpConn.Read(buf)
 			if n > 0 {
-				err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
+				err = wsConn.WriteMessage(wst.BinaryMessage, buf[:n])
 				if err != nil {
 					return
 				}
@@ -44,7 +44,7 @@ func Pipe(tcpConn net.Conn, wsConn *websocket.Conn) {
 			if err != nil {
 				return
 			}
-			if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
+			if messageType == wst.BinaryMessage || messageType == wst.TextMessage {
 				_, err = tcpConn.Write(p)
 				if err != nil {
 					return
@@ -57,7 +57,7 @@ func Pipe(tcpConn net.Conn, wsConn *websocket.Conn) {
 }
 
 // PipeRW pipes data between a ReadWriteCloser and a WebSocket connection.
-func PipeRW(rw io.ReadWriteCloser, wsConn *websocket.Conn) {
+func PipeRW(rw io.ReadWriteCloser, wsConn *wst.Conn) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -65,13 +65,13 @@ func PipeRW(rw io.ReadWriteCloser, wsConn *websocket.Conn) {
 	go func() {
 		defer wg.Done()
 		defer func() {
-			_ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+			_ = wsConn.WriteMessage(wst.CloseMessage, wst.FormatCloseMessage(wst.CloseNormalClosure, ""))
 		}()
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := rw.Read(buf)
 			if n > 0 {
-				err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
+				err = wsConn.WriteMessage(wst.BinaryMessage, buf[:n])
 				if err != nil {
 					return
 				}
@@ -91,7 +91,7 @@ func PipeRW(rw io.ReadWriteCloser, wsConn *websocket.Conn) {
 			if err != nil {
 				return
 			}
-			if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
+			if messageType == wst.BinaryMessage || messageType == wst.TextMessage {
 				_, err = rw.Write(p)
 				if err != nil {
 					return

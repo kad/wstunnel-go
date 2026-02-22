@@ -11,10 +11,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
+	"github.com/kad/wstunnel-go/pkg/wst"
 )
 
 type ReverseTunnelManager struct {
@@ -33,7 +33,7 @@ type tunnelListener struct {
 }
 
 type waitingConn struct {
-	wsConn *websocket.Conn
+	wsConn *wst.Conn
 	h2Conn io.ReadWriteCloser
 	done   chan struct{}
 }
@@ -92,7 +92,7 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 	return tl, bindAddr, nil
 }
 
-func (m *ReverseTunnelManager) HandleClient(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
+func (m *ReverseTunnelManager) HandleClient(wsConn *wst.Conn, claims *protocol.JwtTunnelConfig) {
 	tl, bindAddr, err := m.getOrCreateListener(claims)
 	if err != nil {
 		slog.Error("Reverse tunnel: failed to listen", "addr", bindAddr, "err", err)
@@ -135,7 +135,6 @@ func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims 
 		_ = h2Conn.Close()
 	}
 }
-
 
 func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 	defer func() { _ = tl.ln.Close() }()

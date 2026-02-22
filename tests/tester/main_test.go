@@ -7,15 +7,27 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
 	"golang.org/x/net/proxy"
 )
 
+var rustBinary string
+
+func init() {
+	var err error
+	rustBinary, err = exec.LookPath("wstunnel")
+	if err != nil {
+		fmt.Printf("Rust binary 'wstunnel' not found in PATH: %v\n", err)
+		// Leave rustBinary as empty string, tests will skip if not found
+	}
+}
+
 const (
-	rustBinary = "/home/kad/repositories/github.com/kad/wstunnel/target/release/wstunnel"
-	goBinary   = "../../bin/wstunnel-go"
+	// rustBinary   = "/home/kad/repositories/github.com/kad/wstunnel/target/release/wstunnel" // Old hardcoded path
+	goBinary = "../../bin/wstunnel-go"
 )
 
 type WstunnelProcess struct {
@@ -42,10 +54,13 @@ func findFreePort() (int, error) {
 	return port, nil
 }
 
-func startProcess(name string, binary string, args ...string) (*WstunnelProcess, error) {
+func startProcess(name string, binary string, args []string, env []string) (*WstunnelProcess, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(ctx, binary, args...)
-	
+	if env != nil {
+		cmd.Env = env
+	}
+
 	// Output logging for debugging
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
@@ -173,11 +188,23 @@ func testSOCKS5(t *testing.T, socksPort int, targetHost string, targetPort int) 
 }
 
 func TestInteroperability(t *testing.T) {
-	if _, err := os.Stat(rustBinary); os.IsNotExist(err) {
-		t.Skipf("Rust binary not found at %s", rustBinary)
+	if rustBinary == "" { // Check if exec.LookPath found the binary
+		t.Skipf("Rust binary 'wstunnel' not found in PATH. Skipping Rust interoperability tests.")
 	}
 	if _, err := os.Stat(goBinary); os.IsNotExist(err) {
 		t.Fatalf("Go binary not found at %s. Run 'make build' first.", goBinary)
+	}
+
+	// Create a clean environment for processes to avoid unintended proxy usage.
+	var cleanEnv []string
+	for _, env := range os.Environ() {
+		upperEnv := strings.ToUpper(env)
+		if !strings.HasPrefix(upperEnv, "HTTP_PROXY=") &&
+			!strings.HasPrefix(upperEnv, "HTTPS_PROXY=") &&
+			!strings.HasPrefix(upperEnv, "ALL_PROXY=") &&
+			!strings.HasPrefix(upperEnv, "NO_PROXY=") {
+			cleanEnv = append(cleanEnv, env)
+		}
 	}
 
 	combinations := []struct {
@@ -218,7 +245,7 @@ func TestInteroperability(t *testing.T) {
 			} else {
 				serverArgs = []string{"server", "ws://" + serverAddr} // Rust server takes address as direct arg
 			}
-			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs...)
+			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs, cleanEnv)
 			if err != nil {
 				t.Fatalf("Failed to start server: %v", err)
 			}
@@ -245,8 +272,8 @@ func TestInteroperability(t *testing.T) {
 				// Rust client: transport is part of the URL scheme, and prefix for Rust is fixed to v1.
 				clientArgs = []string{"client", "--http-upgrade-path-prefix", "v1", "-L", tcpL, "-L", udpL, "-L", socksL, serverURL}
 			}
-			
-			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs...)
+
+			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs, cleanEnv)
 			if err != nil {
 				t.Fatalf("Failed to start client: %v", err)
 			}
