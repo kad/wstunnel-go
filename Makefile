@@ -57,6 +57,15 @@ verify: ## Run go mod verify
 	go mod verify
 
 
+.PHONY: build-caddy
+build-caddy: ## Build Caddy with wstunnel-go module
+	@echo "Building Caddy with wstunnel-go module..."
+	cd pkg/caddy && xcaddy build --with github.com/kad/wstunnel-go/pkg/caddy=$(CURDIR)/pkg/caddy --with github.com/kad/wstunnel-go=$(CURDIR)
+
+.PHONY: check-caddy
+check-caddy: build-caddy ## Check if Caddy module is correctly registered
+	./pkg/caddy/caddy list-modules | grep wstunnel
+
 .PHONY: clean
 clean: ## Clean build artifacts
 	@echo "Cleaning up..."
