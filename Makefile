@@ -66,6 +66,13 @@ build-caddy: ## Build Caddy with wstunnel-go module
 check-caddy: build-caddy ## Check if Caddy module is correctly registered
 	./pkg/caddy/caddy list-modules | grep wstunnel
 
+.PHONY: tag
+tag: ## Create annotated tags for both root and caddy modules (e.g., make tag VERSION=0.0.1)
+	@if [ -z "$(VERSION)" ]; then echo "Error: VERSION is required (e.g., make tag VERSION=0.0.1)"; exit 1; fi
+	git tag -a v$(VERSION) -m "Release v$(VERSION)"
+	git tag -a pkg/caddy/v$(VERSION) -m "Release pkg/caddy v$(VERSION)"
+	@echo "Created tags v$(VERSION) and pkg/caddy/v$(VERSION)"
+
 .PHONY: clean
 clean: ## Clean build artifacts
 	@echo "Cleaning up..."
