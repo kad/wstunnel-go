@@ -156,4 +156,3 @@ func generateCA(certPath, keyPath string) error {
 
 	return nil
 }
-

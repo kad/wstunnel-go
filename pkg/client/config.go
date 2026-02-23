@@ -119,7 +119,7 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 	// If it contains brackets, it has an IPv6 bind or host
 	// For simplicity and alignment with Rust, let's look for the first protocol separator '://' (already handled)
 	// then split the rest by ':' but being careful about IPv6 brackets.
-	
+
 	var partsInfo []string
 	curr := ""
 	inBrackets := false

@@ -1,0 +1,7 @@
+mode: server
+log_lvl: INFO
+server:
+  listen_addr: "ws://0.0.0.0:8080"
+  restrict_to:
+    - "127.0.0.1:22"
+    - "127.0.0.1:80"

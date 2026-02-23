@@ -1,0 +1,19 @@
+[Unit]
+Description=wstunnel-go client - %I
+Documentation=https://github.com/kad/wstunnel-go
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wstunnel-go client --config /etc/wstunnel-go/%i.yaml
+Restart=always
+RestartSec=5
+# Security Hardening
+ReadOnlyPaths=/etc/wstunnel-go
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

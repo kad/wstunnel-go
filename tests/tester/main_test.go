@@ -364,7 +364,7 @@ func TestInteroperability(t *testing.T) {
 			if isTLS {
 				certFile = fmt.Sprintf("/tmp/wst-cert-%d.pem", serverPort)
 				keyFile = fmt.Sprintf("/tmp/wst-key-%d.pem", serverPort)
-				
+
 				if isMTLS {
 					caCertFile = fmt.Sprintf("/tmp/wst-ca-%d.pem", serverPort)
 					caKeyFile = fmt.Sprintf("/tmp/wst-ca-key-%d.pem", serverPort)
@@ -427,7 +427,7 @@ func TestInteroperability(t *testing.T) {
 					serverURL = "https://" + serverAddr
 				}
 			}
-			
+
 			var serverArgs []string
 			if tc.serverBin == goBinary {
 				serverArgs = []string{"--log-lvl", "DEBUG", "server", "--listen-addr", serverURL, "--http-upgrade-path-prefix", "v1"}
@@ -448,7 +448,7 @@ func TestInteroperability(t *testing.T) {
 					serverArgs = append(serverArgs, opt)
 				}
 			}
-			
+
 			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs, cleanEnv)
 			if err != nil {
 				t.Fatalf("Failed to start server: %v", err)
@@ -489,7 +489,7 @@ func TestInteroperability(t *testing.T) {
 			if tc.isUnix {
 				clientArgs = append(clientArgs, "-L", fmt.Sprintf("unix://%s:%s", unixListen, unixTarget))
 			}
-			
+
 			if isTLS {
 				clientArgs = append(clientArgs, "--tls-verify-certificate=false")
 				if isMTLS {
@@ -508,11 +508,11 @@ func TestInteroperability(t *testing.T) {
 					clientArgs = append(clientArgs, opt)
 				}
 			}
-			
+
 			if tc.clientBin != goBinary {
 				clientArgs = append(clientArgs, connectURL)
 			}
-			
+
 			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs, cleanEnv)
 			if err != nil {
 				t.Fatalf("Failed to start client: %v", err)
