@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -61,6 +63,46 @@ func NewServer(config Config) *Server {
 		if err != nil {
 			slog.Error("Failed to load restrictions", "path", config.RestrictConfig, "err", err)
 		}
+	}
+
+	// If no rules loaded from file, but we have CLI/Config restrictions, create them
+	if rules == nil && (len(config.RestrictTo) > 0 || len(config.RestrictHttpUpgradePathPrefix) > 0) {
+		rules = &RestrictionsRules{}
+		rc := RestrictionConfig{
+			Name: "Default Restrictions",
+		}
+		if len(config.RestrictHttpUpgradePathPrefix) > 0 {
+			for _, p := range config.RestrictHttpUpgradePathPrefix {
+				re, err := regexp.Compile("^/" + strings.TrimPrefix(p, "/"))
+				if err == nil {
+					rc.Match = append(rc.Match, MatchConfig{PathPrefix: re})
+				}
+			}
+		} else {
+			rc.Match = append(rc.Match, MatchConfig{Any: true})
+		}
+
+		if len(config.RestrictTo) > 0 {
+			for _, r := range config.RestrictTo {
+				host, portStr, err := net.SplitHostPort(r)
+				if err == nil {
+					port, _ := strconv.ParseUint(portStr, 10, 16)
+					re, _ := regexp.Compile("^" + regexp.QuoteMeta(host) + "$")
+					rc.Allow = append(rc.Allow, AllowConfig{
+						Tunnel: &AllowTunnelConfig{
+							Host: &Regexp{re},
+							Port: []PortRange{{Min: uint16(port), Max: uint16(port)}},
+						},
+					})
+				}
+			}
+		} else {
+			rc.Allow = append(rc.Allow, AllowConfig{
+				Tunnel:        &AllowTunnelConfig{},
+				ReverseTunnel: &AllowReverseTunnelConfig{},
+			})
+		}
+		rules.Restrictions = append(rules.Restrictions, rc)
 	}
 
 	s := &Server{

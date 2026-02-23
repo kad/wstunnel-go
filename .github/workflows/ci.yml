@@ -17,10 +17,15 @@ jobs:
         with:
           go-version: 1.25
           cache: true
-      - name: golangci-lint
+      - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.10.1
+      - name: golangci-lint (caddy)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.10.1
+          working-directory: pkg/caddy
 
   test:
     runs-on: ubuntu-latest
@@ -30,12 +35,18 @@ jobs:
         with:
           go-version: 1.25
           cache: true
-      - name: Go Mod Tidy
+      - name: Go Mod Tidy (root)
         run: go mod tidy
-      - name: Go Mod Verify
+      - name: Go Mod Verify (root)
         run: go mod verify
-      - name: Run Tests
+      - name: Run Tests (root)
         run: go test -v -race ./...
+      - name: Go Mod Tidy (caddy)
+        run: cd pkg/caddy && go mod tidy
+      - name: Go Mod Verify (caddy)
+        run: cd pkg/caddy && go mod verify
+      - name: Run Tests (caddy)
+        run: cd pkg/caddy && go test -v -race ./...
 
   build:
     runs-on: ubuntu-latest
@@ -47,3 +58,16 @@ jobs:
           cache: true
       - name: Build
         run: make build
+
+  caddy-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 1.25
+          cache: true
+      - name: Install xcaddy
+        run: go install github.com/caddyserver/xcaddy/cmd/xcaddy@latest
+      - name: Validate Caddy Build
+        run: make check-caddy
