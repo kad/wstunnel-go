@@ -339,15 +339,6 @@ func runClient(c *cli.Context) error {
 		serverURL = c.Args().Get(c.Args().Len() - 1) // Get the last argument
 	}
 
-	if serverURL == "" {
-		return fmt.Errorf("server URL is required")
-	}
-
-	if serverURL == "" {
-		return fmt.Errorf("server URL is required")
-	}
-	slog.Info("Starting client", "serverURL", serverURL)
-
 	headers := make(map[string]string)
 	for _, h := range c.StringSlice("header") {
 		parts := strings.SplitN(h, ":", 2)
@@ -404,6 +395,7 @@ func runClient(c *cli.Context) error {
 	if config.ServerURL == "" {
 		return fmt.Errorf("server URL is required")
 	}
+	slog.Info("Starting client", "serverURL", config.ServerURL)
 
 	return startClient(c, config)
 }

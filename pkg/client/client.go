@@ -115,6 +115,14 @@ func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, 
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid server url: %w", err)
 	}
+	// Ensure port is set before scheme rewrite
+	if u.Port() == "" {
+		if u.Scheme == "wss" || u.Scheme == "https" {
+			u.Host = net.JoinHostPort(u.Hostname(), "443")
+		} else {
+			u.Host = net.JoinHostPort(u.Hostname(), "80")
+		}
+	}
 	if u.Scheme == "wss" || u.Scheme == "https" {
 		u.Scheme = "ws"
 	}
@@ -168,6 +176,14 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 	u, err := url.Parse(c.Config.ServerURL)
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid server url: %w", err)
+	}
+	// Ensure port is set before scheme rewrite
+	if u.Port() == "" {
+		if u.Scheme == "wss" || u.Scheme == "https" {
+			u.Host = net.JoinHostPort(u.Hostname(), "443")
+		} else {
+			u.Host = net.JoinHostPort(u.Hostname(), "80")
+		}
 	}
 	switch u.Scheme {
 	case "ws":
@@ -445,14 +461,14 @@ func (c *Client) runUnixTunnel(ltr *protocol.LocalToRemote) {
 			continue
 		}
 
-		go func(c_net net.Conn) {
-			defer func() { _ = c_net.Close() }()
+		go func(netConn net.Conn) {
+			defer func() { _ = netConn.Close() }()
 			ts := c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
 			if ts.err != nil {
 				slog.Error("Failed to connect to transport for Unix", "err", ts.err)
 				return
 			}
-			c.startPipe(c_net, ts)
+			c.startPipe(netConn, ts)
 		}(conn)
 	}
 }
@@ -541,9 +557,9 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 			continue
 		}
 
-		go func(c_net net.Conn) {
-			defer func() { _ = c_net.Close() }()
-			targetHost, targetPort, err := c.handleSocks5(c_net)
+		go func(netConn net.Conn) {
+			defer func() { _ = netConn.Close() }()
+			targetHost, targetPort, err := c.handleSocks5(netConn)
 			if err != nil {
 				slog.Warn("SOCKS5 handshake failed", "err", err)
 				return
@@ -556,7 +572,7 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 				slog.Error("Failed to connect to transport for SOCKS5", "err", ts.err)
 				return
 			}
-			c.startPipe(c_net, ts)
+			c.startPipe(netConn, ts)
 		}(conn)
 	}
 }
@@ -703,14 +719,14 @@ func (c *Client) runTcpTunnel(ltr *protocol.LocalToRemote) {
 			continue
 		}
 
-		go func(c_net net.Conn) {
-			defer func() { _ = c_net.Close() }()
+		go func(netConn net.Conn) {
+			defer func() { _ = netConn.Close() }()
 			ts := c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
 			if ts.err != nil {
 				slog.Error("Failed to connect to transport", "err", ts.err)
 				return
 			}
-			c.startPipe(c_net, ts)
+			c.startPipe(netConn, ts)
 		}(conn)
 	}
 }

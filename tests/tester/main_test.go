@@ -372,13 +372,34 @@ func TestInteroperability(t *testing.T) {
 				host = "::1"
 			}
 
-			serverPort, _ := findFreePort(host)
-			tcpPort, _ := findFreePort(host)
-			udpPort, _ := findFreePort(host)
-			socksPort, _ := findFreePort(host)
-			httpProxyPort, _ := findFreePort(host)
-			targetPort, _ := findFreePort(host)
-			reversePort, _ := findFreePort(host)
+			serverPort, err := findFreePort(host)
+			if err != nil {
+				t.Fatalf("Failed to find free port: %v", err)
+			}
+			tcpPort, err := findFreePort(host)
+			if err != nil {
+				t.Fatalf("Failed to find free port: %v", err)
+			}
+			udpPort, err := findFreePort(host)
+			if err != nil {
+				t.Fatalf("Failed to find free port: %v", err)
+			}
+			socksPort, err := findFreePort(host)
+			if err != nil {
+				t.Fatalf("Failed to find free port: %v", err)
+			}
+			httpProxyPort, err := findFreePort(host)
+			if err != nil {
+				t.Fatalf("Failed to find free port: %v", err)
+			}
+			targetPort, err := findFreePort(host)
+			if err != nil {
+				t.Fatalf("Failed to find free port: %v", err)
+			}
+			reversePort, err := findFreePort(host)
+			if err != nil {
+				t.Fatalf("Failed to find free port: %v", err)
+			}
 
 			var certFile, keyFile string
 			var caCertFile, caKeyFile string

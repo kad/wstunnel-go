@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"fmt"
 	"math/big"
 	"net"
 	"os"
@@ -51,12 +52,30 @@ func generateSignedCerts(certPath, keyPath string, caCertPath, caKeyPath string)
 	var parentPriv interface{}
 
 	if caCertPath != "" && caKeyPath != "" {
-		caCertData, _ := os.ReadFile(caCertPath)
-		caKeyData, _ := os.ReadFile(caKeyPath)
+		caCertData, err := os.ReadFile(caCertPath)
+		if err != nil {
+			return fmt.Errorf("failed to read CA cert: %w", err)
+		}
+		caKeyData, err := os.ReadFile(caKeyPath)
+		if err != nil {
+			return fmt.Errorf("failed to read CA key: %w", err)
+		}
 		block, _ := pem.Decode(caCertData)
-		parent, _ = x509.ParseCertificate(block.Bytes)
+		if block == nil {
+			return fmt.Errorf("failed to decode CA cert PEM")
+		}
+		parent, err = x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse CA cert: %w", err)
+		}
 		keyBlock, _ := pem.Decode(caKeyData)
-		parentPriv, _ = x509.ParseECPrivateKey(keyBlock.Bytes)
+		if keyBlock == nil {
+			return fmt.Errorf("failed to decode CA key PEM")
+		}
+		parentPriv, err = x509.ParseECPrivateKey(keyBlock.Bytes)
+		if err != nil {
+			return fmt.Errorf("failed to parse CA key: %w", err)
+		}
 	} else {
 		parent = &template
 		parentPriv = priv

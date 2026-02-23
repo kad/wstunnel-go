@@ -28,7 +28,7 @@ import (
 )
 
 type Config struct {
-	ListenAddr                     string        `yaml:"remote_addr"`
+	ListenAddr                     string        `yaml:"listen_addr"`
 	PathPrefix                     string        `yaml:"restrict_http_upgrade_path_prefix"`
 	SocketSoMark                   uint32        `yaml:"socket_so_mark"`
 	WebsocketPingFrequency         time.Duration `yaml:"websocket_ping_frequency"`

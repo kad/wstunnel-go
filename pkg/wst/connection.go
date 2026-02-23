@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 )
 
 // Message types
@@ -19,21 +20,30 @@ const (
 )
 
 type Conn struct {
-	rwc     net.Conn
-	bufr    *bufio.Reader
-	bufw    *bufio.Writer
-	masking bool
-	muw     sync.Mutex
-	mur     sync.Mutex
+	rwc         net.Conn
+	bufr        *bufio.Reader
+	bufw        *bufio.Writer
+	masking     bool
+	muw         sync.Mutex
+	mur         sync.Mutex
+	pingHandler func(string) error
+	pongHandler func(string) error
 }
 
 func NewConn(conn net.Conn, masking bool) *Conn {
-	return &Conn{
+	return NewConnWithReader(conn, masking, bufio.NewReader(conn))
+}
+
+func NewConnWithReader(conn net.Conn, masking bool, br *bufio.Reader) *Conn {
+	c := &Conn{
 		rwc:     conn,
-		bufr:    bufio.NewReader(conn),
+		bufr:    br,
 		bufw:    bufio.NewWriter(conn),
 		masking: masking,
 	}
+	c.SetPingHandler(nil)
+	c.SetPongHandler(nil)
+	return c
 }
 
 func (c *Conn) Close() error {
@@ -41,7 +51,60 @@ func (c *Conn) Close() error {
 }
 
 func (c *Conn) SetPingHandler(h func(string) error) {
-	// Minimal implementation: ignore for now or implement if needed
+	if h == nil {
+		h = func(message string) error {
+			err := c.WriteControl(PongMessage, []byte(message), time.Now().Add(time.Second))
+			if err == io.ErrClosedPipe || err == net.ErrClosed {
+				return nil
+			}
+			return err
+		}
+	}
+	c.pingHandler = h
+}
+
+func (c *Conn) SetPongHandler(h func(string) error) {
+	if h == nil {
+		h = func(string) error { return nil }
+	}
+	c.pongHandler = h
+}
+
+func (c *Conn) WriteControl(messageType int, data []byte, deadline time.Time) error {
+	c.muw.Lock()
+	defer c.muw.Unlock()
+
+	b0 := byte(0x80) | byte(messageType)
+	if err := c.bufw.WriteByte(b0); err != nil {
+		return err
+	}
+
+	length := len(data)
+	if length > 125 {
+		return fmt.Errorf("control frame length %d > 125", length)
+	}
+
+	maskBit := byte(0)
+	if c.masking {
+		maskBit = 0x80
+	}
+
+	if err := c.bufw.WriteByte(maskBit | byte(length)); err != nil {
+		return err
+	}
+
+	if c.masking {
+		maskKey := []byte{0, 0, 0, 0}
+		if _, err := c.bufw.Write(maskKey); err != nil {
+			return err
+		}
+	}
+
+	if _, err := c.bufw.Write(data); err != nil {
+		return err
+	}
+
+	return c.bufw.Flush()
 }
 
 func (c *Conn) Subprotocol() string {
@@ -173,16 +236,15 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 
 		switch opcode {
 		case PingMessage:
-			// Auto-reply pong?
-			c.mur.Unlock()
-			err := c.WriteMessage(PongMessage, payload)
-			c.mur.Lock()
-			if err != nil {
-				return 0, nil, err
+			if err := c.pingHandler(string(payload)); err != nil {
+				return PingMessage, payload, err
 			}
-			return PingMessage, payload, nil
+			continue
 		case PongMessage:
-			return PongMessage, payload, nil
+			if err := c.pongHandler(string(payload)); err != nil {
+				return PongMessage, payload, err
+			}
+			continue
 		case CloseMessage:
 			return CloseMessage, nil, io.EOF
 		default:
@@ -193,7 +255,10 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 
 // FormatCloseMessage matches gorilla/websocket signature
 func FormatCloseMessage(closeCode int, text string) []byte {
-	return []byte{} // Simplified
+	buf := make([]byte, 2+len(text))
+	binary.BigEndian.PutUint16(buf, uint16(closeCode))
+	copy(buf[2:], text)
+	return buf
 }
 
 const CloseNormalClosure = 1000
