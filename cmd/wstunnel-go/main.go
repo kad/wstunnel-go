@@ -138,6 +138,12 @@ func main() {
 						EnvVars: []string{"WSTUNNEL_HTTP_PROXY_PASSWORD"},
 					},
 					&cli.StringFlag{
+						Name:    "mode",
+						Value:   "rust",
+						Usage:   "WebSocket protocol mode (rust, ws)",
+						EnvVars: []string{"WSTUNNEL_MODE"},
+					},
+					&cli.StringFlag{
 						Name:    "http-upgrade-path-prefix",
 						Aliases: []string{"prefix", "P"},
 						Value:   "v1",
@@ -191,6 +197,12 @@ func main() {
 				Name:  "server",
 				Usage: "Run wstunnel server",
 				Flags: []cli.Flag{
+					&cli.StringFlag{
+						Name:    "mode",
+						Value:   "rust",
+						Usage:   "WebSocket protocol mode (rust, ws)",
+						EnvVars: []string{"WSTUNNEL_MODE"},
+					},
 					&cli.StringFlag{
 						Name:    "http-upgrade-path-prefix",
 						Aliases: []string{"prefix", "P"},

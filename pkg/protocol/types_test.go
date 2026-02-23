@@ -35,9 +35,9 @@ func TestCredentials_JSON(t *testing.T) {
 
 func TestJwtTunnelConfig_JSON(t *testing.T) {
 	cfg := JwtTunnelConfig{
-		ID: "test-id",
+		ID:     "test-id",
 		Remote: "localhost",
-		Port: 80,
+		Port:   80,
 		Protocol: LocalProtocol{
 			Tcp: &TcpProtocol{ProxyProtocol: true},
 		},

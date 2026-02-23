@@ -17,7 +17,12 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
 -   **Reverse Tunneling**: Support for both static and dynamic reverse tunnels (server-to-client).
 -   **Transports**:
     -   **WebSocket-like transport**: Secure WebSocket-style transport (default) with intentional RFC 6455 deviations for compatibility with the original Rust implementation.
+    -   **RFC 6455 compliant WebSocket**: Enable strict RFC 6455 compliance with `--mode ws` (compatible with standard Go clients).
     -   **HTTP/2**: Full-duplex streaming over HTTP/2.
+-   **Deployment**:
+    -   **Systemd**: Ready-to-use systemd unit templates for Linux.
+    -   **Windows Task Scheduler**: PowerShell scripts for easy deployment as a background task on Windows.
+    -   **Docker**: (Coming soon) Ready-to-use Docker images.
 -   **Security**:
     -   **TLS (wss://, https://)**: Full TLS support with certificate verification.
     -   **mTLS**: Support for client certificates and private keys.
@@ -58,9 +63,45 @@ Alternatively, using standard Go commands:
 go build -o wstunnel-go ./cmd/wstunnel-go
 ```
 
-### Download Pre-built Binaries
+### Download Pre-built Binaries and Packages
 
-Binaries for various platforms (Linux, macOS, Windows) are available on the [Releases](https://github.com/kad/wstunnel-go/releases) page.
+Binaries for various platforms (Linux, macOS, Windows) and distribution packages (`.deb`, `.rpm`, `.apk`) are available on the [Releases](https://github.com/kad/wstunnel-go/releases) page.
+
+### Installation via Package Manager (Linux)
+
+For Debian/Ubuntu-based systems:
+```bash
+sudo dpkg -i wstunnel-go_amd64.deb
+```
+
+### Systemd Integration (Linux)
+
+`wstunnel-go` provides systemd template units for easy management of client and server instances.
+
+1.  Place your configuration YAML file in `/etc/wstunnel-go/client-myserver.yaml`.
+2.  Enable and start the service:
+    ```bash
+    sudo systemctl enable --now wstunnel-go-client@myserver
+    ```
+
+For the server:
+1.  Place your configuration YAML file in `/etc/wstunnel-go/server-main.yaml`.
+2.  Enable and start the service:
+    ```bash
+    sudo systemctl enable --now wstunnel-go-server@main
+    ```
+
+### Windows Task Scheduler Integration
+
+Use the provided PowerShell scripts in the `packaging/windows` directory to register `wstunnel-go` as a background task.
+
+```powershell
+# In an elevated PowerShell session:
+.\packaging\windows\install.ps1 -ConfigPath "C:\path\to\your\client.yaml" -BinaryPath "C:\path\to\wstunnel-go.exe"
+
+# Control the task:
+.\packaging\windows\control.ps1 -Action start
+```
 
 ## Usage
 

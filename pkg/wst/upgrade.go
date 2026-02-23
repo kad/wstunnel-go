@@ -166,7 +166,7 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 		if tlsConfig.ServerName == "" {
 			tlsConfig.ServerName = host
 		}
-		
+
 		tlsConn := tls.Client(conn, tlsConfig)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = conn.Close()

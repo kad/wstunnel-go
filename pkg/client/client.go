@@ -276,13 +276,10 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 	if err != nil {
 		return nil, nil, fmt.Errorf("invalid server url: %w", err)
 	}
-	if u.Scheme == "ws" {
+	switch u.Scheme {
+	case "ws", "http":
 		u.Scheme = "ws"
-	} else if u.Scheme == "wss" {
-		u.Scheme = "wss"
-	} else if u.Scheme == "http" {
-		u.Scheme = "ws"
-	} else if u.Scheme == "https" {
+	case "wss", "https":
 		u.Scheme = "wss"
 	}
 	u.Path = fmt.Sprintf("/%s/events", c.Config.PathPrefix)
@@ -345,6 +342,62 @@ func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string,
 	return &tunnelStream{ws: ws, r: resp, err: err}
 }
 
+func (c *Client) startPipe(local net.Conn, ts *tunnelStream) {
+	defer ts.Close()
+
+	if ts.ws != nil {
+		ts.ws.SetPingHandler(func(appData string) error {
+			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
+		})
+		if c.Config.PingFrequency > 0 {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				ticker := time.NewTicker(c.Config.PingFrequency)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := ts.ws.WriteMessage(wst.PingMessage, []byte{}); err != nil {
+							_ = ts.ws.Close()
+							return
+						}
+					}
+				}
+			}()
+		}
+		tunnel.Pipe(local, ts.ws)
+	} else if ts.gorilla != nil {
+		ts.gorilla.SetPingHandler(func(appData string) error {
+			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+		})
+		if c.Config.PingFrequency > 0 {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				ticker := time.NewTicker(c.Config.PingFrequency)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
+						return
+					case <-ticker.C:
+						if err := ts.gorilla.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+							_ = ts.gorilla.Close()
+							return
+						}
+					}
+				}
+			}()
+		}
+		tunnel.PipeGorilla(local, ts.gorilla)
+	} else {
+		tunnel.PipeBiDir(local, ts.h2)
+	}
+}
+
 func (c *Client) StartTunnel(ltr *protocol.LocalToRemote) {
 	if ltr.Protocol.Stdio != nil {
 		c.runStdioTunnel(ltr)
@@ -399,21 +452,7 @@ func (c *Client) runUnixTunnel(ltr *protocol.LocalToRemote) {
 				slog.Error("Failed to connect to transport for Unix", "err", ts.err)
 				return
 			}
-			defer ts.Close()
-
-			if ts.ws != nil {
-				ts.ws.SetPingHandler(func(appData string) error {
-					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
-				})
-				tunnel.Pipe(c_net, ts.ws)
-			} else if ts.gorilla != nil {
-				ts.gorilla.SetPingHandler(func(appData string) error {
-					return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
-				})
-				tunnel.PipeGorilla(c_net, ts.gorilla)
-			} else {
-				tunnel.PipeBiDir(c_net, ts.h2)
-			}
+			c.startPipe(c_net, ts)
 		}(conn)
 	}
 }
@@ -517,21 +556,7 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 				slog.Error("Failed to connect to transport for SOCKS5", "err", ts.err)
 				return
 			}
-			defer ts.Close()
-
-			if ts.ws != nil {
-				ts.ws.SetPingHandler(func(appData string) error {
-					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
-				})
-				tunnel.Pipe(c_net, ts.ws)
-			} else if ts.gorilla != nil {
-				ts.gorilla.SetPingHandler(func(appData string) error {
-					return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
-				})
-				tunnel.PipeGorilla(c_net, ts.gorilla)
-			} else {
-				tunnel.PipeBiDir(c_net, ts.h2)
-			}
+			c.startPipe(c_net, ts)
 		}(conn)
 	}
 }
@@ -595,25 +620,14 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 		slog.Error("Failed to connect to transport for HTTP Proxy", "err", ts.err)
 		return
 	}
-	defer ts.Close()
-
-	if ts.ws != nil {
-		ts.ws.SetPingHandler(func(appData string) error {
-			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
-		})
-		tunnel.Pipe(conn, ts.ws)
-	} else if ts.gorilla != nil {
-		ts.gorilla.SetPingHandler(func(appData string) error {
-			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
-		})
-		tunnel.PipeGorilla(conn, ts.gorilla)
-	} else {
-		tunnel.PipeBiDir(conn, ts.h2)
-	}
+	c.startPipe(conn, ts)
 }
 
 func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
-	maxDelay := 10 * time.Second
+	maxDelay := c.Config.ReverseTunnelConnectionRetryMaxBackoff
+	if maxDelay == 0 {
+		maxDelay = 10 * time.Second
+	}
 	delay := 1 * time.Second
 
 	for {
@@ -667,15 +681,7 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 		}
 
 		slog.Info("Reverse tunnel established", "target_host", targetHost, "target_port", targetPort)
-		if ts.ws != nil {
-			tunnel.Pipe(localConn, ts.ws)
-		} else if ts.gorilla != nil {
-			tunnel.PipeGorilla(localConn, ts.gorilla)
-		} else {
-			tunnel.PipeBiDir(localConn, ts.h2)
-		}
-		_ = localConn.Close()
-		ts.Close()
+		c.startPipe(localConn, ts)
 		slog.Info("Reverse tunnel closed")
 	}
 }
@@ -704,21 +710,7 @@ func (c *Client) runTcpTunnel(ltr *protocol.LocalToRemote) {
 				slog.Error("Failed to connect to transport", "err", ts.err)
 				return
 			}
-			defer ts.Close()
-
-			if ts.ws != nil {
-				ts.ws.SetPingHandler(func(appData string) error {
-					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
-				})
-				tunnel.Pipe(c_net, ts.ws)
-			} else if ts.gorilla != nil {
-				ts.gorilla.SetPingHandler(func(appData string) error {
-					return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
-				})
-				tunnel.PipeGorilla(c_net, ts.gorilla)
-			} else {
-				tunnel.PipeBiDir(c_net, ts.h2)
-			}
+			c.startPipe(c_net, ts)
 		}(conn)
 	}
 }
@@ -829,80 +821,72 @@ func (c *Client) runStdioTunnel(ltr *protocol.LocalToRemote) {
 		slog.Error("Failed to connect to transport for Stdio", "err", ts.err)
 		return
 	}
+	// Stdin/Stdout are not net.Conn, so we wrap them
+	rwc := &stdioReadWriteCloser{os.Stdin, os.Stdout}
+	c.startPipeRWC(rwc, ts)
+}
+
+type stdioReadWriteCloser struct {
+	io.Reader
+	io.Writer
+}
+
+func (s *stdioReadWriteCloser) Close() error {
+	return nil // Don't close stdin/stdout
+}
+
+func (c *Client) startPipeRWC(rwc io.ReadWriteCloser, ts *tunnelStream) {
 	defer ts.Close()
 
 	if ts.ws != nil {
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 32*1024)
-			for {
-				n, err := os.Stdin.Read(buf)
-				if n > 0 {
-					err = ts.ws.WriteMessage(wst.BinaryMessage, buf[:n])
-					if err != nil {
+		ts.ws.SetPingHandler(func(appData string) error {
+			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
+		})
+		if c.Config.PingFrequency > 0 {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				ticker := time.NewTicker(c.Config.PingFrequency)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
 						return
+					case <-ticker.C:
+						if err := ts.ws.WriteMessage(wst.PingMessage, []byte{}); err != nil {
+							_ = ts.ws.Close()
+							return
+						}
 					}
 				}
-				if err != nil {
-					return
-				}
-			}
-		}()
-
-		go func() {
-			defer wg.Done()
-			for {
-				messageType, p, err := ts.ws.ReadMessage()
-				if err != nil {
-					return
-				}
-				if messageType == wst.BinaryMessage || messageType == wst.TextMessage {
-					_, _ = os.Stdout.Write(p)
-				}
-			}
-		}()
-
-		wg.Wait()
+			}()
+		}
+		tunnel.PipeRW(rwc, ts.ws)
 	} else if ts.gorilla != nil {
-		var wg sync.WaitGroup
-		wg.Add(2)
-
-		go func() {
-			defer wg.Done()
-			buf := make([]byte, 32*1024)
-			for {
-				n, err := os.Stdin.Read(buf)
-				if n > 0 {
-					err = ts.gorilla.WriteMessage(websocket.BinaryMessage, buf[:n])
-					if err != nil {
+		ts.gorilla.SetPingHandler(func(appData string) error {
+			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+		})
+		if c.Config.PingFrequency > 0 {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			go func() {
+				ticker := time.NewTicker(c.Config.PingFrequency)
+				defer ticker.Stop()
+				for {
+					select {
+					case <-ctx.Done():
 						return
+					case <-ticker.C:
+						if err := ts.gorilla.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
+							_ = ts.gorilla.Close()
+							return
+						}
 					}
 				}
-				if err != nil {
-					return
-				}
-			}
-		}()
-
-		go func() {
-			defer wg.Done()
-			for {
-				messageType, p, err := ts.gorilla.ReadMessage()
-				if err != nil {
-					return
-				}
-				if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
-					_, _ = os.Stdout.Write(p)
-				}
-			}
-		}()
-
-		wg.Wait()
+			}()
+		}
+		tunnel.PipeGorillaRW(rwc, ts.gorilla)
 	} else {
-		// HTTP/2 is already a ReadWriteCloser
-		tunnel.PipeBiDir(os.Stdin, ts.h2)
+		tunnel.PipeBiDir(rwc, ts.h2)
 	}
 }

@@ -48,11 +48,11 @@ func TestConn_ReadWriteMessage(t *testing.T) {
 	// Client ReadMessage should automatically reply with Pong and then we read it back on server?
 	// Wait, ReadMessage on client side will handle Ping and send Pong.
 	// So we need another goroutine to read on client.
-	
+
 	clientDone := make(chan struct{})
 	go func() {
 		// Client reads the Ping, handles it (sends Pong).
-		opcode, _, err := c.ReadMessage() 
+		opcode, _, err := c.ReadMessage()
 		if err != nil {
 			// ignore error on close
 		} else if opcode != PingMessage {

@@ -24,6 +24,32 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
+    files:
+      - README.md
+      - LICENSE
+      - AGENTS.md
+      - PROTOCOL.md
+      - packaging/systemd/*.service
+      - packaging/windows/*.ps1
+      - packaging/examples/*.yaml
+
+nfpms:
+  - id: wstunnel-go
+    package_name: wstunnel-go
+    vendor: "kad"
+    homepage: "https://github.com/kad/wstunnel-go"
+    maintainer: "Alexander D. Kanevskiy <kad@kad.name>"
+    description: "A Go client/server for wstunnel"
+    license: "MIT"
+    formats:
+      - deb
+      - rpm
+      - apk
+    contents:
+      - src: ./packaging/systemd/wstunnel-go-client@.service
+        dst: /usr/lib/systemd/system/wstunnel-go-client@.service
+      - src: ./packaging/systemd/wstunnel-go-server@.service
+        dst: /usr/lib/systemd/system/wstunnel-go-server@.service
 
 checksum:
   name_template: 'checksums.txt'
