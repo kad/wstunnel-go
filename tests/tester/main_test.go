@@ -46,13 +46,27 @@ func (p *WstunnelProcess) Stop() {
 	}
 }
 
-func findFreePort(host string) (int, error) {
+func findFreeTCPPort(host string) (int, error) {
 	ln, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
 		return 0, err
 	}
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
+	return port, nil
+}
+
+func findFreeUDPPort(host string) (int, error) {
+	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		return 0, err
+	}
+	l, err := net.ListenUDP("udp", addr)
+	if err != nil {
+		return 0, err
+	}
+	port := l.LocalAddr().(*net.UDPAddr).Port
+	_ = l.Close()
 	return port, nil
 }
 
@@ -372,31 +386,31 @@ func TestInteroperability(t *testing.T) {
 				host = "::1"
 			}
 
-			serverPort, err := findFreePort(host)
+			serverPort, err := findFreeTCPPort(host)
 			if err != nil {
 				t.Fatalf("Failed to find free port: %v", err)
 			}
-			tcpPort, err := findFreePort(host)
+			tcpPort, err := findFreeTCPPort(host)
 			if err != nil {
 				t.Fatalf("Failed to find free port: %v", err)
 			}
-			udpPort, err := findFreePort(host)
+			udpPort, err := findFreeUDPPort(host)
 			if err != nil {
 				t.Fatalf("Failed to find free port: %v", err)
 			}
-			socksPort, err := findFreePort(host)
+			socksPort, err := findFreeTCPPort(host)
 			if err != nil {
 				t.Fatalf("Failed to find free port: %v", err)
 			}
-			httpProxyPort, err := findFreePort(host)
+			httpProxyPort, err := findFreeTCPPort(host)
 			if err != nil {
 				t.Fatalf("Failed to find free port: %v", err)
 			}
-			targetPort, err := findFreePort(host)
+			targetPort, err := findFreeTCPPort(host)
 			if err != nil {
 				t.Fatalf("Failed to find free port: %v", err)
 			}
-			reversePort, err := findFreePort(host)
+			reversePort, err := findFreeTCPPort(host)
 			if err != nil {
 				t.Fatalf("Failed to find free port: %v", err)
 			}
