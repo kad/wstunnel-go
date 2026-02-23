@@ -103,6 +103,34 @@ Use the provided PowerShell scripts in the `packaging/windows` directory to regi
 .\packaging\windows\control.ps1 -Action start
 ```
 
+### Caddy Integration (Server)
+
+`wstunnel-go` can be built into Caddy server as an HTTP handler.
+
+1.  Build Caddy with `wstunnel-go` module:
+    ```bash
+    xcaddy build --with github.com/kad/wstunnel-go/pkg/caddy
+    ```
+
+2.  Configure in `Caddyfile`:
+    ```caddyfile
+    {
+        order wstunnel before reverse_proxy
+    }
+
+    example.com {
+        route /wstunnel/* {
+            wstunnel {
+                prefix /wstunnel
+                mode rust
+                # restrict_config /etc/wstunnel/rules.yaml
+            }
+        }
+    }
+    ```
+
+`wstunnel-go` in Caddy automatically leverages Caddy's TLS termination, including mTLS.
+
 ## Usage
 
 ### Client Mode

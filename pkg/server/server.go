@@ -69,8 +69,16 @@ func NewServer(config Config) *Server {
 		rvMgr:  NewReverseTunnelManager(config.SocketSoMark),
 		rules:  rules,
 	}
-	s.mux.HandleFunc("/", s.handleRequest)
+	s.mux.HandleFunc("/", s.ServeHTTP)
 	return s
+}
+
+func (s *Server) SetRules(rules *RestrictionsRules) {
+	s.rules = rules
+}
+
+func (s *Server) GetRules() *RestrictionsRules {
+	return s.rules
 }
 
 func (s *Server) Start() error {
@@ -137,7 +145,7 @@ func (s *Server) Start() error {
 	return srv.Serve(ln)
 }
 
-func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
+func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check path prefix if configured
 	if s.Config.PathPrefix != "" {
 		expectedPrefix := "/" + s.Config.PathPrefix
@@ -182,7 +190,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Validate restrictions
 	if s.rules != nil {
 		auth := r.Header.Get("Authorization")
-		if !s.rules.Validate(claims, r.URL.Path, auth) {
+		commonName := ""
+		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+			commonName = r.TLS.PeerCertificates[0].Subject.CommonName
+		}
+		if !s.rules.Validate(claims, r.URL.Path, auth, commonName) {
 			slog.Warn("Tunnel rejected by restrictions", "tunnel_id", claims.ID)
 			http.Error(w, "Forbidden by restrictions", http.StatusForbidden)
 			return

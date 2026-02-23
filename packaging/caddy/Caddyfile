@@ -1,0 +1,21 @@
+{
+    # Global options
+    order wstunnel before reverse_proxy
+}
+
+example.com {
+    # Basic wstunnel-go integration
+    route /wstunnel/* {
+        wstunnel {
+            prefix /wstunnel
+            mode rust
+            # restrict_config /etc/wstunnel/rules.yaml
+        }
+    }
+
+    # Serve other content
+    handle {
+        root * /var/www/html
+        file_server
+    }
+}

@@ -23,9 +23,10 @@ type RestrictionConfig struct {
 }
 
 type MatchConfig struct {
-	Any           bool
-	PathPrefix    *regexp.Regexp
-	Authorization *regexp.Regexp
+	Any              bool
+	PathPrefix       *regexp.Regexp
+	Authorization    *regexp.Regexp
+	ClientCommonName *regexp.Regexp
 }
 
 func (m *MatchConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -38,8 +39,9 @@ func (m *MatchConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	var res struct {
-		PathPrefix    string `yaml:"PathPrefix"`
-		Authorization string `yaml:"Authorization"`
+		PathPrefix       string `yaml:"PathPrefix"`
+		Authorization    string `yaml:"Authorization"`
+		ClientCommonName string `yaml:"ClientCommonName"`
 	}
 	if err := value.Decode(&res); err != nil {
 		return err
@@ -58,6 +60,13 @@ func (m *MatchConfig) UnmarshalYAML(value *yaml.Node) error {
 			return err
 		}
 		m.Authorization = re
+	}
+	if res.ClientCommonName != "" {
+		re, err := regexp.Compile(res.ClientCommonName)
+		if err != nil {
+			return err
+		}
+		m.ClientCommonName = re
 	}
 	return nil
 }
@@ -164,13 +173,13 @@ func LoadRestrictions(path string) (*RestrictionsRules, error) {
 	return rules, nil
 }
 
-func (r *RestrictionsRules) Validate(claims *protocol.JwtTunnelConfig, path string, auth string) bool {
+func (r *RestrictionsRules) Validate(claims *protocol.JwtTunnelConfig, path string, auth string, commonName string) bool {
 	if r == nil || len(r.Restrictions) == 0 {
 		return true
 	}
 
 	for _, restr := range r.Restrictions {
-		if restr.Matches(path, auth) {
+		if restr.Matches(path, auth, commonName) {
 			if restr.Allows(claims) {
 				return true
 			}
@@ -179,7 +188,7 @@ func (r *RestrictionsRules) Validate(claims *protocol.JwtTunnelConfig, path stri
 	return false
 }
 
-func (rc *RestrictionConfig) Matches(path string, auth string) bool {
+func (rc *RestrictionConfig) Matches(path string, auth string, commonName string) bool {
 	for _, m := range rc.Match {
 		if m.Any {
 			return true
@@ -188,6 +197,9 @@ func (rc *RestrictionConfig) Matches(path string, auth string) bool {
 			return true
 		}
 		if m.Authorization != nil && m.Authorization.MatchString(auth) {
+			return true
+		}
+		if m.ClientCommonName != nil && m.ClientCommonName.MatchString(commonName) {
 			return true
 		}
 	}
