@@ -19,6 +19,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
 	"github.com/kad/wstunnel-go/pkg/wst"
@@ -50,6 +51,7 @@ type Config struct {
 	DnsResolverPreferIpv4                  bool              `yaml:"dns_resolver_prefer_ipv4"`
 	LocalToRemote                          []string          `yaml:"local_to_remote"`
 	RemoteToLocal                          []string          `yaml:"remote_to_local"`
+	WebsocketProtocol                      string            `yaml:"mode"` // "rust" or "ws"
 }
 
 type Client struct {
@@ -145,7 +147,7 @@ func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, 
 		if c.pool != nil {
 			return c.pool.Get(ctx)
 		}
-		return c.dialTransport(ctx)
+		return c.dialTransport(ctx, network, addr)
 	}
 
 	conn, resp, err := dialer.Dial(u.String(), header)
@@ -203,7 +205,7 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 	tr := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			return c.dialTransport(ctx)
+			return c.dialTransport(ctx, network, addr)
 		},
 	}
 	httpClient := &http.Client{Transport: tr}
@@ -244,19 +246,83 @@ func (t *tunnelReadWriteCloser) Close() error {
 }
 
 type tunnelStream struct {
-	ws  *wst.Conn
-	h2  io.ReadWriteCloser
-	r   *http.Response
-	err error
+	ws      *wst.Conn
+	gorilla *websocket.Conn
+	h2      io.ReadWriteCloser
+	r       *http.Response
+	err     error
 }
 
 func (ts *tunnelStream) Close() {
 	if ts.ws != nil {
 		_ = ts.ws.Close()
 	}
+	if ts.gorilla != nil {
+		_ = ts.gorilla.Close()
+	}
 	if ts.h2 != nil {
 		_ = ts.h2.Close()
 	}
+}
+
+func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (*websocket.Conn, *http.Response, error) {
+	requestID := uuid.New().String()
+	token, err := c.generateJWT(requestID, p, remoteHost, remotePort)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to generate JWT: %w", err)
+	}
+
+	u, err := url.Parse(c.Config.ServerURL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("invalid server url: %w", err)
+	}
+	if u.Scheme == "ws" {
+		u.Scheme = "ws"
+	} else if u.Scheme == "wss" {
+		u.Scheme = "wss"
+	} else if u.Scheme == "http" {
+		u.Scheme = "ws"
+	} else if u.Scheme == "https" {
+		u.Scheme = "wss"
+	}
+	u.Path = fmt.Sprintf("/%s/events", c.Config.PathPrefix)
+
+	header := http.Header{}
+	// For RFC compliant mode, we might want to use standard headers or follow same JWT pattern
+	// The TODO says "only go clients will be able to work in that mode"
+	header.Set("Sec-WebSocket-Protocol", fmt.Sprintf("v1, %s%s", protocol.JwtHeaderPrefix, token))
+
+	for k, v := range c.Config.Headers {
+		header.Set(k, v)
+	}
+	fileHeaders := c.loadHttpHeaders()
+	for k, v := range fileHeaders {
+		header.Set(k, v)
+	}
+	if c.Config.HttpUpgradeCredentials != "" {
+		header.Set("Authorization", c.Config.HttpUpgradeCredentials)
+	}
+
+	dialer := &websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: !c.Config.TlsVerifyCert,
+		},
+	}
+	if c.Config.TlsSniOverride != "" {
+		dialer.TLSClientConfig.ServerName = c.Config.TlsSniOverride
+	}
+
+	if c.pool != nil {
+		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return c.pool.Get(ctx)
+		}
+	} else {
+		dialer.NetDialContext = c.dialTransport
+	}
+
+	conn, resp, err := dialer.Dial(u.String(), header)
+	return conn, resp, err
 }
 
 func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string, remotePort uint16) *tunnelStream {
@@ -269,6 +335,12 @@ func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string,
 		h2, resp, err := c.connectToHttp2(p, remoteHost, remotePort)
 		return &tunnelStream{h2: h2, r: resp, err: err}
 	}
+
+	if c.Config.WebsocketProtocol == "ws" {
+		ws, resp, err := c.connectToGorilla(p, remoteHost, remotePort)
+		return &tunnelStream{gorilla: ws, r: resp, err: err}
+	}
+
 	ws, resp, err := c.connectToWstunnel(p, remoteHost, remotePort)
 	return &tunnelStream{ws: ws, r: resp, err: err}
 }
@@ -334,6 +406,11 @@ func (c *Client) runUnixTunnel(ltr *protocol.LocalToRemote) {
 					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
 				})
 				tunnel.Pipe(c_net, ts.ws)
+			} else if ts.gorilla != nil {
+				ts.gorilla.SetPingHandler(func(appData string) error {
+					return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+				})
+				tunnel.PipeGorilla(c_net, ts.gorilla)
 			} else {
 				tunnel.PipeBiDir(c_net, ts.h2)
 			}
@@ -447,6 +524,11 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
 				})
 				tunnel.Pipe(c_net, ts.ws)
+			} else if ts.gorilla != nil {
+				ts.gorilla.SetPingHandler(func(appData string) error {
+					return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+				})
+				tunnel.PipeGorilla(c_net, ts.gorilla)
 			} else {
 				tunnel.PipeBiDir(c_net, ts.h2)
 			}
@@ -520,6 +602,11 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
 		})
 		tunnel.Pipe(conn, ts.ws)
+	} else if ts.gorilla != nil {
+		ts.gorilla.SetPingHandler(func(appData string) error {
+			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+		})
+		tunnel.PipeGorilla(conn, ts.gorilla)
 	} else {
 		tunnel.PipeBiDir(conn, ts.h2)
 	}
@@ -582,6 +669,8 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 		slog.Info("Reverse tunnel established", "target_host", targetHost, "target_port", targetPort)
 		if ts.ws != nil {
 			tunnel.Pipe(localConn, ts.ws)
+		} else if ts.gorilla != nil {
+			tunnel.PipeGorilla(localConn, ts.gorilla)
 		} else {
 			tunnel.PipeBiDir(localConn, ts.h2)
 		}
@@ -622,6 +711,11 @@ func (c *Client) runTcpTunnel(ltr *protocol.LocalToRemote) {
 					return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
 				})
 				tunnel.Pipe(c_net, ts.ws)
+			} else if ts.gorilla != nil {
+				ts.gorilla.SetPingHandler(func(appData string) error {
+					return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+				})
+				tunnel.PipeGorilla(c_net, ts.gorilla)
 			} else {
 				tunnel.PipeBiDir(c_net, ts.h2)
 			}
@@ -685,6 +779,16 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 							_, _ = conn.WriteToUDP(p, dest)
 						}
 					}
+				} else if ts.gorilla != nil {
+					for {
+						messageType, p, err := ts.gorilla.ReadMessage()
+						if err != nil {
+							return
+						}
+						if messageType == websocket.BinaryMessage {
+							_, _ = conn.WriteToUDP(p, dest)
+						}
+					}
 				} else {
 					buf := make([]byte, 64*1024)
 					for {
@@ -703,6 +807,8 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 
 		if ts.ws != nil {
 			err = ts.ws.WriteMessage(wst.BinaryMessage, buf[:n])
+		} else if ts.gorilla != nil {
+			err = ts.gorilla.WriteMessage(websocket.BinaryMessage, buf[:n])
 		} else {
 			_, err = ts.h2.Write(buf[:n])
 		}
@@ -754,6 +860,41 @@ func (c *Client) runStdioTunnel(ltr *protocol.LocalToRemote) {
 					return
 				}
 				if messageType == wst.BinaryMessage || messageType == wst.TextMessage {
+					_, _ = os.Stdout.Write(p)
+				}
+			}
+		}()
+
+		wg.Wait()
+	} else if ts.gorilla != nil {
+		var wg sync.WaitGroup
+		wg.Add(2)
+
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 32*1024)
+			for {
+				n, err := os.Stdin.Read(buf)
+				if n > 0 {
+					err = ts.gorilla.WriteMessage(websocket.BinaryMessage, buf[:n])
+					if err != nil {
+						return
+					}
+				}
+				if err != nil {
+					return
+				}
+			}
+		}()
+
+		go func() {
+			defer wg.Done()
+			for {
+				messageType, p, err := ts.gorilla.ReadMessage()
+				if err != nil {
+					return
+				}
+				if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
 					_, _ = os.Stdout.Write(p)
 				}
 			}

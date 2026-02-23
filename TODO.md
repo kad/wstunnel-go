@@ -22,6 +22,8 @@
      value for non-compliant (default) mode.
    - **Config Key:** `mode: ws`
    - **Default Mode:** `rust`
+   - **Dependencies:** gorilla/websocket can be used, but only in cases if rfc compliant protocol. in non-complaint mode it should be using own
+   implementation.
    - **Go Lib:** `gorilla/websocket`
    - **Error Codes:** Map RFC 6455 codes
    - **Handshake:** Validate headers

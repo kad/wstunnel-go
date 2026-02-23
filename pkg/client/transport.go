@@ -13,7 +13,7 @@ import (
 )
 
 // dialTransport establishes a raw TCP or TLS connection to the server
-func (c *Client) dialTransport(ctx context.Context) (net.Conn, error) {
+func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.Conn, error) {
 	u, err := url.Parse(c.Config.ServerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid server url: %w", err)
@@ -28,7 +28,13 @@ func (c *Client) dialTransport(ctx context.Context) (net.Conn, error) {
 			port = "80"
 		}
 	}
-	addr := net.JoinHostPort(host, port)
+	// Use addr provided by dialer if possible, or fallback to Config
+	if addr == "" {
+		addr = net.JoinHostPort(host, port)
+	}
+	if network == "" {
+		network = "tcp"
+	}
 
 	var d net.Dialer
 	d.Timeout = 10 * time.Second
@@ -41,7 +47,7 @@ func (c *Client) dialTransport(ctx context.Context) (net.Conn, error) {
 		}
 	}
 
-	conn, err := d.DialContext(ctx, "tcp", addr)
+	conn, err := d.DialContext(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
