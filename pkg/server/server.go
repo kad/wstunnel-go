@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
@@ -42,6 +43,7 @@ type Config struct {
 	HttpProxyLogin                 string        `yaml:"http_proxy_login"`
 	HttpProxyPassword              string        `yaml:"http_proxy_password"`
 	RemoteToLocalServerIdleTimeout time.Duration `yaml:"remote_to_local_server_idle_timeout"`
+	WebsocketProtocol              string        `yaml:"mode"` // "rust" or "ws"
 }
 
 type Server struct {
@@ -78,7 +80,16 @@ func (s *Server) Start() error {
 	if strings.Contains(bindAddr, "://") {
 		u, err := url.Parse(bindAddr)
 		if err == nil {
-			bindAddr = u.Host
+			host := u.Hostname()
+			port := u.Port()
+			if port == "" {
+				if u.Scheme == "wss" || u.Scheme == "https" {
+					port = "443"
+				} else {
+					port = "80"
+				}
+			}
+			bindAddr = net.JoinHostPort(host, port)
 		}
 	}
 
@@ -185,6 +196,28 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.Config.WebsocketProtocol == "ws" {
+		upgrader := websocket.Upgrader{
+			CheckOrigin: func(r *http.Request) bool { return true },
+		}
+		for _, subprotocol := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
+			if strings.TrimSpace(subprotocol) == "v1" {
+				upgrader.Subprotocols = []string{"v1"}
+				break
+			}
+		}
+
+		wsConn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			slog.Error("Gorilla upgrade failed", "err", err)
+			return
+		}
+
+		slog.Info("Accepted gorilla tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port, "subprotocol", wsConn.Subprotocol())
+		go s.handleGorillaConnection(wsConn, claims)
+		return
+	}
+
 	// Upgrade to WebSocket
 	upgrader := wst.Upgrader{
 		CheckOrigin: func(r *http.Request) bool { return true },
@@ -249,6 +282,48 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 	}
 
 	slog.Warn("Unsupported protocol", "proto", claims.Protocol)
+}
+
+func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
+	defer func() { _ = wsConn.Close() }()
+
+	wsConn.SetPingHandler(func(appData string) error {
+		return wsConn.WriteMessage(websocket.PongMessage, []byte(appData))
+	})
+
+	// Forward Tunnel
+	if claims.Protocol.Tcp != nil || claims.Protocol.Udp != nil || claims.Protocol.Socks5 != nil || claims.Protocol.HttpProxy != nil || claims.Protocol.Unix != nil {
+		var targetAddr string
+		network := "tcp"
+
+		if claims.Protocol.Unix != nil {
+			targetAddr = claims.Protocol.Unix.Path
+			network = "unix"
+		} else {
+			targetAddr = net.JoinHostPort(claims.Remote, fmt.Sprintf("%d", claims.Port))
+			if claims.Protocol.Udp != nil {
+				network = "udp"
+			}
+		}
+
+		conn, err := net.DialTimeout(network, targetAddr, 10*time.Second)
+		if err != nil {
+			slog.Error("Failed to connect to target (gorilla)", "network", network, "target", targetAddr, "err", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
+
+		tunnel.PipeGorilla(conn, wsConn)
+		return
+	}
+
+	// Reverse Tunnel
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+		s.rvMgr.HandleGorillaClient(wsConn, claims)
+		return
+	}
+
+	slog.Warn("Unsupported protocol (gorilla)", "proto", claims.Protocol)
 }
 
 func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, claims *protocol.JwtTunnelConfig) {

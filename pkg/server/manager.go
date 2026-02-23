@@ -11,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
@@ -33,9 +34,10 @@ type tunnelListener struct {
 }
 
 type waitingConn struct {
-	wsConn *wst.Conn
-	h2Conn io.ReadWriteCloser
-	done   chan struct{}
+	wsConn      *wst.Conn
+	gorillaConn *websocket.Conn
+	h2Conn      io.ReadWriteCloser
+	done        chan struct{}
 }
 
 func NewReverseTunnelManager(socketSoMark uint32) *ReverseTunnelManager {
@@ -114,6 +116,28 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *wst.Conn, claims *protocol.J
 	}
 }
 
+func (m *ReverseTunnelManager) HandleGorillaClient(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
+	tl, bindAddr, err := m.getOrCreateListener(claims)
+	if err != nil {
+		slog.Error("Reverse tunnel: failed to listen", "addr", bindAddr, "err", err)
+		_ = wsConn.Close()
+		return
+	}
+
+	wait := &waitingConn{
+		gorillaConn: wsConn,
+		done:        make(chan struct{}),
+	}
+
+	select {
+	case tl.waiting <- wait:
+		slog.Info("Reverse tunnel (gorilla): client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
+		<-wait.done
+	case <-tl.quit:
+		_ = wsConn.Close()
+	}
+}
+
 func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims *protocol.JwtTunnelConfig) {
 	tl, bindAddr, err := m.getOrCreateListener(claims)
 	if err != nil {
@@ -181,6 +205,8 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	slog.Info("Reverse tunnel: forwarding connection to client", "addr", tl.addr, "target_host", targetHost, "target_port", targetPort)
 	if wait.wsConn != nil {
 		tunnel.Pipe(conn, wait.wsConn)
+	} else if wait.gorillaConn != nil {
+		tunnel.PipeGorilla(conn, wait.gorillaConn)
 	} else {
 		tunnel.PipeBiDir(conn, wait.h2Conn)
 	}

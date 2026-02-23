@@ -38,8 +38,9 @@ func loadConfigFile(path string) (*FullConfig, error) {
 func main() {
 	rlimit.RaiseFdLimit()
 	app := &cli.App{
-		Name:  "wstunnel-go",
-		Usage: "A Go client/server for wstunnel",
+		Name:                   "wstunnel-go",
+		Usage:                  "A Go client/server for wstunnel",
+		UseShortOptionHandling: true,
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "config",
@@ -333,6 +334,7 @@ func runClient(c *cli.Context) error {
 	if serverURL == "" {
 		return fmt.Errorf("server URL is required")
 	}
+	slog.Info("Starting client", "serverURL", serverURL)
 
 	headers := make(map[string]string)
 	for _, h := range c.StringSlice("header") {
@@ -367,13 +369,14 @@ func runClient(c *cli.Context) error {
 		DnsResolverPreferIpv4:                  c.Bool("dns-resolver-prefer-ipv4"),
 		LocalToRemote:                          c.StringSlice("local-to-remote"),
 		RemoteToLocal:                          c.StringSlice("remote-to-local"),
+		WebsocketProtocol:                      c.String("mode"),
 	}
 
 	// Override from config file if provided
 	if c.String("config") != "" {
 		cfg, _ := loadConfigFile(c.String("config"))
 		if cfg != nil && cfg.Client != nil {
-			if config.ServerURL == "" {
+			if serverURL == "" {
 				config.ServerURL = cfg.Client.ServerURL
 			}
 			if len(config.LocalToRemote) == 0 {
@@ -435,6 +438,7 @@ func runServer(c *cli.Context) error {
 	if listenAddr == "" {
 		listenAddr = "ws://0.0.0.0:8080"
 	}
+	slog.Info("Starting server", "listenAddr", listenAddr)
 
 	config := &server.Config{
 		ListenAddr:                     listenAddr,
@@ -454,6 +458,7 @@ func runServer(c *cli.Context) error {
 		HttpProxyLogin:                 c.String("http-proxy-login"),
 		HttpProxyPassword:              c.String("http-proxy-password"),
 		RemoteToLocalServerIdleTimeout: c.Duration("remote-to-local-server-idle-timeout"),
+		WebsocketProtocol:              c.String("mode"),
 	}
 
 	if c.String("config") != "" {

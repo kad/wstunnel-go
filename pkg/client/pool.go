@@ -41,7 +41,7 @@ func (p *ConnectionPool) maintain(minIdle int) {
 		case <-ticker.C:
 			// Fill the pool
 			for len(p.conns) < minIdle {
-				conn, err := p.client.dialTransport(p.ctx)
+				conn, err := p.client.dialTransport(p.ctx, "", "")
 				if err != nil {
 					slog.Warn("Pool: failed to dial", "err", err)
 					// Backoff a bit
@@ -69,7 +69,7 @@ func (p *ConnectionPool) Get(ctx context.Context) (net.Conn, error) {
 		return conn, nil
 	default:
 		// Pool empty, dial new one
-		return p.client.dialTransport(ctx)
+		return p.client.dialTransport(ctx, "", "")
 	}
 }
 

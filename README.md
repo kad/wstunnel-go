@@ -6,42 +6,42 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
 
 ## Features
 
-- **Protocol Support**: 
-  - **TCP**: Reliable stream tunneling.
-  - **UDP**: Datagram tunneling with state tracking.
-  - **SOCKS5**: Local SOCKS5 proxy (with optional authentication).
-  - **HTTP Proxy**: Local HTTP CONNECT proxy (with optional authentication).
-  - **Unix Domain Sockets**: Tunneling to/from local unix sockets.
-  - **Stdio**: Tunneling via standard input/output.
-- **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
-- **Reverse Tunneling**: Support for both static and dynamic reverse tunnels (server-to-client).
-- **Transports**: 
-  - **WebSocket (RFC 6455)**: Secure WebSocket (default).
-  - **HTTP/2**: Full-duplex streaming over HTTP/2.
-- **Security**: 
-  - **TLS (wss://, https://)**: Full TLS support with certificate verification.
-  - **mTLS**: Support for client certificates and private keys.
-  - **ECH (Encrypted Client Hello)**: Enable ECH for enhanced privacy.
-  - **SNI Control**: Override or disable Server Name Indication.
-  - **JWT Authentication**: Fully compatible with the original Rust implementation's JWT-based auth.
-  - **Restriction Rules**: Server-side YAML configuration to restrict allowed tunnel destinations and path prefixes.
-- **Advanced Networking**:
-  - **SO_MARK**: (Linux only) Support for marking outgoing packets.
-  - **DNS Control**: Custom DNS resolvers and IPv4/IPv6 preference.
-  - **Proxy Support**: Connect through HTTP/HTTPS proxies (with authentication).
-  - **Proxy Protocol**: Support for Proxy Protocol (v1/v2) to preserve client IP.
-- **Modern Architecture**:
-  - **Highly Concurrent**: Leverages Go's goroutines for efficient handling of many simultaneous tunnels.
-  - **Structured Logging**: Uses `log/slog` for modern, structured logging.
-  - **Library First**: Designed as a library for easy integration into other Go projects.
-- **Interoperability**: Maintains full protocol compatibility and CLI parity with the original Rust implementation.
+-   **Protocol Support**:
+    -   **TCP**: Reliable stream tunneling.
+    -   **UDP**: Datagram tunneling with state tracking.
+    -   **SOCKS5**: Local SOCKS5 proxy (with optional authentication).
+    -   **HTTP Proxy**: Local HTTP CONNECT proxy (with optional authentication).
+    -   **Unix Domain Sockets**: Tunneling to/from local unix sockets.
+    -   **Stdio**: Tunneling via standard input/output.
+-   **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
+-   **Reverse Tunneling**: Support for both static and dynamic reverse tunnels (server-to-client).
+-   **Transports**:
+    -   **WebSocket (RFC 6455)**: Secure WebSocket (default).
+    -   **HTTP/2**: Full-duplex streaming over HTTP/2.
+-   **Security**:
+    -   **TLS (wss://, https://)**: Full TLS support with certificate verification.
+    -   **mTLS**: Support for client certificates and private keys.
+    -   **ECH (Encrypted Client Hello)**: Enable ECH for enhanced privacy.
+    -   **SNI Control**: Override or disable Server Name Indication.
+    -   **JWT Authentication**: Fully compatible with the original Rust implementation's JWT-based auth.
+    -   **Restriction Rules**: Server-side YAML configuration to restrict allowed tunnel destinations and path prefixes.
+-   **Advanced Networking**:
+    -   **SO_MARK**: (Linux only) Support for marking outgoing packets.
+    -   **DNS Control**: Custom DNS resolvers and IPv4/IPv6 preference.
+    -   **Proxy Support**: Connect through HTTP/HTTPS proxies (with authentication).
+    -   **Proxy Protocol**: Support for Proxy Protocol (v1/v2) to preserve client IP.
+-   **Modern Architecture**:
+    -   **Highly Concurrent**: Leverages Go's goroutines for efficient handling of many simultaneous tunnels.
+    -   **Structured Logging**: Uses `log/slog` for modern, structured logging.
+    -   **Library First**: Designed as a library for easy integration into other Go projects.
+-   **Interoperability**: Maintains full protocol compatibility and CLI parity with the original Rust implementation.
 
 ## Installation
 
 ### Prerequisites
 
-- **Go version 1.25** or above.
-- `make` (optional, for convenient building).
+-   **Go version 1.25** or above.
+-   `make` (optional, for convenient building).
 
 ### Build from Source
 
@@ -80,6 +80,9 @@ wstunnel-go client -R tcp://8080:127.0.0.1:80 wss://my-server.com
 
 # Use HTTP/2 transport
 wstunnel-go client -L tcp://8080:google.com:443 https://my-server.com
+
+# Use custom DNS resolver and prefer IPv4
+wstunnel-go client --dns-resolver 8.8.8.8 --dns-resolver-prefer-ipv4 -L tcp://8080:google.com:443 wss://my-server.com
 ```
 
 ### Server Mode
@@ -96,28 +99,40 @@ wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-cl
 
 `wstunnel-go` can be configured via command-line flags, environment variables, or a YAML configuration file.
 
-### CLI Flags (Selection)
+### CLI Flags
 
-#### Common Flags
-- `--config`: Path to YAML configuration file.
-- `--log-lvl`: Log verbosity (TRACE, DEBUG, INFO, WARN, ERROR, OFF). Default: INFO.
-- `--no-color`: Disable color output.
+#### Global Flags
+-   `--config`: Path to YAML configuration file.
+-   `--log-lvl`: Log verbosity (TRACE, DEBUG, INFO, WARN, ERROR, OFF). Default: INFO.
+-   `--no-color`: Disable color output.
+-   `--nb-worker-threads`: Number of worker threads (environment variable: `TOKIO_WORKER_THREADS`).
 
 #### Client Flags
-- `-L, --local-to-remote`: Define a local-to-remote tunnel.
-- `-R, --remote-to-local`: Define a remote-to-local (reverse) tunnel.
-- `--http-upgrade-path-prefix`: HTTP upgrade path prefix (default: "v1").
-- `--tls-verify-certificate`: Enable/disable TLS cert verification.
-- `--tls-sni-override`: Override SNI domain.
-- `--tls-ech-enable`: Enable ECH.
-- `--http-proxy`: Use an HTTP proxy for the connection.
-- `--connection-min-idle`: Maintain a pool of idle connections.
+-   `-L, --local-to-remote`: Define a local-to-remote tunnel.
+-   `-R, --remote-to-local`: Define a remote-to-local (reverse) tunnel.
+-   `--http-upgrade-path-prefix`: HTTP upgrade path prefix (default: "v1").
+-   `--http-upgrade-credentials`: Basic auth credentials for upgrade request.
+-   `-H, --header`: Custom HTTP headers for upgrade request.
+-   `--http-headers-file`: File containing custom HTTP headers.
+-   `--tls-verify-certificate`: Enable/disable TLS cert verification.
+-   `--tls-sni-override`: Override SNI domain.
+-   `--tls-sni-disable`: Disable sending SNI.
+-   `--tls-ech-enable`: Enable ECH.
+-   `--http-proxy`: Use an HTTP proxy for the connection.
+-   `--connection-min-idle`: Maintain a pool of idle connections.
+-   `--connection-retry-max-backoff`: Maximum retry backoff for server connection.
+-   `--dns-resolver`: Custom DNS resolver(s).
+-   `--dns-resolver-prefer-ipv4`: Prioritize IPv4 for DNS lookup.
+-   `--websocket-ping-frequency`: Frequency of WebSocket pings.
+-   `--websocket-mask-frame`: Enable masking of WebSocket frames.
 
 #### Server Flags
-- `--restrict-to`: Restrict tunnels to specific destinations (e.g., `127.0.0.1:22`).
-- `--restrict-config`: Path to a YAML file with restriction rules.
-- `--tls-certificate`, `--tls-private-key`: Paths to TLS cert/key for the server.
-- `--tls-client-ca-certs`: Enable mTLS by providing CA certificates to verify clients.
+-   `--restrict-to`: Restrict tunnels to specific destinations.
+-   `-r, --restrict-http-upgrade-path-prefix`: Restrict tunnels to specific path prefixes.
+-   `--restrict-config`: Path to a YAML file with restriction rules.
+-   `--tls-certificate`, `--tls-private-key`: Paths to TLS cert/key for the server.
+-   `--tls-client-ca-certs`: Enable mTLS by providing CA certificates to verify clients.
+-   `--remote-to-local-server-idle-timeout`: Idle timeout for reverse tunnel server.
 
 ### YAML Configuration Example
 
@@ -148,14 +163,14 @@ import (
 func main() {
     config := client.Config{
         ServerURL: "wss://my-server.com",
-        Transport: "websocket",
+        PathPrefix: "v1",
         // ... other config
     }
     c := client.NewClient(config)
-    
+
     ltr, _ := client.ParseTunnelArg("tcp://8080:google.com:443", false)
     go c.StartTunnel(ltr)
-    
+
     select {}
 }
 ```
@@ -191,16 +206,16 @@ func main() {
 
 ### Compatibility Versions
 
-- **Rust wstunnel**: v9.0.0+
-- **Go**: 1.25+
+-   **Rust wstunnel**: v9.0.0+
+-   **Go**: 1.25+
 
 ## Contributing
 
 Contributions are welcome! Please ensure you follow the project's coding standards:
-1. Run `make fmt` to format code.
-2. Run `make lint` and `make vet` for static analysis.
-3. Ensure all tests pass with `make test`.
-4. Run `make test-interop` if you change protocol-related code.
+1.  Run `make fmt` to format code.
+2.  Run `make lint` and `make vet` for static analysis.
+3.  Ensure all tests pass with `make test`.
+4.  Run `make test-interop` if you change protocol-related code.
 
 ## License
 

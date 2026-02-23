@@ -329,12 +329,13 @@ func TestInteroperability(t *testing.T) {
 		{"Go-Go-WS-TLS", goBinary, goBinary, "wss", false, false, nil},
 		{"Go-Go-H2-TLS", goBinary, goBinary, "https", false, false, nil},
 		{"Go-Go-WS-mTLS", goBinary, goBinary, "wss", false, false, []string{"mtls"}},
+		{"Go-Go-WS-RFC", goBinary, goBinary, "websocket", false, false, []string{"--mode", "ws"}},
 	}
 
 	for _, tc := range combinations {
 		tc := tc // capture range variable
 		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
+			// t.Parallel()
 			host := "127.0.0.1"
 			if tc.ipv6 {
 				host = "::1"
@@ -428,9 +429,10 @@ func TestInteroperability(t *testing.T) {
 			}
 			
 			var serverArgs []string
-			serverArgs = []string{"server"}
 			if tc.serverBin == goBinary {
-				serverArgs = append(serverArgs, "--http-upgrade-path-prefix", "v1")
+				serverArgs = []string{"--log-lvl", "DEBUG", "server", "--listen-addr", serverURL, "--http-upgrade-path-prefix", "v1"}
+			} else {
+				serverArgs = []string{"server", serverURL}
 			}
 
 			if isTLS {
@@ -446,7 +448,6 @@ func TestInteroperability(t *testing.T) {
 					serverArgs = append(serverArgs, opt)
 				}
 			}
-			serverArgs = append(serverArgs, serverURL) // serverURL is now the positional argument
 			
 			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs, cleanEnv)
 			if err != nil {
@@ -476,9 +477,10 @@ func TestInteroperability(t *testing.T) {
 				connectURL = "https://" + serverAddr
 			}
 
-			clientArgs = []string{"client"}
 			if tc.clientBin == goBinary {
-				clientArgs = append(clientArgs, "--http-upgrade-path-prefix", "v1")
+				clientArgs = []string{"--log-lvl", "DEBUG", "client", "--remote-addr", connectURL, "--http-upgrade-path-prefix", "v1"}
+			} else {
+				clientArgs = []string{"client"}
 			}
 			clientArgs = append(clientArgs, "-L", tcpL, "-L", udpL, "-L", socksL)
 			if tc.name == "Go-Go-HTTPProxy" {
@@ -506,7 +508,10 @@ func TestInteroperability(t *testing.T) {
 					clientArgs = append(clientArgs, opt)
 				}
 			}
-			clientArgs = append(clientArgs, connectURL) // connectURL is now the positional argument
+			
+			if tc.clientBin != goBinary {
+				clientArgs = append(clientArgs, connectURL)
+			}
 			
 			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs, cleanEnv)
 			if err != nil {
