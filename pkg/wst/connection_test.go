@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestConn_ReadWriteMessage(t *testing.T) {
@@ -37,43 +38,39 @@ func TestConn_ReadWriteMessage(t *testing.T) {
 	}
 
 	// Test Ping/Pong
+	pongReceived := make(chan string, 1)
+	s.SetPongHandler(func(msg string) error {
+		pongReceived <- msg
+		return nil
+	})
+
 	go func() {
 		// Server sends Ping
-		err := s.WriteMessage(PingMessage, []byte("ping"))
+		err := s.WriteControl(PingMessage, []byte("ping"), time.Now().Add(time.Second))
 		if err != nil {
-			t.Errorf("Server WriteMessage(Ping) error = %v", err)
+			t.Errorf("Server WriteControl(Ping) error = %v", err)
 		}
 	}()
 
-	// Client ReadMessage should automatically reply with Pong and then we read it back on server?
-	// Wait, ReadMessage on client side will handle Ping and send Pong.
-	// So we need another goroutine to read on client.
-
-	clientDone := make(chan struct{})
 	go func() {
-		// Client reads the Ping, handles it (sends Pong).
-		opcode, _, err := c.ReadMessage()
-		if err != nil {
-			// ignore error on close
-		} else if opcode != PingMessage {
-			t.Errorf("Client ReadMessage() opcode = %v, want %v", opcode, PingMessage)
-		}
-		close(clientDone)
+		// Client reads the Ping, handles it (sends Pong automatically via default ping handler).
+		_, _, _ = c.ReadMessage()
 	}()
 
-	// Server should be able to read the Pong
-	opcode, payload, err = s.ReadMessage()
-	if err != nil {
-		t.Fatalf("Server ReadMessage(Pong) error = %v", err)
-	}
-	if opcode != PongMessage {
-		t.Errorf("Server ReadMessage() opcode = %v, want %v", opcode, PongMessage)
-	}
-	if string(payload) != "ping" {
-		t.Errorf("Server ReadMessage() payload = %s, want ping", string(payload))
-	}
+	go func() {
+		// Server needs to read to trigger handlers
+		_, _, _ = s.ReadMessage()
+	}()
 
-	<-clientDone
+	// Server should receive the Pong via handler
+	select {
+	case msg := <-pongReceived:
+		if msg != "ping" {
+			t.Errorf("Server received wrong pong message: %s", msg)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatalf("Server timed out waiting for Pong")
+	}
 }
 
 func TestConn_LargeMessage(t *testing.T) {

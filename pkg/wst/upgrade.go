@@ -3,6 +3,7 @@ package wst
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
@@ -15,6 +16,12 @@ import (
 )
 
 const websocketGUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+
+func generateNonce() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return base64.StdEncoding.EncodeToString(b)
+}
 
 func generateAcceptKey(clientKey string) string {
 	h := sha1.New()
@@ -176,7 +183,8 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 	}
 
 	// Send Handshake
-	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n", u.RequestURI(), host)
+	nonce := generateNonce()
+	req := fmt.Sprintf("GET %s HTTP/1.1\r\nHost: %s\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: %s\r\nSec-WebSocket-Version: 13\r\n", u.RequestURI(), host, nonce)
 	for k, v := range header {
 		for _, val := range v {
 			req += fmt.Sprintf("%s: %s\r\n", k, val)
@@ -204,15 +212,21 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 		_ = conn.Close()
 		return nil, nil, err
 	}
-	_ = conn.SetWriteDeadline(time.Time{}) // Clear deadline
+	_ = conn.SetReadDeadline(time.Time{}) // Clear deadline
 
 	if resp.StatusCode != 101 {
 		_ = conn.Close()
 		return nil, resp, fmt.Errorf("bad status: %s", resp.Status)
 	}
 
+	// Validate accept key
+	if resp.Header.Get("Sec-WebSocket-Accept") != generateAcceptKey(nonce) {
+		_ = conn.Close()
+		return nil, resp, fmt.Errorf("invalid Sec-WebSocket-Accept")
+	}
+
 	// Client SHOULD mask, but we use a robust implementation that supports 0-masking or normal masking.
-	return NewConn(conn, true), resp, nil
+	return NewConnWithReader(conn, true, br), resp, nil
 }
 
 // Dial connects to the url and starts a websocket using DefaultDialer.
