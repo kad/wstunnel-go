@@ -9,6 +9,10 @@ example.com {
         wstunnel {
             prefix /wstunnel
             mode rust
+            ping_interval 30s
+            idle_timeout 60s
+            # mask_frame
+            restrict_to google.com:443 127.0.0.1:22
             # restrict_config /etc/wstunnel/rules.yaml
         }
     }

@@ -90,6 +90,10 @@ func (w *Wstunnel) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddy
 //	    mode ws|rust
 //	    prefix /v1
 //	    restrict_config /path/to/rules.yaml
+//	    ping_interval 30s
+//	    idle_timeout 60s
+//	    mask_frame
+//	    restrict_to host:port ...
 //	}
 func (w *Wstunnel) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
@@ -110,6 +114,28 @@ func (w *Wstunnel) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				w.Config.RestrictConfig = d.Val()
+			case "ping_interval":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dur, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return d.Errf("invalid ping_interval: %v", err)
+				}
+				w.Config.WebsocketPingFrequency = dur
+			case "idle_timeout":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dur, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return d.Errf("invalid idle_timeout: %v", err)
+				}
+				w.Config.RemoteToLocalServerIdleTimeout = dur
+			case "mask_frame":
+				w.Config.WebsocketMaskFrame = true
+			case "restrict_to":
+				w.Config.RestrictTo = append(w.Config.RestrictTo, d.RemainingArgs()...)
 			default:
 				return d.Errf("unrecognized subdirective '%s'", d.Val())
 			}
