@@ -27,11 +27,11 @@ archives:
     files:
       - README.md
       - LICENSE
-      - AGENTS.md
-      - PROTOCOL.md
+      - docs/*.md
       - packaging/systemd/*.service
       - packaging/windows/*.ps1
       - packaging/examples/*.yaml
+      - packaging/caddy/Caddyfile
 
 nfpms:
   - id: wstunnel-go

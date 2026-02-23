@@ -3,9 +3,7 @@
    - **Content:** Detail current features, dependencies, setup steps, operational examples, and interoperability matrix.
    - **Metrics:** Quantify performance benchmarks, compatibility versions.
    - **Clarity:** Ensure precise technical language, consistent formatting.
-   - **Consistency:** update AGENTS.md if necessary for new features or
-     specifics
-
+   - **Consistency:** update AGENTS.md if necessary for new features or specifics
 [x]  try to investigage on adding more interoperability e2e test to the project for different tunnel types and command line
    arguments variations.
    - Define test cases for TCP, UDP, and HTTP tunnels. Validate argument permutations: --port, --host,
@@ -46,7 +44,7 @@
 [x] For client mode, add persistence functionality
    - client should not exit if connection to server got broken, it should try to
      reconnect
-[ ] Caddy integration (server):
+[x] Caddy integration (server):
    - consider example implementation of caddy app plugin that can be built into caddy server to allow serving wstunnels.
    - configuration should be able to specify "users" by path prefixes
    - for each user or groups of users it should be possible to define rules which types of tunnels will be allowed
