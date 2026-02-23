@@ -54,7 +54,7 @@ The project uses `golangci-lint` for static code analysis.
 ### Interoperability Testing
 -   **Purpose:** To validate compatibility with the original Rust `wstunnel` implementation.
 -   **Execution:** Run `make test-interop`.
--   **Requirements:** Requires the Rust `wstunnel` binary at `/home/kad/repositories/github.com/kad/wstunnel/target/release/wstunnel`.
+-   **Requirements:** Requires the Rust `wstunnel` binary to be available on the system `PATH` under the name `wstunnel` (tests will be skipped if it is not found).
 -   **Scope:** Tests various client/server combinations (Go-Go, Go-Rust, Rust-Go) across both WebSocket and HTTP/2 transports.
 
 ## 7. GitHub Workflows
@@ -73,22 +73,18 @@ The project utilizes GitHub Actions for Continuous Integration and Continuous De
 
 The project supports multiple transport protocols for tunneling:
 
--   **WebSocket:** (Default) Standard WebSocket-based transport. Uses `Sec-WebSocket-Protocol` header for JWT authentication.
--   **HTTP/2:** Provides full-duplex streaming over HTTP/2 POST requests. Uses `Cookie` header for JWT authentication.
+-  **WebSocket:** (Default) WebSocket-based transport with specific tweaks for compatibility with original Rust implementation. Uses `Sec-WebSocket-Protocol` header for JWT authentication.
+-  **HTTP/2:** Provides full-duplex streaming over HTTP/2 POST requests. Uses `Cookie` header for JWT authentication.
 
 ### Client Configuration
-Use the `--transport` (or `-t`) flag to specify the transport for the **Go client**:
-```bash
-wstunnel-go client -t http2 ...
-```
-The **Rust client** determines the transport based on the server URL scheme (e.g., `ws://` for WebSocket, `http://` for HTTP/2).
+The **Client** determines the transport based on the server URL scheme (e.g., `ws://` for WebSocket, `http://` for HTTP/2).
 
 ### Server Configuration
 The server automatically detects the transport and protocol version. No specific configuration is needed to enable HTTP/2 support.
 
 ## 9. Goreleaser Configuration
 
--   **Configuration File:** `.goreleaser.yaml`.
+- **Configuration File:** `.goreleaser.yaml`.
 - **Purpose:** Automates cross-platform builds and releases.
 - **Local Testing:** Use `make goreleaser-test`.
 

@@ -16,7 +16,7 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
 -   **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
 -   **Reverse Tunneling**: Support for both static and dynamic reverse tunnels (server-to-client).
 -   **Transports**:
-    -   **WebSocket (RFC 6455)**: Secure WebSocket (default).
+    -   **WebSocket-like transport**: Secure WebSocket-style transport (default) with intentional RFC 6455 deviations for compatibility with the original Rust implementation.
     -   **HTTP/2**: Full-duplex streaming over HTTP/2.
 -   **Security**:
     -   **TLS (wss://, https://)**: Full TLS support with certificate verification.

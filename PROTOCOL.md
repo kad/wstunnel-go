@@ -84,7 +84,7 @@ wstunnel-go client -L tcp://1212:google.com:443 --jwt-secret mysecret ws://serve
 
 ### Server Configuration (Go)
 ```bash
-wstunnel-go server --listen ws://0.0.0.0:8080 --jwt-secret mysecret
+wstunnel-go server ws://0.0.0.0:8080 --jwt-secret mysecret
 ```
 
 ## Testing
