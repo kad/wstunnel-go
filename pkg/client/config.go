@@ -88,23 +88,27 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 
 	if proto == "unix" {
 		parts := strings.SplitN(info, ":", 2)
-		path := parts[0]
-		ltr := &protocol.LocalToRemote{
-			Local: path,
-		}
+		localPath := parts[0]
+		remotePath := ""
 		if len(parts) > 1 {
-			remoteInfo := parts[1]
-			rHost, rPortStr, err := net.SplitHostPort(remoteInfo)
-			if err == nil {
-				rPort, _ := strconv.ParseUint(rPortStr, 10, 16)
-				ltr.Remote = rHost
-				ltr.Port = uint16(rPort)
-			}
+			remotePath = parts[1]
 		}
+
+		ltr := &protocol.LocalToRemote{
+			Local: localPath,
+		}
+
 		if isReverse {
-			ltr.Protocol = protocol.LocalProtocol{ReverseUnix: &protocol.ReverseUnixProtocol{Path: path}}
+			ltr.Protocol = protocol.LocalProtocol{ReverseUnix: &protocol.ReverseUnixProtocol{Path: localPath}}
+			// For reverse unix, format is usually unix://local_path:remote_path
+			// but wstunnel (rust) might have different ideas. 
+			// In our case, we want the server to listen on remotePath and forward to localPath.
+			if remotePath != "" {
+				ltr.Remote = remotePath // This will be used as the listen path on the server
+			}
 		} else {
-			ltr.Protocol = protocol.LocalProtocol{Unix: &protocol.UnixProtocol{Path: path, ProxyProtocol: getProxyProtocol()}}
+			ltr.Protocol = protocol.LocalProtocol{Unix: &protocol.UnixProtocol{Path: remotePath, ProxyProtocol: getProxyProtocol()}}
+			ltr.Remote = remotePath
 		}
 		return ltr, nil
 	}
