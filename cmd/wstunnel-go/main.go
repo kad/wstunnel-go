@@ -61,7 +61,7 @@ func main() {
 				Name:    "log-lvl",
 				Value:   "INFO",
 				Usage:   "Log verbosity (TRACE, DEBUG, INFO, WARN, ERROR, OFF)",
-				EnvVars: []string{"RUST_LOG"},
+				EnvVars: []string{"WSTUNNEL_LOG_LVL", "RUST_LOG"},
 			},
 		},
 		Before: func(c *cli.Context) error {
@@ -438,6 +438,7 @@ func startClient(c *cli.Context, config *client.Config) error {
 }
 
 func runServer(c *cli.Context) error {
+	slog.Debug("runServer called", "args", c.Args().Slice())
 	var listenAddr string
 	if c.Args().Len() >= 1 {
 		listenAddr = c.Args().Get(c.Args().Len() - 1) // Get the last argument
@@ -447,9 +448,6 @@ func runServer(c *cli.Context) error {
 		listenAddr = "ws://0.0.0.0:8080"
 	}
 
-	if listenAddr == "" {
-		listenAddr = "ws://0.0.0.0:8080"
-	}
 	slog.Info("Starting server", "listenAddr", listenAddr)
 
 	config := &server.Config{

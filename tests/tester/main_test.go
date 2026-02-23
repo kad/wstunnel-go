@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -53,6 +54,36 @@ func findFreePort(host string) (int, error) {
 	port := ln.Addr().(*net.TCPAddr).Port
 	_ = ln.Close()
 	return port, nil
+}
+
+func waitForPort(host string, port int, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	addr := net.JoinHostPort(host, strconv.Itoa(port))
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err == nil {
+			_ = conn.Close()
+			return nil
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for port %s", addr)
+}
+
+func waitForUnixSocket(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			// Check if we can dial it
+			conn, err := net.DialTimeout("unix", path, 100*time.Millisecond)
+			if err == nil {
+				_ = conn.Close()
+				return nil
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for unix socket %s", path)
 }
 
 func startProcess(name string, binary string, args []string, env []string) (*WstunnelProcess, error) {
@@ -416,23 +447,31 @@ func TestInteroperability(t *testing.T) {
 			// Start Wstunnel Server
 			serverAddr := net.JoinHostPort(host, fmt.Sprintf("%d", serverPort))
 			serverURL := ""
-			if strings.HasPrefix(tc.transport, "ws") {
+			switch tc.transport {
+			case "websocket", "ws":
 				serverURL = "ws://" + serverAddr
 				if isTLS {
 					serverURL = "wss://" + serverAddr
 				}
-			} else if strings.HasPrefix(tc.transport, "http") {
+			case "wss":
+				serverURL = "wss://" + serverAddr
+			case "http2", "http":
 				serverURL = "http://" + serverAddr
 				if isTLS {
 					serverURL = "https://" + serverAddr
 				}
+			case "https":
+				serverURL = "https://" + serverAddr
+			default:
+				t.Fatalf("Unknown transport: %s", tc.transport)
 			}
+			connectURL := serverURL
 
 			var serverArgs []string
 			if tc.serverBin == goBinary {
-				serverArgs = []string{"--log-lvl", "DEBUG", "server", "--listen-addr", serverURL, "--http-upgrade-path-prefix", "v1"}
+				serverArgs = []string{"--log-lvl", "DEBUG", "server", "--http-upgrade-path-prefix", "v1"}
 			} else {
-				serverArgs = []string{"server", serverURL}
+				serverArgs = []string{"server"}
 			}
 
 			if isTLS {
@@ -448,6 +487,7 @@ func TestInteroperability(t *testing.T) {
 					serverArgs = append(serverArgs, opt)
 				}
 			}
+			serverArgs = append(serverArgs, serverURL)
 
 			srv, err := startProcess("Server-"+tc.name, tc.serverBin, serverArgs, cleanEnv)
 			if err != nil {
@@ -455,7 +495,9 @@ func TestInteroperability(t *testing.T) {
 			}
 			defer srv.Stop()
 
-			time.Sleep(1 * time.Second)
+			if err := waitForPort(host, serverPort, 5*time.Second); err != nil {
+				t.Fatalf("Server failed to start: %v", err)
+			}
 
 			// Start Wstunnel Client
 			var clientArgs []string
@@ -465,20 +507,8 @@ func TestInteroperability(t *testing.T) {
 			socksL := fmt.Sprintf("socks5://%s", net.JoinHostPort(host, fmt.Sprintf("%d", socksPort)))
 			httpProxyL := fmt.Sprintf("http://%s", net.JoinHostPort(host, fmt.Sprintf("%d", httpProxyPort)))
 
-			connectURL := ""
-			switch tc.transport {
-			case "websocket":
-				connectURL = "ws://" + serverAddr
-			case "wss":
-				connectURL = "wss://" + serverAddr
-			case "http2":
-				connectURL = "http://" + serverAddr
-			case "https":
-				connectURL = "https://" + serverAddr
-			}
-
 			if tc.clientBin == goBinary {
-				clientArgs = []string{"--log-lvl", "DEBUG", "client", "--remote-addr", connectURL, "--http-upgrade-path-prefix", "v1"}
+				clientArgs = []string{"--log-lvl", "DEBUG", "client", "--http-upgrade-path-prefix", "v1"}
 			} else {
 				clientArgs = []string{"client"}
 			}
@@ -509,9 +539,7 @@ func TestInteroperability(t *testing.T) {
 				}
 			}
 
-			if tc.clientBin != goBinary {
-				clientArgs = append(clientArgs, connectURL)
-			}
+			clientArgs = append(clientArgs, connectURL)
 
 			cli, err := startProcess("Client-"+tc.name, tc.clientBin, clientArgs, cleanEnv)
 			if err != nil {
@@ -519,7 +547,24 @@ func TestInteroperability(t *testing.T) {
 			}
 			defer cli.Stop()
 
-			time.Sleep(2 * time.Second)
+			// Wait for client listeners to be ready
+			if tc.isUnix {
+				if err := waitForUnixSocket(unixListen, 5*time.Second); err != nil {
+					t.Fatalf("Unix listener failed to start: %v", err)
+				}
+			} else {
+				if err := waitForPort(host, tcpPort, 5*time.Second); err != nil {
+					t.Fatalf("TCP listener failed to start: %v", err)
+				}
+				if err := waitForPort(host, socksPort, 5*time.Second); err != nil {
+					t.Fatalf("SOCKS5 listener failed to start: %v", err)
+				}
+				if tc.name == "Go-Go-HTTPProxy" {
+					if err := waitForPort(host, httpProxyPort, 5*time.Second); err != nil {
+						t.Fatalf("HTTP Proxy listener failed to start: %v", err)
+					}
+				}
+			}
 
 			// Test TCP
 			t.Run("TCP", func(t *testing.T) { testTCP(t, host, tcpPort) })
