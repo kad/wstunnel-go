@@ -570,8 +570,6 @@ func runServer(c *cli.Context) error {
 		listenAddr = c.Args().Get(c.Args().Len() - 1) // Get the last argument
 	}
 
-	slog.Info("Starting server", "listenAddr", listenAddr)
-
 	config := &server.Config{}
 
 	if c.String("config") != "" {
@@ -584,6 +582,7 @@ func runServer(c *cli.Context) error {
 	if config.ListenAddr == "" {
 		config.ListenAddr = "ws://0.0.0.0:8080"
 	}
+	slog.Info("Starting server", "listenAddr", config.ListenAddr)
 
 	return startServer(c, config)
 }

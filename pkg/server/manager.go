@@ -108,6 +108,18 @@ func (w *waitingConn) markAcquired() {
 	})
 }
 
+func (w *waitingConn) isAcquired() bool {
+	if w == nil || w.acquired == nil {
+		return false
+	}
+	select {
+	case <-w.acquired:
+		return true
+	default:
+		return false
+	}
+}
+
 func (m *ReverseTunnelManager) touchListener(tl *tunnelListener) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -212,16 +224,29 @@ func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *wai
 	case <-tl.quit:
 		wait.finish(true)
 	case <-acquired:
-		select {
-		case <-wait.done:
-		case <-tl.quit:
-			wait.finish(true)
-		}
+		m.waitAfterAcquireOrShutdown(tl, wait)
 	case <-timer.C:
-		slog.Info("Reverse tunnel: closing idle client connection", "addr", tl.addr)
-		wait.finish(true)
-		m.purgeDoneWaiters(tl)
+		m.handleWaitTimeout(tl, wait)
 	}
+}
+
+func (m *ReverseTunnelManager) waitAfterAcquireOrShutdown(tl *tunnelListener, wait *waitingConn) {
+	select {
+	case <-wait.done:
+	case <-tl.quit:
+		wait.finish(true)
+	}
+}
+
+func (m *ReverseTunnelManager) handleWaitTimeout(tl *tunnelListener, wait *waitingConn) {
+	if wait.isAcquired() {
+		m.waitAfterAcquireOrShutdown(tl, wait)
+		return
+	}
+
+	slog.Info("Reverse tunnel: closing idle client connection", "addr", tl.addr)
+	wait.finish(true)
+	m.purgeDoneWaiters(tl)
 }
 
 func (m *ReverseTunnelManager) purgeDoneWaitersLocked(tl *tunnelListener) {
