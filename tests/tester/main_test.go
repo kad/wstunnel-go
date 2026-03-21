@@ -364,7 +364,8 @@ func TestInteroperability(t *testing.T) {
 		{"Rust-Go-WS", rustBinary, goBinary, "websocket", false, false, nil},
 		{"Go-Go-H2", goBinary, goBinary, "http2", false, false, nil},
 		{"Go-Rust-H2", goBinary, rustBinary, "http2", false, false, nil},
-		{"Rust-Go-H2", rustBinary, goBinary, "http2", false, false, nil},
+		// Rust v10.5.2 panics in its cleartext H2 auto-detect server path unless ping is disabled.
+		{"Rust-Go-H2", rustBinary, goBinary, "http2", false, false, []string{"--websocket-ping-frequency", "0s"}},
 		{"Go-Go-H2-HTTPS", goBinary, goBinary, "https", false, false, nil},
 		{"Go-Go-WS-IPv6", goBinary, goBinary, "websocket", true, false, nil},
 		{"Go-Go-WS-Mask", goBinary, goBinary, "websocket", false, false, []string{"--websocket-mask-frame"}},
