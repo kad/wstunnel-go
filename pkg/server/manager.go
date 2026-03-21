@@ -343,7 +343,10 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 	var network string
 
 	if claims.Protocol.ReverseUnix != nil {
-		bindAddr = claims.Protocol.ReverseUnix.Path
+		bindAddr = claims.Remote
+		if bindAddr == "" {
+			bindAddr = claims.Protocol.ReverseUnix.Path
+		}
 		isUnix = true
 		network = "unix"
 	} else {
@@ -465,6 +468,11 @@ func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 		if err != nil {
 			slog.Warn("Reverse tunnel listener error", "addr", tl.addr, "err", err)
 			m.closeTunnelListener(tl, false)
+			m.mu.Lock()
+			if current, ok := m.listeners[tl.addr]; ok && current == tl {
+				delete(m.listeners, tl.addr)
+			}
+			m.mu.Unlock()
 			return
 		}
 
