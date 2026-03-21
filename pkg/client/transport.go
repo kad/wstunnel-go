@@ -12,6 +12,25 @@ import (
 	"github.com/kad/wstunnel-go/internal/socket"
 )
 
+func (c *Client) tlsClientConfig(serverName string) (*tls.Config, error) {
+	tlsConfig := &tls.Config{
+		InsecureSkipVerify: !c.Config.TlsVerifyCert,
+		ServerName:         serverName,
+	}
+	if c.Config.TlsSniOverride != "" {
+		tlsConfig.ServerName = c.Config.TlsSniOverride
+	}
+	if c.Config.TlsClientCert != "" && c.Config.TlsClientKey != "" {
+		cert, err := tls.LoadX509KeyPair(c.Config.TlsClientCert, c.Config.TlsClientKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to load client cert: %w", err)
+		}
+		tlsConfig.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsConfig, nil
+}
+
 func (c *Client) dialRawTransport(ctx context.Context, network, addr string) (net.Conn, *url.URL, string, error) {
 	u, err := url.Parse(c.Config.ServerURL)
 	if err != nil {
@@ -63,20 +82,10 @@ func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.C
 
 	// TLS Handshake
 	if u.Scheme == "wss" || u.Scheme == "https" {
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: !c.Config.TlsVerifyCert,
-			ServerName:         host,
-		}
-		if c.Config.TlsSniOverride != "" {
-			tlsConfig.ServerName = c.Config.TlsSniOverride
-		}
-		if c.Config.TlsClientCert != "" && c.Config.TlsClientKey != "" {
-			cert, err := tls.LoadX509KeyPair(c.Config.TlsClientCert, c.Config.TlsClientKey)
-			if err != nil {
-				_ = conn.Close()
-				return nil, fmt.Errorf("failed to load client cert: %w", err)
-			}
-			tlsConfig.Certificates = []tls.Certificate{cert}
+		tlsConfig, err := c.tlsClientConfig(host)
+		if err != nil {
+			_ = conn.Close()
+			return nil, err
 		}
 
 		tlsConn := tls.Client(conn, tlsConfig)

@@ -333,15 +333,17 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 
 	dialer := &websocket.Dialer{
 		HandshakeTimeout: 10 * time.Second,
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: !c.Config.TlsVerifyCert,
-		},
 	}
-	if c.Config.TlsSniOverride != "" {
-		dialer.TLSClientConfig.ServerName = c.Config.TlsSniOverride
+	isTLS := u.Scheme == "wss"
+	if isTLS {
+		tlsConfig, err := c.tlsClientConfig(u.Hostname())
+		if err != nil {
+			return nil, nil, err
+		}
+		dialer.TLSClientConfig = tlsConfig
 	}
 
-	if c.pool != nil {
+	if c.pool != nil && !isTLS {
 		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return c.pool.Get(ctx)
 		}

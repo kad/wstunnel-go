@@ -1,12 +1,21 @@
 package client
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/pem"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
@@ -169,4 +178,184 @@ func TestConnectToGorillaOverWSS(t *testing.T) {
 		t.Fatalf("response = %#v, want status 101", resp)
 	}
 	_ = conn.Close()
+}
+
+func TestConnectToGorillaOverWSSIgnoresClosedPool(t *testing.T) {
+	upgrader := websocket.Upgrader{
+		CheckOrigin:  func(r *http.Request) bool { return true },
+		Subprotocols: []string{"v1"},
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("Upgrade() error = %v", err)
+		}
+		_ = conn.Close()
+	}))
+	defer server.Close()
+
+	c := NewClient(Config{
+		ServerURL:         server.URL,
+		PathPrefix:        "v1",
+		TlsVerifyCert:     false,
+		WebsocketProtocol: "ws",
+	})
+	c.pool = &ConnectionPool{}
+	c.pool.closed.Store(true)
+
+	conn, resp, err := c.connectToGorilla(protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
+	if err != nil {
+		t.Fatalf("connectToGorilla() error = %v", err)
+	}
+	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("response = %#v, want status 101", resp)
+	}
+	_ = conn.Close()
+}
+
+func TestConnectToGorillaOverWSSWithClientCertificate(t *testing.T) {
+	caCertPEM, _, caCert, caKey := generateCertificateAuthority(t)
+	serverCert := generateSignedCertificate(t, caCert, caKey, true, "127.0.0.1")
+	clientCert := generateSignedCertificate(t, caCert, caKey, false, "client")
+
+	serverTLSCert, err := tls.X509KeyPair(serverCert.certPEM, serverCert.keyPEM)
+	if err != nil {
+		t.Fatalf("tls.X509KeyPair() error = %v", err)
+	}
+
+	caPool := x509.NewCertPool()
+	if !caPool.AppendCertsFromPEM(caCertPEM) {
+		t.Fatal("AppendCertsFromPEM() failed")
+	}
+
+	upgrader := websocket.Upgrader{
+		CheckOrigin:  func(r *http.Request) bool { return true },
+		Subprotocols: []string{"v1"},
+	}
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.TLS.PeerCertificates) == 0 {
+			t.Fatal("expected client certificate")
+		}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Fatalf("Upgrade() error = %v", err)
+		}
+		_ = conn.Close()
+	}))
+	server.TLS = &tls.Config{
+		Certificates: []tls.Certificate{serverTLSCert},
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientCAs:    caPool,
+	}
+	server.StartTLS()
+	defer server.Close()
+
+	certFile := writeTempFile(t, "client-cert-*.pem", clientCert.certPEM)
+	keyFile := writeTempFile(t, "client-key-*.pem", clientCert.keyPEM)
+
+	c := NewClient(Config{
+		ServerURL:         server.URL,
+		PathPrefix:        "v1",
+		TlsVerifyCert:     false,
+		TlsClientCert:     certFile,
+		TlsClientKey:      keyFile,
+		WebsocketProtocol: "ws",
+	})
+
+	conn, resp, err := c.connectToGorilla(protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
+	if err != nil {
+		t.Fatalf("connectToGorilla() error = %v", err)
+	}
+	if resp == nil || resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("response = %#v, want status 101", resp)
+	}
+	_ = conn.Close()
+}
+
+type certMaterial struct {
+	certPEM []byte
+	keyPEM  []byte
+}
+
+func generateCertificateAuthority(t *testing.T) ([]byte, []byte, *x509.Certificate, *rsa.PrivateKey) {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "test-ca"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("CreateCertificate() error = %v", err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		t.Fatalf("ParseCertificate() error = %v", err)
+	}
+
+	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}),
+		cert, key
+}
+
+func generateSignedCertificate(t *testing.T, caCert *x509.Certificate, caKey *rsa.PrivateKey, server bool, name string) certMaterial {
+	t.Helper()
+
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa.GenerateKey() error = %v", err)
+	}
+
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(time.Now().UnixNano()),
+		Subject:      pkix.Name{CommonName: name},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+	}
+	if server {
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}
+		tmpl.DNSNames = []string{name, "localhost"}
+		tmpl.IPAddresses = []net.IP{net.ParseIP(name)}
+	} else {
+		tmpl.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &key.PublicKey, caKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate() error = %v", err)
+	}
+
+	return certMaterial{
+		certPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}),
+		keyPEM:  pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}),
+	}
+}
+
+func writeTempFile(t *testing.T, pattern string, contents []byte) string {
+	t.Helper()
+
+	f, err := os.CreateTemp(t.TempDir(), pattern)
+	if err != nil {
+		t.Fatalf("CreateTemp() error = %v", err)
+	}
+	if _, err := f.Write(contents); err != nil {
+		_ = f.Close()
+		t.Fatalf("Write() error = %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	return f.Name()
 }
