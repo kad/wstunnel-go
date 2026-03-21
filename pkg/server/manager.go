@@ -26,15 +26,17 @@ type ReverseTunnelManager struct {
 }
 
 type tunnelListener struct {
-	addr     string
-	isUnix   bool
-	protocol protocol.LocalProtocol
-	ln       net.Listener
-	waiting  chan *waitingConn
-	queueMu  sync.Mutex
-	quit     chan struct{}
-	lastUsed time.Time
-	active   int
+	addr      string
+	isUnix    bool
+	protocol  protocol.LocalProtocol
+	ln        net.Listener
+	waiting   []*waitingConn
+	waitCap   int
+	queueMu   sync.Mutex
+	queueCond *sync.Cond
+	quit      chan struct{}
+	lastUsed  time.Time
+	active    int
 }
 
 type waitingConn struct {
@@ -147,25 +149,30 @@ func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *wai
 }
 
 func (m *ReverseTunnelManager) purgeDoneWaitersLocked(tl *tunnelListener) {
-	pending := make([]*waitingConn, 0, len(tl.waiting))
-	for {
-		select {
-		case wait := <-tl.waiting:
-			if wait == nil {
-				continue
-			}
-			select {
-			case <-wait.done:
-				continue
-			default:
-				pending = append(pending, wait)
-			}
-		default:
-			for _, wait := range pending {
-				tl.waiting <- wait
-			}
-			return
+	pending := tl.waiting[:0]
+	removed := false
+
+	for _, wait := range tl.waiting {
+		if wait == nil {
+			removed = true
+			continue
 		}
+		select {
+		case <-wait.done:
+			removed = true
+		default:
+			pending = append(pending, wait)
+		}
+	}
+
+	if len(pending) == 0 {
+		tl.waiting = nil
+	} else {
+		tl.waiting = pending
+	}
+
+	if removed && tl.queueCond != nil {
+		tl.queueCond.Broadcast()
 	}
 }
 
@@ -178,14 +185,29 @@ func (m *ReverseTunnelManager) purgeDoneWaiters(tl *tunnelListener) {
 
 func (m *ReverseTunnelManager) enqueueWaitingConn(tl *tunnelListener, wait *waitingConn) bool {
 	tl.queueMu.Lock()
-	m.purgeDoneWaitersLocked(tl)
-	tl.queueMu.Unlock()
+	defer tl.queueMu.Unlock()
 
-	select {
-	case <-tl.quit:
-		return false
-	case tl.waiting <- wait:
-		return true
+	for {
+		m.purgeDoneWaitersLocked(tl)
+
+		select {
+		case <-tl.quit:
+			return false
+		default:
+		}
+
+		if len(tl.waiting) < tl.waitCap {
+			tl.waiting = append(tl.waiting, wait)
+			if tl.queueCond != nil {
+				tl.queueCond.Signal()
+			}
+			return true
+		}
+
+		if tl.queueCond == nil {
+			return false
+		}
+		tl.queueCond.Wait()
 	}
 }
 
@@ -198,13 +220,20 @@ func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingC
 	for {
 		tl.queueMu.Lock()
 		m.purgeDoneWaitersLocked(tl)
-		select {
-		case wait := <-tl.waiting:
+		if len(tl.waiting) > 0 {
+			wait := tl.waiting[0]
+			tl.waiting = tl.waiting[1:]
+			if len(tl.waiting) == 0 {
+				tl.waiting = nil
+			}
+			if tl.queueCond != nil {
+				tl.queueCond.Signal()
+			}
 			tl.queueMu.Unlock()
 			if wait != nil {
 				return wait, true
 			}
-		default:
+		} else {
 			tl.queueMu.Unlock()
 		}
 
@@ -256,10 +285,11 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 			isUnix:   isUnix,
 			protocol: claims.Protocol,
 			ln:       ln,
-			waiting:  make(chan *waitingConn, 10),
+			waitCap:  10,
 			quit:     make(chan struct{}),
 			lastUsed: time.Now(),
 		}
+		tl.queueCond = sync.NewCond(&tl.queueMu)
 		m.listeners[bindAddr] = tl
 		go m.runListener(tl)
 	}
@@ -341,7 +371,12 @@ func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 		conn, err := tl.ln.Accept()
 		if err != nil {
 			slog.Warn("Reverse tunnel listener error", "addr", tl.addr, "err", err)
+			tl.queueMu.Lock()
 			close(tl.quit)
+			if tl.queueCond != nil {
+				tl.queueCond.Broadcast()
+			}
+			tl.queueMu.Unlock()
 			return
 		}
 
