@@ -55,12 +55,13 @@ RFC 6455 Section 5.1 requires that all frames sent from a client to a server mus
 ### Handshake Sequence
 1.  **Client Dial:** Performs a TCP/TLS connection to the server.
 2.  **Handshake:** Sends a `GET` request with `Upgrade: websocket` and the `Sec-WebSocket-Protocol` containing the JWT.
-3.  **Server Upgrade:** Validates the JWT when a shared secret is configured, or parses it without verification when compatibility mode is enabled, and responds with `HTTP/1.1 101 Switching Protocols`.
+3.  **Server Upgrade:** In `--mode ws`, validates the JWT when a shared secret is configured and otherwise parses an `HS256`-shaped token for compatibility. In `--mode rust`, it parses an `HS256`-shaped token without signature verification to remain wire-compatible with the Rust implementation, then responds with `HTTP/1.1 101 Switching Protocols`.
 4.  **Piping:** Both sides enter a loop using the `pkg/tunnel` (Go) or `wstunnel::tunnel::transport::io` (Rust) logic.
 
 ### Security Considerations
-- **JWT Secrets:** The implementation supports a shared secret (`--jwt-secret`) for signing and verifying tunnel requests.
-- **Compatibility Mode:** To support interoperability with clients that do not share a verification secret, the server can be configured to parse JWTs without signature validation (`--insecure-no-jwt-validation`).
+- **JWT Secrets:** The implementation supports a shared secret (`--jwt-secret`) for signing client tunnel requests and for verifying server-side tunnel JWTs in `--mode ws`.
+- **Rust Compatibility:** In `--mode rust`, the server parses `HS256` tunnel JWTs without signature verification so it remains compatible with the original Rust framing behavior.
+- **Compatibility Mode:** In `--mode ws`, `--insecure-no-jwt-validation` allows `HS256` tunnel JWTs to be parsed without signature verification after validation would otherwise fail.
 
 ### Connection Management
 - **Connection Pooling:** The client can maintain a pool of idle WebSocket connections to the server to eliminate the handshake latency for new tunnel requests.

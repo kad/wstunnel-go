@@ -199,8 +199,8 @@ wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-cl
 #### Server Flags
 -   `--restrict-to`: Restrict tunnels to specific destinations.
 -   `-r, --restrict-http-upgrade-path-prefix`: Restrict tunnels to specific path prefixes.
--   `--jwt-secret`: Shared secret used to verify tunnel JWTs.
--   `--insecure-no-jwt-validation`: Allow unverified tunnel JWTs for compatibility.
+-   `--jwt-secret`: Shared secret used to verify tunnel JWT signatures when running with `--mode ws`. In `--mode rust`, tunnel JWTs are parsed in Rust-compatible mode and are not cryptographically verified.
+-   `--insecure-no-jwt-validation`: Allow Rust-compatible parsing of HS256 tunnel JWTs without signature verification in situations where `--mode ws` would otherwise reject them.
 -   `--restrict-config`: Path to a YAML file with restriction rules.
 -   `--tls-certificate`, `--tls-private-key`: Paths to TLS cert/key for the server.
 -   `--tls-client-ca-certs`: Enable mTLS by providing CA certificates to verify clients.

@@ -57,6 +57,17 @@ func TestConfigYAMLUsesHTTPUpgradePathPrefix(t *testing.T) {
 	}
 }
 
+func TestConfigYAMLAcceptsLegacyRestrictHTTPUpgradePathPrefix(t *testing.T) {
+	var cfg Config
+	if err := yaml.Unmarshal([]byte("restrict_http_upgrade_path_prefix: legacy\n"), &cfg); err != nil {
+		t.Fatalf("yaml.Unmarshal() error = %v", err)
+	}
+
+	if cfg.PathPrefix != "legacy" {
+		t.Fatalf("PathPrefix = %q, want %q", cfg.PathPrefix, "legacy")
+	}
+}
+
 func TestParseJWTClaimsWithSharedSecret(t *testing.T) {
 	srv := NewServer(Config{
 		WebsocketProtocol: "ws",
