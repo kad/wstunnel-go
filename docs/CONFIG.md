@@ -28,6 +28,7 @@ Notes:
 - Duration values use Go duration syntax such as `10s`, `5m`, or `1h`.
 - Tunnel definitions in `local_to_remote` and `remote_to_local` use the same syntax as the CLI `-L` and `-R` flags.
 - The config loader maps directly onto the current Go structs. Unknown keys are ignored by YAML parsing, so typos can silently do nothing.
+- `mode` is used when invoking the binary with only `--config`. The current runtime does not yet apply `log_lvl` or `no_color` from YAML automatically; use CLI flags for those.
 
 ## Client configuration
 
@@ -48,7 +49,7 @@ client:
     X-Env: production
     X-Cluster: edge-a
   http_headers_file: /etc/wstunnel-go/client-headers.txt
-  http_upgrade_credentials: "user:password"
+  http_upgrade_credentials: "Basic dXNlcjpwYXNzd29yZA=="
 
   websocket_ping_frequency: 30s
   websocket_mask_frame: false
@@ -94,7 +95,7 @@ client:
 - `jwt_secret`: optional shared secret used to sign client tunnel JWTs. If unset, the client preserves legacy Rust-compatible behavior.
 - `http_headers`: map of extra request headers added to the server request.
 - `http_headers_file`: file with `Header: value` lines. If set, values from the file override duplicate keys in `http_headers`.
-- `http_upgrade_credentials`: basic auth credentials sent in the `Authorization` header.
+- `http_upgrade_credentials`: raw `Authorization` header value sent to the server. For HTTP Basic auth, provide the full header payload such as `Basic dXNlcjpwYXNzd29yZA==`.
 - `websocket_ping_frequency`: websocket ping interval.
 - `websocket_mask_frame`: enable masking on websocket frames.
 - `tls_verify_certificate`: verify server certificates when using TLS.
@@ -179,8 +180,8 @@ server:
 - `listen_addr`: server bind URL. Examples: `ws://0.0.0.0:8080`, `wss://0.0.0.0:8443`, `http://0.0.0.0:8080`, `https://0.0.0.0:8443`.
 - `http_upgrade_path_prefix`: path prefix used for incoming tunnel requests.
 - `mode`: websocket compatibility mode. Use `rust` to match Rust framing/behavior or `ws` for RFC 6455 websocket handling.
-- `jwt_secret`: optional verification secret for tunnel JWTs.
-- `insecure_no_jwt_validation`: skip signature validation for compatibility. In `rust` mode the server stays compatible with Rust-style HS256 token handling.
+- `jwt_secret`: optional verification secret for tunnel JWTs. In `mode: ws`, signatures are verified when this is set. In `mode: rust`, tokens are still parsed in Rust-compatible mode and are not cryptographically verified.
+- `insecure_no_jwt_validation`: in `mode: ws`, allow Rust-compatible parsing of HS256 tunnel JWTs without signature verification when interoperability matters more than strict validation. It does not make `mode: rust` any stricter; that mode remains compatibility-oriented.
 - `websocket_ping_frequency`: websocket ping interval sent by the server.
 - `websocket_mask_frame`: enable websocket frame masking.
 - `socket_so_mark`: Linux `SO_MARK` value for outbound connections made by the server.

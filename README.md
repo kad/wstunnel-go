@@ -183,7 +183,7 @@ For a comprehensive YAML guide with annotated client/server examples and option 
 -   `-R, --remote-to-local`: Define a remote-to-local (reverse) tunnel.
 -   `--http-upgrade-path-prefix`: HTTP upgrade path prefix (default: "v1").
 -   `--jwt-secret`: Shared secret used to sign tunnel JWTs.
--   `--http-upgrade-credentials`: Basic auth credentials for upgrade request.
+-   `--http-upgrade-credentials`: Raw `Authorization` header value for the upgrade request (for Basic auth, pass the full `Basic ...` value).
 -   `-H, --header`: Custom HTTP headers for upgrade request.
 -   `--http-headers-file`: File containing custom HTTP headers.
 -   `--tls-verify-certificate`: Enable/disable TLS cert verification.
