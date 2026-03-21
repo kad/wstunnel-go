@@ -250,6 +250,7 @@ func (b *blockingReadWriteCloser) Close() error {
 
 func TestReverseTunnelManagerReapsIdleListener(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
+	t.Cleanup(mgr.Close)
 	claims := &protocol.JwtTunnelConfig{
 		ID:     "reverse-idle",
 		Remote: "127.0.0.1",
@@ -292,6 +293,7 @@ func TestReverseTunnelManagerReapsIdleListener(t *testing.T) {
 
 func TestReverseTunnelManagerDoesNotTimeoutAcquiredConnection(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
+	t.Cleanup(mgr.Close)
 	tl := &tunnelListener{
 		addr: "test",
 		quit: make(chan struct{}),
@@ -335,6 +337,7 @@ func TestReverseTunnelManagerDoesNotTimeoutAcquiredConnection(t *testing.T) {
 
 func TestReverseTunnelManagerPurgesFinishedWaitersBeforeEnqueue(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, time.Second)
+	t.Cleanup(mgr.Close)
 	tl := &tunnelListener{
 		addr:    "test",
 		waitCap: 1,
@@ -359,6 +362,7 @@ func TestReverseTunnelManagerPurgesFinishedWaitersBeforeEnqueue(t *testing.T) {
 
 func TestReverseTunnelManagerKeepsListenerWhileIncomingConnectionIsPending(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
+	t.Cleanup(mgr.Close)
 	tl := &tunnelListener{
 		addr:     "test",
 		waitCap:  1,
@@ -410,6 +414,7 @@ func TestReverseTunnelManagerKeepsListenerWhileIncomingConnectionIsPending(t *te
 
 func TestReverseTunnelManagerEnqueueWaitsForSpaceWithoutDeadlock(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, time.Second)
+	t.Cleanup(mgr.Close)
 	tl := &tunnelListener{
 		addr:    "test",
 		waitCap: 1,

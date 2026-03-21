@@ -23,6 +23,8 @@ type ReverseTunnelManager struct {
 	mu           sync.Mutex
 	socketSoMark uint32
 	idleTimeout  time.Duration
+	stop         chan struct{}
+	stopOnce     sync.Once
 }
 
 type tunnelListener struct {
@@ -35,6 +37,7 @@ type tunnelListener struct {
 	queueMu   sync.Mutex
 	queueCond *sync.Cond
 	quit      chan struct{}
+	quitOnce  sync.Once
 	lastUsed  time.Time
 	active    int
 }
@@ -54,11 +57,30 @@ func NewReverseTunnelManager(socketSoMark uint32, idleTimeout time.Duration) *Re
 		listeners:    make(map[string]*tunnelListener),
 		socketSoMark: socketSoMark,
 		idleTimeout:  idleTimeout,
+		stop:         make(chan struct{}),
 	}
 	if idleTimeout > 0 {
 		go m.reapIdleListeners()
 	}
 	return m
+}
+
+func (m *ReverseTunnelManager) Close() {
+	m.stopOnce.Do(func() {
+		close(m.stop)
+	})
+
+	m.mu.Lock()
+	listeners := make([]*tunnelListener, 0, len(m.listeners))
+	for addr, tl := range m.listeners {
+		delete(m.listeners, addr)
+		listeners = append(listeners, tl)
+	}
+	m.mu.Unlock()
+
+	for _, tl := range listeners {
+		m.closeTunnelListener(tl, true)
+	}
 }
 
 func (w *waitingConn) finish(closeConn bool) {
@@ -124,8 +146,13 @@ func (m *ReverseTunnelManager) reapIdleListeners() {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	for range ticker.C {
-		m.reapIdleListenersOnce(time.Now())
+	for {
+		select {
+		case <-m.stop:
+			return
+		case <-ticker.C:
+			m.reapIdleListenersOnce(time.Now())
+		}
 	}
 }
 
@@ -143,9 +170,26 @@ func (m *ReverseTunnelManager) reapIdleListenersOnce(now time.Time) {
 	m.mu.Unlock()
 
 	for _, tl := range stale {
-		if tl.ln != nil {
-			_ = tl.ln.Close()
-		}
+		m.closeTunnelListener(tl, true)
+	}
+}
+
+func (m *ReverseTunnelManager) closeTunnelListener(tl *tunnelListener, closeListener bool) {
+	if tl == nil {
+		return
+	}
+
+	tl.queueMu.Lock()
+	tl.quitOnce.Do(func() {
+		close(tl.quit)
+	})
+	if tl.queueCond != nil {
+		tl.queueCond.Broadcast()
+	}
+	tl.queueMu.Unlock()
+
+	if closeListener && tl.ln != nil {
+		_ = tl.ln.Close()
 	}
 }
 
@@ -420,12 +464,7 @@ func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 		conn, err := tl.ln.Accept()
 		if err != nil {
 			slog.Warn("Reverse tunnel listener error", "addr", tl.addr, "err", err)
-			tl.queueMu.Lock()
-			close(tl.quit)
-			if tl.queueCond != nil {
-				tl.queueCond.Broadcast()
-			}
-			tl.queueMu.Unlock()
+			m.closeTunnelListener(tl, false)
 			return
 		}
 
