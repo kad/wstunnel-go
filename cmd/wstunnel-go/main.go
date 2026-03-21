@@ -144,6 +144,10 @@ func main() {
 						EnvVars: []string{"WSTUNNEL_MODE"},
 					},
 					&cli.StringFlag{
+						Name:  "jwt-secret",
+						Usage: "Shared secret used to sign tunnel JWTs",
+					},
+					&cli.StringFlag{
 						Name:    "http-upgrade-path-prefix",
 						Aliases: []string{"prefix", "P"},
 						Value:   "v1",
@@ -202,6 +206,14 @@ func main() {
 						Value:   "rust",
 						Usage:   "WebSocket protocol mode (rust, ws)",
 						EnvVars: []string{"WSTUNNEL_MODE"},
+					},
+					&cli.StringFlag{
+						Name:  "jwt-secret",
+						Usage: "Shared secret used to verify tunnel JWTs",
+					},
+					&cli.BoolFlag{
+						Name:  "insecure-no-jwt-validation",
+						Usage: "Allow unverified tunnel JWTs for compatibility",
 					},
 					&cli.StringFlag{
 						Name:    "http-upgrade-path-prefix",
@@ -350,6 +362,7 @@ func runClient(c *cli.Context) error {
 	config := &client.Config{
 		ServerURL:                              serverURL,
 		PathPrefix:                             c.String("http-upgrade-path-prefix"),
+		JWTSecret:                              c.String("jwt-secret"),
 		Headers:                                headers,
 		MaskFrame:                              c.Bool("websocket-mask-frame"),
 		PingFrequency:                          c.Duration("websocket-ping-frequency"),
@@ -445,6 +458,8 @@ func runServer(c *cli.Context) error {
 	config := &server.Config{
 		ListenAddr:                     listenAddr,
 		PathPrefix:                     c.String("http-upgrade-path-prefix"),
+		JWTSecret:                      c.String("jwt-secret"),
+		InsecureNoJWTValidation:        c.Bool("insecure-no-jwt-validation"),
 		SocketSoMark:                   uint32(c.Uint("socket-so-mark")),
 		WebsocketPingFrequency:         c.Duration("websocket-ping-frequency"),
 		WebsocketMaskFrame:             c.Bool("websocket-mask-frame"),

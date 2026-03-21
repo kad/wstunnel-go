@@ -2,8 +2,10 @@ package client
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/binary"
 	"fmt"
 	"io"
@@ -29,6 +31,7 @@ import (
 type Config struct {
 	ServerURL                              string            `yaml:"remote_addr"`
 	PathPrefix                             string            `yaml:"http_upgrade_path_prefix"`
+	JWTSecret                              string            `yaml:"jwt_secret"`
 	Headers                                map[string]string `yaml:"http_headers"`
 	MaskFrame                              bool              `yaml:"websocket_mask_frame"`
 	PingFrequency                          time.Duration     `yaml:"websocket_ping_frequency"`
@@ -59,6 +62,8 @@ type Client struct {
 	pool   *ConnectionPool
 }
 
+const legacyJWTSecret = "champignonfrais"
+
 func NewClient(config Config) *Client {
 	c := &Client{Config: config}
 	if config.ConnectionMinIdle > 0 {
@@ -75,8 +80,13 @@ func (c *Client) generateJWT(requestID string, p protocol.LocalProtocol, remoteH
 		Port:     remotePort,
 	}
 
+	secret := c.Config.JWTSecret
+	if secret == "" {
+		secret = legacyJWTSecret
+	}
+
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte("champignonfrais"))
+	return token.SignedString([]byte(secret))
 }
 
 func (c *Client) loadHttpHeaders() map[string]string {
@@ -331,7 +341,10 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 			return c.pool.Get(ctx)
 		}
 	} else {
-		dialer.NetDialContext = c.dialTransport
+		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, _, _, err := c.dialRawTransport(ctx, network, addr)
+			return conn, err
+		}
 	}
 
 	conn, resp, err := dialer.Dial(u.String(), header)
@@ -473,7 +486,34 @@ func (c *Client) runUnixTunnel(ltr *protocol.LocalToRemote) {
 	}
 }
 
-func (c *Client) handleSocks5(conn net.Conn) (string, uint16, error) {
+func containsSocks5Method(methods []byte, want byte) bool {
+	for _, method := range methods {
+		if method == want {
+			return true
+		}
+	}
+	return false
+}
+
+func authenticateHTTPProxy(header string, credentials *protocol.Credentials) bool {
+	if credentials == nil {
+		return true
+	}
+
+	if !strings.HasPrefix(header, "Basic ") {
+		return false
+	}
+
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(header, "Basic "))
+	if err != nil {
+		return false
+	}
+
+	expected := credentials.Username + ":" + credentials.Password
+	return bytes.Equal(payload, []byte(expected))
+}
+
+func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) (string, uint16, error) {
 	buf := make([]byte, 256)
 
 	// 1. Version/Methods
@@ -487,9 +527,56 @@ func (c *Client) handleSocks5(conn net.Conn) (string, uint16, error) {
 	if _, err := io.ReadFull(conn, buf[:nmethods]); err != nil {
 		return "", 0, err
 	}
-	// Respond: No Authentication Required
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+
+	methods := buf[:nmethods]
+	selectedMethod := byte(0x00)
+	if credentials != nil {
+		selectedMethod = 0x02
+	}
+	if !containsSocks5Method(methods, selectedMethod) {
+		if _, err := conn.Write([]byte{0x05, 0xFF}); err != nil {
+			return "", 0, err
+		}
+		return "", 0, fmt.Errorf("no acceptable authentication method")
+	}
+
+	if _, err := conn.Write([]byte{0x05, selectedMethod}); err != nil {
 		return "", 0, err
+	}
+
+	if selectedMethod == 0x02 {
+		if _, err := io.ReadFull(conn, buf[:2]); err != nil {
+			return "", 0, err
+		}
+		if buf[0] != 0x01 {
+			return "", 0, fmt.Errorf("unsupported socks auth version: %d", buf[0])
+		}
+
+		ulen := int(buf[1])
+		if _, err := io.ReadFull(conn, buf[:ulen]); err != nil {
+			return "", 0, err
+		}
+		username := string(buf[:ulen])
+
+		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
+			return "", 0, err
+		}
+		plen := int(buf[0])
+		if _, err := io.ReadFull(conn, buf[:plen]); err != nil {
+			return "", 0, err
+		}
+		password := string(buf[:plen])
+
+		status := byte(0x00)
+		if username != credentials.Username || password != credentials.Password {
+			status = 0x01
+		}
+		if _, err := conn.Write([]byte{0x01, status}); err != nil {
+			return "", 0, err
+		}
+		if status != 0x00 {
+			return "", 0, fmt.Errorf("invalid socks5 credentials")
+		}
 	}
 
 	// 2. Request
@@ -559,7 +646,11 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 
 		go func(netConn net.Conn) {
 			defer func() { _ = netConn.Close() }()
-			targetHost, targetPort, err := c.handleSocks5(netConn)
+			var credentials *protocol.Credentials
+			if ltr.Protocol.Socks5 != nil {
+				credentials = ltr.Protocol.Socks5.Credentials
+			}
+			targetHost, targetPort, err := c.handleSocks5(netConn, credentials)
 			if err != nil {
 				slog.Warn("SOCKS5 handshake failed", "err", err)
 				return
@@ -616,6 +707,16 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 		return
 	}
 
+	var credentials *protocol.Credentials
+	if ltr.Protocol.HttpProxy != nil {
+		credentials = ltr.Protocol.HttpProxy.Credentials
+	}
+	if !authenticateHTTPProxy(req.Header.Get("Proxy-Authorization"), credentials) {
+		resp := "HTTP/1.1 407 Proxy Authentication Required\r\nProxy-Authenticate: Basic realm=\"wstunnel-go\"\r\n\r\n"
+		_, _ = conn.Write([]byte(resp))
+		return
+	}
+
 	targetHost, targetPortStr, err := net.SplitHostPort(req.Host)
 	if err != nil {
 		slog.Warn("HTTP Proxy: invalid target host", "host", req.Host, "err", err)
@@ -640,6 +741,11 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 }
 
 func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
+	if ltr.Protocol.ReverseUdp != nil || ltr.Protocol.ReverseSocks5 != nil || ltr.Protocol.ReverseHttpProxy != nil {
+		slog.Error("Reverse tunnel protocol is not implemented", "protocol", ltr.Protocol)
+		return
+	}
+
 	maxDelay := c.Config.ReverseTunnelConnectionRetryMaxBackoff
 	if maxDelay == 0 {
 		maxDelay = 10 * time.Second

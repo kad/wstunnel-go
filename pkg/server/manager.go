@@ -22,6 +22,7 @@ type ReverseTunnelManager struct {
 	listeners    map[string]*tunnelListener
 	mu           sync.Mutex
 	socketSoMark uint32
+	idleTimeout  time.Duration
 }
 
 type tunnelListener struct {
@@ -31,6 +32,8 @@ type tunnelListener struct {
 	ln       net.Listener
 	waiting  chan *waitingConn
 	quit     chan struct{}
+	lastUsed time.Time
+	active   int
 }
 
 type waitingConn struct {
@@ -38,12 +41,125 @@ type waitingConn struct {
 	gorillaConn *websocket.Conn
 	h2Conn      io.ReadWriteCloser
 	done        chan struct{}
+	once        sync.Once
 }
 
-func NewReverseTunnelManager(socketSoMark uint32) *ReverseTunnelManager {
-	return &ReverseTunnelManager{
+func NewReverseTunnelManager(socketSoMark uint32, idleTimeout time.Duration) *ReverseTunnelManager {
+	m := &ReverseTunnelManager{
 		listeners:    make(map[string]*tunnelListener),
 		socketSoMark: socketSoMark,
+		idleTimeout:  idleTimeout,
+	}
+	if idleTimeout > 0 {
+		go m.reapIdleListeners()
+	}
+	return m
+}
+
+func (w *waitingConn) finish(closeConn bool) {
+	w.once.Do(func() {
+		if closeConn {
+			switch {
+			case w.wsConn != nil:
+				_ = w.wsConn.Close()
+			case w.gorillaConn != nil:
+				_ = w.gorillaConn.Close()
+			case w.h2Conn != nil:
+				_ = w.h2Conn.Close()
+			}
+		}
+		close(w.done)
+	})
+}
+
+func (m *ReverseTunnelManager) touchListener(tl *tunnelListener) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if current, ok := m.listeners[tl.addr]; ok && current == tl {
+		tl.lastUsed = time.Now()
+	}
+}
+
+func (m *ReverseTunnelManager) updateActivePipes(tl *tunnelListener, delta int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if current, ok := m.listeners[tl.addr]; ok && current == tl {
+		tl.active += delta
+		tl.lastUsed = time.Now()
+	}
+}
+
+func (m *ReverseTunnelManager) reapIdleListeners() {
+	interval := m.idleTimeout / 2
+	if interval < 10*time.Millisecond {
+		interval = 10 * time.Millisecond
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
+		now := time.Now()
+		var stale []*tunnelListener
+
+		m.mu.Lock()
+		for addr, tl := range m.listeners {
+			if tl.active > 0 || now.Sub(tl.lastUsed) < m.idleTimeout {
+				continue
+			}
+			delete(m.listeners, addr)
+			stale = append(stale, tl)
+		}
+		m.mu.Unlock()
+
+		for _, tl := range stale {
+			_ = tl.ln.Close()
+		}
+	}
+}
+
+func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *waitingConn) {
+	if m.idleTimeout <= 0 {
+		<-wait.done
+		return
+	}
+
+	timer := time.NewTimer(m.idleTimeout)
+	defer timer.Stop()
+
+	select {
+	case <-wait.done:
+	case <-tl.quit:
+		wait.finish(true)
+	case <-timer.C:
+		slog.Info("Reverse tunnel: closing idle client connection", "addr", tl.addr)
+		wait.finish(true)
+	}
+}
+
+func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingConn, bool) {
+	timer := time.NewTimer(10 * time.Second)
+	defer timer.Stop()
+
+	for {
+		select {
+		case wait := <-tl.waiting:
+			if wait == nil {
+				return nil, false
+			}
+			select {
+			case <-wait.done:
+				continue
+			default:
+			}
+			return wait, true
+		case <-timer.C:
+			return nil, false
+		case <-tl.quit:
+			return nil, false
+		}
 	}
 }
 
@@ -87,10 +203,12 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 			ln:       ln,
 			waiting:  make(chan *waitingConn, 10),
 			quit:     make(chan struct{}),
+			lastUsed: time.Now(),
 		}
 		m.listeners[bindAddr] = tl
 		go m.runListener(tl)
 	}
+	tl.lastUsed = time.Now()
 	return tl, bindAddr, nil
 }
 
@@ -109,10 +227,11 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *wst.Conn, claims *protocol.J
 
 	select {
 	case tl.waiting <- wait:
+		m.touchListener(tl)
 		slog.Info("Reverse tunnel: client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
-		<-wait.done
+		m.waitForUseOrTimeout(tl, wait)
 	case <-tl.quit:
-		_ = wsConn.Close()
+		wait.finish(true)
 	}
 }
 
@@ -131,10 +250,11 @@ func (m *ReverseTunnelManager) HandleGorillaClient(wsConn *websocket.Conn, claim
 
 	select {
 	case tl.waiting <- wait:
+		m.touchListener(tl)
 		slog.Info("Reverse tunnel (gorilla): client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
-		<-wait.done
+		m.waitForUseOrTimeout(tl, wait)
 	case <-tl.quit:
-		_ = wsConn.Close()
+		wait.finish(true)
 	}
 }
 
@@ -153,10 +273,11 @@ func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims 
 
 	select {
 	case tl.waiting <- wait:
+		m.touchListener(tl)
 		slog.Info("Reverse tunnel (H2): client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
-		<-wait.done
+		m.waitForUseOrTimeout(tl, wait)
 	case <-tl.quit:
-		_ = h2Conn.Close()
+		wait.finish(true)
 	}
 }
 
@@ -192,15 +313,16 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	}
 
 	// Get a waiting client connection
-	var wait *waitingConn
-	select {
-	case wait = <-tl.waiting:
-	case <-time.After(10 * time.Second):
+	wait, ok := m.acquireWaitingConn(tl)
+	if !ok {
 		slog.Error("Reverse tunnel: no client available to handle connection", "addr", tl.addr)
 		return
 	}
 
-	defer close(wait.done)
+	defer wait.finish(false)
+	m.touchListener(tl)
+	m.updateActivePipes(tl, 1)
+	defer m.updateActivePipes(tl, -1)
 
 	slog.Info("Reverse tunnel: forwarding connection to client", "addr", tl.addr, "target_host", targetHost, "target_port", targetPort)
 	if wait.wsConn != nil {

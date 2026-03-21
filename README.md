@@ -14,7 +14,7 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
     -   **Unix Domain Sockets**: Tunneling to/from local unix sockets.
     -   **Stdio**: Tunneling via standard input/output.
 -   **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
--   **Reverse Tunneling**: Support for both static and dynamic reverse tunnels (server-to-client).
+-   **Reverse Tunneling**: Stable support for static reverse TCP and reverse Unix socket tunnels (server-to-client).
 -   **Transports**:
     -   **WebSocket-like transport**: Secure WebSocket-style transport (default) with intentional RFC 6455 deviations for compatibility with the original Rust implementation.
     -   **RFC 6455 compliant WebSocket**: Enable strict RFC 6455 compliance with `--mode ws` (compatible with standard Go clients).
@@ -180,6 +180,7 @@ wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-cl
 -   `-L, --local-to-remote`: Define a local-to-remote tunnel.
 -   `-R, --remote-to-local`: Define a remote-to-local (reverse) tunnel.
 -   `--http-upgrade-path-prefix`: HTTP upgrade path prefix (default: "v1").
+-   `--jwt-secret`: Shared secret used to sign tunnel JWTs.
 -   `--http-upgrade-credentials`: Basic auth credentials for upgrade request.
 -   `-H, --header`: Custom HTTP headers for upgrade request.
 -   `--http-headers-file`: File containing custom HTTP headers.
@@ -198,6 +199,8 @@ wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-cl
 #### Server Flags
 -   `--restrict-to`: Restrict tunnels to specific destinations.
 -   `-r, --restrict-http-upgrade-path-prefix`: Restrict tunnels to specific path prefixes.
+-   `--jwt-secret`: Shared secret used to verify tunnel JWTs.
+-   `--insecure-no-jwt-validation`: Allow unverified tunnel JWTs for compatibility.
 -   `--restrict-config`: Path to a YAML file with restriction rules.
 -   `--tls-certificate`, `--tls-private-key`: Paths to TLS cert/key for the server.
 -   `--tls-client-ca-certs`: Enable mTLS by providing CA certificates to verify clients.
@@ -251,10 +254,12 @@ func main() {
 | Feature | Status | Interop (Rust) |
 | :--- | :---: | :---: |
 | TCP Forward/Reverse | ✅ | ✅ |
-| UDP Forward/Reverse | ✅ | ✅ |
+| UDP Forward | ✅ | ✅ |
+| UDP Reverse | ❌ | ❌ |
 | SOCKS5 Forward | ✅ | ✅ |
-| SOCKS5 Reverse | ✅ | ✅ |
+| SOCKS5 Reverse | ❌ | ❌ |
 | HTTP Proxy (CONNECT) | ✅ | ✅ |
+| Reverse HTTP Proxy | ❌ | ❌ |
 | Unix Sockets | ✅ | ✅ |
 | Stdio Tunneling | ✅ | ✅ |
 | YAML Restrictions | ✅ | ✅ |

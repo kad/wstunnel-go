@@ -55,12 +55,12 @@ RFC 6455 Section 5.1 requires that all frames sent from a client to a server mus
 ### Handshake Sequence
 1.  **Client Dial:** Performs a TCP/TLS connection to the server.
 2.  **Handshake:** Sends a `GET` request with `Upgrade: websocket` and the `Sec-WebSocket-Protocol` containing the JWT.
-3.  **Server Upgrade:** Validates the JWT (optionally skipping signature check for interoperability) and responds with `HTTP/1.1 101 Switching Protocols`.
+3.  **Server Upgrade:** Validates the JWT when a shared secret is configured, or parses it without verification when compatibility mode is enabled, and responds with `HTTP/1.1 101 Switching Protocols`.
 4.  **Piping:** Both sides enter a loop using the `pkg/tunnel` (Go) or `wstunnel::tunnel::transport::io` (Rust) logic.
 
 ### Security Considerations
 - **JWT Secrets:** The implementation supports a shared secret (`--jwt-secret`) for signing and verifying tunnel requests.
-- **Insecure Mode:** To support interoperability with clients using random signing keys (like the Rust client), the server can be configured to parse JWTs without signature validation (`--insecure-no-jwt-validation`).
+- **Compatibility Mode:** To support interoperability with clients that do not share a verification secret, the server can be configured to parse JWTs without signature validation (`--insecure-no-jwt-validation`).
 
 ### Connection Management
 - **Connection Pooling:** The client can maintain a pool of idle WebSocket connections to the server to eliminate the handshake latency for new tunnel requests.

@@ -75,8 +75,14 @@ func (p *ConnectionPool) Get(ctx context.Context) (net.Conn, error) {
 
 func (p *ConnectionPool) Close() {
 	p.cancel()
-	close(p.conns)
-	for conn := range p.conns {
-		_ = conn.Close()
+	for {
+		select {
+		case conn := <-p.conns:
+			if conn != nil {
+				_ = conn.Close()
+			}
+		default:
+			return
+		}
 	}
 }
