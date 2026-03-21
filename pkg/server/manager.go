@@ -199,7 +199,7 @@ func (m *ReverseTunnelManager) enqueueWaitingConn(tl *tunnelListener, wait *wait
 		if len(tl.waiting) < tl.waitCap {
 			tl.waiting = append(tl.waiting, wait)
 			if tl.queueCond != nil {
-				tl.queueCond.Signal()
+				tl.queueCond.Broadcast()
 			}
 			return true
 		}
@@ -212,13 +212,21 @@ func (m *ReverseTunnelManager) enqueueWaitingConn(tl *tunnelListener, wait *wait
 }
 
 func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingConn, bool) {
-	timer := time.NewTimer(10 * time.Second)
+	timer := time.AfterFunc(10*time.Second, func() {
+		if tl.queueCond != nil {
+			tl.queueMu.Lock()
+			tl.queueCond.Broadcast()
+			tl.queueMu.Unlock()
+		}
+	})
 	defer timer.Stop()
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
+
+	deadline := time.Now().Add(10 * time.Second)
+
+	tl.queueMu.Lock()
+	defer tl.queueMu.Unlock()
 
 	for {
-		tl.queueMu.Lock()
 		m.purgeDoneWaitersLocked(tl)
 		if len(tl.waiting) > 0 {
 			wait := tl.waiting[0]
@@ -227,23 +235,28 @@ func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingC
 				tl.waiting = nil
 			}
 			if tl.queueCond != nil {
-				tl.queueCond.Signal()
+				tl.queueCond.Broadcast()
 			}
-			tl.queueMu.Unlock()
 			if wait != nil {
 				return wait, true
 			}
-		} else {
-			tl.queueMu.Unlock()
+			continue
+		}
+
+		if !time.Now().Before(deadline) {
+			return nil, false
 		}
 
 		select {
-		case <-timer.C:
-			return nil, false
 		case <-tl.quit:
 			return nil, false
-		case <-ticker.C:
+		default:
 		}
+
+		if tl.queueCond == nil {
+			return nil, false
+		}
+		tl.queueCond.Wait()
 	}
 }
 
