@@ -14,6 +14,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -26,6 +27,8 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 )
+
+var insecureWSModeJWTWarning sync.Once
 
 type Config struct {
 	ListenAddr                     string        `yaml:"listen_addr"`
@@ -77,6 +80,12 @@ type Server struct {
 }
 
 func NewServer(config Config) *Server {
+	if config.WebsocketProtocol == "ws" && config.JWTSecret == "" {
+		insecureWSModeJWTWarning.Do(func() {
+			slog.Warn("Server running in ws mode without jwt_secret; tunnel JWTs are parsed but not cryptographically verified")
+		})
+	}
+
 	var rules *RestrictionsRules
 	if config.RestrictConfig != "" {
 		var err error

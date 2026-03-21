@@ -360,6 +360,50 @@ func TestReverseTunnelManagerDoesNotTimeoutAcquiredConnection(t *testing.T) {
 	}
 }
 
+func TestReverseTunnelManagerTimeoutDoesNotCloseAlreadyAcquiredConnection(t *testing.T) {
+	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
+	t.Cleanup(mgr.Close)
+
+	tl := &tunnelListener{
+		addr: "test",
+		quit: make(chan struct{}),
+	}
+
+	conn := &nopReadWriteCloser{closed: make(chan struct{})}
+	wait := &waitingConn{
+		h2Conn:   conn,
+		acquired: make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	wait.markAcquired()
+
+	done := make(chan struct{})
+	go func() {
+		mgr.handleWaitTimeout(tl, wait)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("handleWaitTimeout() returned before forwarding completed")
+	case <-time.After(2 * mgr.idleTimeout):
+	}
+
+	select {
+	case <-conn.closed:
+		t.Fatal("already acquired connection was closed by timeout handling")
+	default:
+	}
+
+	wait.finish(false)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleWaitTimeout() did not return after completion")
+	}
+}
+
 func TestReverseTunnelManagerPurgesFinishedWaitersBeforeEnqueue(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, time.Second)
 	t.Cleanup(mgr.Close)
