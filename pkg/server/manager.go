@@ -102,20 +102,25 @@ func (m *ReverseTunnelManager) reapIdleListeners() {
 	defer ticker.Stop()
 
 	for range ticker.C {
-		now := time.Now()
-		var stale []*tunnelListener
+		m.reapIdleListenersOnce(time.Now())
+	}
+}
 
-		m.mu.Lock()
-		for addr, tl := range m.listeners {
-			if tl.active > 0 || now.Sub(tl.lastUsed) < m.idleTimeout {
-				continue
-			}
-			delete(m.listeners, addr)
-			stale = append(stale, tl)
+func (m *ReverseTunnelManager) reapIdleListenersOnce(now time.Time) {
+	var stale []*tunnelListener
+
+	m.mu.Lock()
+	for addr, tl := range m.listeners {
+		if tl.active > 0 || now.Sub(tl.lastUsed) < m.idleTimeout {
+			continue
 		}
-		m.mu.Unlock()
+		delete(m.listeners, addr)
+		stale = append(stale, tl)
+	}
+	m.mu.Unlock()
 
-		for _, tl := range stale {
+	for _, tl := range stale {
+		if tl.ln != nil {
 			_ = tl.ln.Close()
 		}
 	}
@@ -172,33 +177,15 @@ func (m *ReverseTunnelManager) purgeDoneWaiters(tl *tunnelListener) {
 }
 
 func (m *ReverseTunnelManager) enqueueWaitingConn(tl *tunnelListener, wait *waitingConn) bool {
-	ticker := time.NewTicker(10 * time.Millisecond)
-	defer ticker.Stop()
+	tl.queueMu.Lock()
+	m.purgeDoneWaitersLocked(tl)
+	tl.queueMu.Unlock()
 
-	for {
-		tl.queueMu.Lock()
-		m.purgeDoneWaitersLocked(tl)
-
-		select {
-		case <-tl.quit:
-			tl.queueMu.Unlock()
-			return false
-		default:
-		}
-
-		select {
-		case tl.waiting <- wait:
-			tl.queueMu.Unlock()
-			return true
-		default:
-			tl.queueMu.Unlock()
-		}
-
-		select {
-		case <-tl.quit:
-			return false
-		case <-ticker.C:
-		}
+	select {
+	case <-tl.quit:
+		return false
+	case tl.waiting <- wait:
+		return true
 	}
 }
 
@@ -364,6 +351,8 @@ func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 
 func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
+	m.updateActivePipes(tl, 1)
+	defer m.updateActivePipes(tl, -1)
 
 	var targetHost string
 	var targetPort uint16
@@ -386,8 +375,6 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 
 	defer wait.finish(false)
 	m.touchListener(tl)
-	m.updateActivePipes(tl, 1)
-	defer m.updateActivePipes(tl, -1)
 
 	slog.Info("Reverse tunnel: forwarding connection to client", "addr", tl.addr, "target_host", targetHost, "target_port", targetPort)
 	if wait.wsConn != nil {

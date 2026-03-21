@@ -144,7 +144,7 @@ func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, err
 			return nil, err
 		}
 		if token.Method != jwt.SigningMethodHS256 {
-			return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
+			return nil, fmt.Errorf("unexpected signing method: %s", jwtSigningMethodName(token))
 		}
 		return claims, nil
 	}
@@ -158,7 +158,7 @@ func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, err
 	if s.Config.JWTSecret != "" {
 		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (any, error) {
 			if token.Method != jwt.SigningMethodHS256 {
-				return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
+				return nil, fmt.Errorf("unexpected signing method: %s", jwtSigningMethodName(token))
 			}
 			return []byte(s.Config.JWTSecret), nil
 		})
@@ -174,6 +174,13 @@ func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, err
 	}
 
 	return parseUnverified()
+}
+
+func jwtSigningMethodName(token *jwt.Token) string {
+	if token == nil || token.Method == nil {
+		return "<nil>"
+	}
+	return token.Method.Alg()
 }
 
 func (s *Server) SetRules(rules *RestrictionsRules) {
