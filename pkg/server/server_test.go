@@ -290,6 +290,49 @@ func TestReverseTunnelManagerReapsIdleListener(t *testing.T) {
 	t.Fatal("idle reverse listener was not reaped")
 }
 
+func TestReverseTunnelManagerDoesNotTimeoutAcquiredConnection(t *testing.T) {
+	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
+	tl := &tunnelListener{
+		addr: "test",
+		quit: make(chan struct{}),
+	}
+
+	conn := &nopReadWriteCloser{closed: make(chan struct{})}
+	wait := &waitingConn{
+		h2Conn:   conn,
+		acquired: make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		mgr.waitForUseOrTimeout(tl, wait)
+		close(done)
+	}()
+
+	wait.markAcquired()
+
+	select {
+	case <-done:
+		t.Fatal("waitForUseOrTimeout() returned before forwarding completed")
+	case <-time.After(2 * mgr.idleTimeout):
+	}
+
+	select {
+	case <-conn.closed:
+		t.Fatal("acquired connection was closed by idle timeout")
+	default:
+	}
+
+	wait.finish(false)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("waitForUseOrTimeout() did not return after completion")
+	}
+}
+
 func TestReverseTunnelManagerPurgesFinishedWaitersBeforeEnqueue(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, time.Second)
 	tl := &tunnelListener{

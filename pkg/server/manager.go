@@ -43,8 +43,10 @@ type waitingConn struct {
 	wsConn      *wst.Conn
 	gorillaConn *websocket.Conn
 	h2Conn      io.ReadWriteCloser
+	acquired    chan struct{}
 	done        chan struct{}
 	once        sync.Once
+	acquireOnce sync.Once
 }
 
 func NewReverseTunnelManager(socketSoMark uint32, idleTimeout time.Duration) *ReverseTunnelManager {
@@ -72,6 +74,15 @@ func (w *waitingConn) finish(closeConn bool) {
 			}
 		}
 		close(w.done)
+	})
+}
+
+func (w *waitingConn) markAcquired() {
+	if w == nil || w.acquired == nil {
+		return
+	}
+	w.acquireOnce.Do(func() {
+		close(w.acquired)
 	})
 }
 
@@ -140,17 +151,28 @@ func (m *ReverseTunnelManager) reapIdleListenersOnce(now time.Time) {
 
 func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *waitingConn) {
 	if m.idleTimeout <= 0 {
-		<-wait.done
+		select {
+		case <-wait.done:
+		case <-tl.quit:
+			wait.finish(true)
+		}
 		return
 	}
 
 	timer := time.NewTimer(m.idleTimeout)
 	defer timer.Stop()
 
+	acquired := wait.acquired
 	select {
 	case <-wait.done:
 	case <-tl.quit:
 		wait.finish(true)
+	case <-acquired:
+		select {
+		case <-wait.done:
+		case <-tl.quit:
+			wait.finish(true)
+		}
 	case <-timer.C:
 		slog.Info("Reverse tunnel: closing idle client connection", "addr", tl.addr)
 		wait.finish(true)
@@ -248,6 +270,7 @@ func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingC
 				tl.queueCond.Broadcast()
 			}
 			if wait != nil {
+				wait.markAcquired()
 				return wait, true
 			}
 			continue
@@ -329,8 +352,9 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *wst.Conn, claims *protocol.J
 	}
 
 	wait := &waitingConn{
-		wsConn: wsConn,
-		done:   make(chan struct{}),
+		wsConn:   wsConn,
+		acquired: make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 
 	if m.enqueueWaitingConn(tl, wait) {
@@ -352,6 +376,7 @@ func (m *ReverseTunnelManager) HandleGorillaClient(wsConn *websocket.Conn, claim
 
 	wait := &waitingConn{
 		gorillaConn: wsConn,
+		acquired:    make(chan struct{}),
 		done:        make(chan struct{}),
 	}
 
@@ -373,8 +398,9 @@ func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims 
 	}
 
 	wait := &waitingConn{
-		h2Conn: h2Conn,
-		done:   make(chan struct{}),
+		h2Conn:   h2Conn,
+		acquired: make(chan struct{}),
+		done:     make(chan struct{}),
 	}
 
 	if m.enqueueWaitingConn(tl, wait) {
