@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"net"
+	"sync"
 	"time"
 )
 
@@ -12,6 +13,7 @@ type ConnectionPool struct {
 	conns  chan net.Conn
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 func NewConnectionPool(c *Client, minIdle int) *ConnectionPool {
@@ -24,6 +26,7 @@ func NewConnectionPool(c *Client, minIdle int) *ConnectionPool {
 	}
 
 	if minIdle > 0 {
+		pool.wg.Add(1)
 		go pool.maintain(minIdle)
 	}
 
@@ -31,6 +34,7 @@ func NewConnectionPool(c *Client, minIdle int) *ConnectionPool {
 }
 
 func (p *ConnectionPool) maintain(minIdle int) {
+	defer p.wg.Done()
 	ticker := time.NewTicker(100 * time.Millisecond) // Check frequently
 	defer ticker.Stop()
 
@@ -41,15 +45,27 @@ func (p *ConnectionPool) maintain(minIdle int) {
 		case <-ticker.C:
 			// Fill the pool
 			for len(p.conns) < minIdle {
+				select {
+				case <-p.ctx.Done():
+					return
+				default:
+				}
+
 				conn, err := p.client.dialTransport(p.ctx, "", "")
 				if err != nil {
 					slog.Warn("Pool: failed to dial", "err", err)
-					// Backoff a bit
-					time.Sleep(1 * time.Second)
+					select {
+					case <-p.ctx.Done():
+						return
+					case <-time.After(1 * time.Second):
+					}
 					continue
 				}
 
 				select {
+				case <-p.ctx.Done():
+					_ = conn.Close()
+					return
 				case p.conns <- conn:
 					slog.Debug("Pool: added connection")
 				default:
@@ -75,6 +91,7 @@ func (p *ConnectionPool) Get(ctx context.Context) (net.Conn, error) {
 
 func (p *ConnectionPool) Close() {
 	p.cancel()
+	p.wg.Wait()
 	for {
 		select {
 		case conn := <-p.conns:

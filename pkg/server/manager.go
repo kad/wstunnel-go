@@ -31,6 +31,7 @@ type tunnelListener struct {
 	protocol protocol.LocalProtocol
 	ln       net.Listener
 	waiting  chan *waitingConn
+	queueMu  sync.Mutex
 	quit     chan struct{}
 	lastUsed time.Time
 	active   int
@@ -136,29 +137,96 @@ func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *wai
 	case <-timer.C:
 		slog.Info("Reverse tunnel: closing idle client connection", "addr", tl.addr)
 		wait.finish(true)
+		m.purgeDoneWaiters(tl)
+	}
+}
+
+func (m *ReverseTunnelManager) purgeDoneWaitersLocked(tl *tunnelListener) {
+	pending := make([]*waitingConn, 0, len(tl.waiting))
+	for {
+		select {
+		case wait := <-tl.waiting:
+			if wait == nil {
+				continue
+			}
+			select {
+			case <-wait.done:
+				continue
+			default:
+				pending = append(pending, wait)
+			}
+		default:
+			for _, wait := range pending {
+				tl.waiting <- wait
+			}
+			return
+		}
+	}
+}
+
+func (m *ReverseTunnelManager) purgeDoneWaiters(tl *tunnelListener) {
+	tl.queueMu.Lock()
+	defer tl.queueMu.Unlock()
+
+	m.purgeDoneWaitersLocked(tl)
+}
+
+func (m *ReverseTunnelManager) enqueueWaitingConn(tl *tunnelListener, wait *waitingConn) bool {
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		tl.queueMu.Lock()
+		m.purgeDoneWaitersLocked(tl)
+
+		select {
+		case <-tl.quit:
+			tl.queueMu.Unlock()
+			return false
+		default:
+		}
+
+		select {
+		case tl.waiting <- wait:
+			tl.queueMu.Unlock()
+			return true
+		default:
+			tl.queueMu.Unlock()
+		}
+
+		select {
+		case <-tl.quit:
+			return false
+		case <-ticker.C:
+		}
 	}
 }
 
 func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingConn, bool) {
 	timer := time.NewTimer(10 * time.Second)
 	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
 
 	for {
+		tl.queueMu.Lock()
+		m.purgeDoneWaitersLocked(tl)
 		select {
 		case wait := <-tl.waiting:
-			if wait == nil {
-				return nil, false
+			tl.queueMu.Unlock()
+			if wait != nil {
+				return wait, true
 			}
-			select {
-			case <-wait.done:
-				continue
-			default:
-			}
-			return wait, true
+		default:
+			tl.queueMu.Unlock()
+		}
+
+		select {
 		case <-timer.C:
 			return nil, false
 		case <-tl.quit:
 			return nil, false
+		case <-ticker.C:
 		}
 	}
 }
@@ -225,14 +293,13 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *wst.Conn, claims *protocol.J
 		done:   make(chan struct{}),
 	}
 
-	select {
-	case tl.waiting <- wait:
+	if m.enqueueWaitingConn(tl, wait) {
 		m.touchListener(tl)
 		slog.Info("Reverse tunnel: client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
 		m.waitForUseOrTimeout(tl, wait)
-	case <-tl.quit:
-		wait.finish(true)
+		return
 	}
+	wait.finish(true)
 }
 
 func (m *ReverseTunnelManager) HandleGorillaClient(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
@@ -248,14 +315,13 @@ func (m *ReverseTunnelManager) HandleGorillaClient(wsConn *websocket.Conn, claim
 		done:        make(chan struct{}),
 	}
 
-	select {
-	case tl.waiting <- wait:
+	if m.enqueueWaitingConn(tl, wait) {
 		m.touchListener(tl)
 		slog.Info("Reverse tunnel (gorilla): client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
 		m.waitForUseOrTimeout(tl, wait)
-	case <-tl.quit:
-		wait.finish(true)
+		return
 	}
+	wait.finish(true)
 }
 
 func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims *protocol.JwtTunnelConfig) {
@@ -271,14 +337,13 @@ func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims 
 		done:   make(chan struct{}),
 	}
 
-	select {
-	case tl.waiting <- wait:
+	if m.enqueueWaitingConn(tl, wait) {
 		m.touchListener(tl)
 		slog.Info("Reverse tunnel (H2): client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
 		m.waitForUseOrTimeout(tl, wait)
-	case <-tl.quit:
-		wait.finish(true)
+		return
 	}
+	wait.finish(true)
 }
 
 func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {

@@ -2,8 +2,8 @@ package client
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
@@ -510,7 +510,11 @@ func authenticateHTTPProxy(header string, credentials *protocol.Credentials) boo
 	}
 
 	expected := credentials.Username + ":" + credentials.Password
-	return bytes.Equal(payload, []byte(expected))
+	expectedBytes := []byte(expected)
+	if len(payload) != len(expectedBytes) {
+		return false
+	}
+	return subtle.ConstantTimeCompare(payload, expectedBytes) == 1
 }
 
 func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) (string, uint16, error) {

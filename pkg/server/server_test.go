@@ -98,13 +98,24 @@ func TestParseJWTClaimsRustModeIgnoresVerificationSecret(t *testing.T) {
 	}
 }
 
-func TestParseJWTClaimsCompatibilityModeAcceptsUnsignedToken(t *testing.T) {
+func TestParseJWTClaimsCompatibilityModeRejectsUnsignedToken(t *testing.T) {
 	srv := NewServer(Config{
 		WebsocketProtocol:       "ws",
 		InsecureNoJWTValidation: true,
 	})
 
-	claims, err := srv.parseJWTClaims(unsignedToken(t))
+	if _, err := srv.parseJWTClaims(unsignedToken(t)); err == nil {
+		t.Fatal("parseJWTClaims() unexpectedly accepted unsigned token")
+	}
+}
+
+func TestParseJWTClaimsCompatibilityModeAcceptsHS256Shape(t *testing.T) {
+	srv := NewServer(Config{
+		WebsocketProtocol:       "ws",
+		InsecureNoJWTValidation: true,
+	})
+
+	claims, err := srv.parseJWTClaims(signedToken(t, "other-secret"))
 	if err != nil {
 		t.Fatalf("parseJWTClaims() error = %v", err)
 	}
@@ -175,4 +186,27 @@ func TestReverseTunnelManagerReapsIdleListener(t *testing.T) {
 	}
 
 	t.Fatal("idle reverse listener was not reaped")
+}
+
+func TestReverseTunnelManagerPurgesFinishedWaitersBeforeEnqueue(t *testing.T) {
+	mgr := NewReverseTunnelManager(0, time.Second)
+	tl := &tunnelListener{
+		addr:    "test",
+		waiting: make(chan *waitingConn, 1),
+		quit:    make(chan struct{}),
+	}
+
+	stale := &waitingConn{done: make(chan struct{})}
+	stale.finish(false)
+	tl.waiting <- stale
+
+	fresh := &waitingConn{done: make(chan struct{})}
+	if !mgr.enqueueWaitingConn(tl, fresh) {
+		t.Fatal("enqueueWaitingConn() failed to purge stale waiter")
+	}
+
+	got, ok := mgr.acquireWaitingConn(tl)
+	if !ok || got != fresh {
+		t.Fatalf("acquireWaitingConn() got %#v, ok=%v; want fresh waiter", got, ok)
+	}
 }
