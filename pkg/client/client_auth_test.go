@@ -24,11 +24,15 @@ import (
 func TestAuthenticateHTTPProxy(t *testing.T) {
 	creds := &protocol.Credentials{Username: "admin", Password: "secret"}
 	valid := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:secret"))
+	validLower := "basic " + base64.StdEncoding.EncodeToString([]byte("admin:secret"))
 	invalid := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:wrong"))
 	sameLengthInvalid := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:secrex"))
 
 	if !authenticateHTTPProxy(valid, creds) {
 		t.Fatal("authenticateHTTPProxy() rejected valid credentials")
+	}
+	if !authenticateHTTPProxy(validLower, creds) {
+		t.Fatal("authenticateHTTPProxy() rejected valid lowercase basic scheme")
 	}
 	if authenticateHTTPProxy(invalid, creds) {
 		t.Fatal("authenticateHTTPProxy() accepted invalid credentials")

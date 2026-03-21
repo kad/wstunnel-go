@@ -507,11 +507,20 @@ func authenticateHTTPProxy(header string, credentials *protocol.Credentials) boo
 		return true
 	}
 
-	if !strings.HasPrefix(header, "Basic ") {
+	header = strings.TrimSpace(header)
+	if header == "" {
 		return false
 	}
 
-	payload, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(header, "Basic "))
+	parts := strings.SplitN(header, " ", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	if !strings.EqualFold(parts[0], "Basic") {
+		return false
+	}
+
+	payload, err := base64.StdEncoding.DecodeString(strings.TrimSpace(parts[1]))
 	if err != nil {
 		return false
 	}

@@ -35,6 +35,45 @@ func loadConfigFile(path string) (*FullConfig, error) {
 	return cfg, nil
 }
 
+func mergeClientConfig(dst, src *client.Config) {
+	if dst == nil || src == nil {
+		return
+	}
+	if dst.ServerURL == "" {
+		dst.ServerURL = src.ServerURL
+	}
+	if dst.PathPrefix == "" {
+		dst.PathPrefix = src.PathPrefix
+	}
+	if dst.JWTSecret == "" {
+		dst.JWTSecret = src.JWTSecret
+	}
+	if len(dst.LocalToRemote) == 0 {
+		dst.LocalToRemote = src.LocalToRemote
+	}
+	if len(dst.RemoteToLocal) == 0 {
+		dst.RemoteToLocal = src.RemoteToLocal
+	}
+}
+
+func mergeServerConfig(dst, src *server.Config) {
+	if dst == nil || src == nil {
+		return
+	}
+	if dst.ListenAddr == "" {
+		dst.ListenAddr = src.ListenAddr
+	}
+	if dst.PathPrefix == "" {
+		dst.PathPrefix = src.PathPrefix
+	}
+	if dst.JWTSecret == "" {
+		dst.JWTSecret = src.JWTSecret
+	}
+	if !dst.InsecureNoJWTValidation {
+		dst.InsecureNoJWTValidation = src.InsecureNoJWTValidation
+	}
+}
+
 func main() {
 	rlimit.RaiseFdLimit()
 	app := &cli.App{
@@ -392,16 +431,7 @@ func runClient(c *cli.Context) error {
 	if c.String("config") != "" {
 		cfg, _ := loadConfigFile(c.String("config"))
 		if cfg != nil && cfg.Client != nil {
-			if serverURL == "" {
-				config.ServerURL = cfg.Client.ServerURL
-			}
-			if len(config.LocalToRemote) == 0 {
-				config.LocalToRemote = cfg.Client.LocalToRemote
-			}
-			if len(config.RemoteToLocal) == 0 {
-				config.RemoteToLocal = cfg.Client.RemoteToLocal
-			}
-			// ... more merging
+			mergeClientConfig(config, cfg.Client)
 		}
 	}
 
@@ -481,10 +511,7 @@ func runServer(c *cli.Context) error {
 	if c.String("config") != "" {
 		cfg, _ := loadConfigFile(c.String("config"))
 		if cfg != nil && cfg.Server != nil {
-			if config.ListenAddr == "" {
-				config.ListenAddr = cfg.Server.ListenAddr
-			}
-			// ... more merging
+			mergeServerConfig(config, cfg.Server)
 		}
 	}
 

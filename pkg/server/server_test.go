@@ -3,8 +3,11 @@ package server
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -248,6 +251,28 @@ func (b *blockingReadWriteCloser) Close() error {
 	return nil
 }
 
+type errListener struct {
+	addr   net.Addr
+	err    error
+	closed chan struct{}
+}
+
+func (l *errListener) Accept() (net.Conn, error) { return nil, l.err }
+func (l *errListener) Close() error {
+	select {
+	case <-l.closed:
+	default:
+		close(l.closed)
+	}
+	return nil
+}
+func (l *errListener) Addr() net.Addr { return l.addr }
+
+type stubAddr string
+
+func (a stubAddr) Network() string { return "tcp" }
+func (a stubAddr) String() string  { return string(a) }
+
 func TestReverseTunnelManagerReapsIdleListener(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
 	t.Cleanup(mgr.Close)
@@ -450,5 +475,65 @@ func TestReverseTunnelManagerEnqueueWaitsForSpaceWithoutDeadlock(t *testing.T) {
 	got, ok = mgr.acquireWaitingConn(tl)
 	if !ok || got != second {
 		t.Fatalf("acquireWaitingConn() got %#v, ok=%v; want second waiter", got, ok)
+	}
+}
+
+func TestReverseTunnelManagerReverseUnixUsesRemoteListenPath(t *testing.T) {
+	mgr := NewReverseTunnelManager(0, time.Second)
+	t.Cleanup(mgr.Close)
+
+	listenPath := filepath.Join(t.TempDir(), "reverse-listen.sock")
+	claims := &protocol.JwtTunnelConfig{
+		ID:     "reverse-unix",
+		Remote: listenPath,
+		Protocol: protocol.LocalProtocol{
+			ReverseUnix: &protocol.ReverseUnixProtocol{Path: "/tmp/client.sock"},
+		},
+	}
+
+	tl, bindAddr, err := mgr.getOrCreateListener(claims)
+	if err != nil {
+		t.Fatalf("getOrCreateListener() error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(listenPath) })
+
+	if bindAddr != listenPath {
+		t.Fatalf("bindAddr = %q, want %q", bindAddr, listenPath)
+	}
+	if tl.addr != listenPath {
+		t.Fatalf("listener addr = %q, want %q", tl.addr, listenPath)
+	}
+}
+
+func TestReverseTunnelManagerRemovesDeadListenerAfterAcceptError(t *testing.T) {
+	mgr := NewReverseTunnelManager(0, time.Second)
+	t.Cleanup(mgr.Close)
+
+	tl := &tunnelListener{
+		addr:     "test-listener",
+		ln:       &errListener{addr: stubAddr("test-listener"), err: errors.New("boom"), closed: make(chan struct{})},
+		quit:     make(chan struct{}),
+		lastUsed: time.Now(),
+	}
+	tl.queueCond = sync.NewCond(&tl.queueMu)
+
+	mgr.listeners[tl.addr] = tl
+	done := make(chan struct{})
+	go func() {
+		mgr.runListener(tl)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runListener() did not return after accept error")
+	}
+
+	mgr.mu.Lock()
+	_, ok := mgr.listeners[tl.addr]
+	mgr.mu.Unlock()
+	if ok {
+		t.Fatal("dead listener remained registered after accept error")
 	}
 }
