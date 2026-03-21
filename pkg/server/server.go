@@ -436,7 +436,15 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 	}
 
 	slog.Info("Accepted HTTP/2 tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port)
-	rwc := &http2ReadWriteCloser{r.Body, w}
+	var flusher http.Flusher
+	if f, ok := w.(http.Flusher); ok {
+		flusher = f
+	}
+	rwc := &http2ReadWriteCloser{
+		ReadCloser: r.Body,
+		writer:     w,
+		flusher:    flusher,
+	}
 
 	// Forward Tunnel
 	if claims.Protocol.Tcp != nil || claims.Protocol.Udp != nil || claims.Protocol.Socks5 != nil || claims.Protocol.HttpProxy != nil || claims.Protocol.Unix != nil {
@@ -482,7 +490,16 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 
 type http2ReadWriteCloser struct {
 	io.ReadCloser
-	io.Writer
+	writer  io.Writer
+	flusher http.Flusher
+}
+
+func (h *http2ReadWriteCloser) Write(p []byte) (int, error) {
+	n, err := h.writer.Write(p)
+	if err == nil && h.flusher != nil {
+		h.flusher.Flush()
+	}
+	return n, err
 }
 
 func (h *http2ReadWriteCloser) Close() error {
