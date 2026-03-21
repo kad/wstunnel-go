@@ -118,20 +118,20 @@ func NewServer(config Config) *Server {
 }
 
 func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, error) {
-	parseUnverified := func(requireHS256 bool) (*protocol.JwtTunnelConfig, error) {
+	parseUnverified := func() (*protocol.JwtTunnelConfig, error) {
 		claims := &protocol.JwtTunnelConfig{}
 		token, _, err := jwt.NewParser().ParseUnverified(tokenStr, claims)
 		if err != nil {
 			return nil, err
 		}
-		if requireHS256 && token.Method != jwt.SigningMethodHS256 {
+		if token.Method != jwt.SigningMethodHS256 {
 			return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
 		}
 		return claims, nil
 	}
 
 	if s.Config.WebsocketProtocol != "ws" {
-		return parseUnverified(true)
+		return parseUnverified()
 	}
 
 	claims := &protocol.JwtTunnelConfig{}
@@ -154,7 +154,7 @@ func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, err
 		}
 	}
 
-	return parseUnverified(false)
+	return parseUnverified()
 }
 
 func (s *Server) SetRules(rules *RestrictionsRules) {

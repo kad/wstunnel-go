@@ -27,7 +27,6 @@ func init() {
 }
 
 const (
-	// rustBinary   = "/home/kad/repositories/github.com/kad/wstunnel/target/release/wstunnel" // Old hardcoded path
 	goBinary = "../../bin/wstunnel-go"
 )
 

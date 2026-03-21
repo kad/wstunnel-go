@@ -23,6 +23,9 @@ func TestAuthenticateHTTPProxy(t *testing.T) {
 	if authenticateHTTPProxy(invalid, creds) {
 		t.Fatal("authenticateHTTPProxy() accepted invalid credentials")
 	}
+	if authenticateHTTPProxy("Bearer token", creds) {
+		t.Fatal("authenticateHTTPProxy() accepted non-basic credentials")
+	}
 	if authenticateHTTPProxy("", creds) {
 		t.Fatal("authenticateHTTPProxy() accepted missing credentials")
 	}
