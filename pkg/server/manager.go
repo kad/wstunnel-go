@@ -94,6 +94,16 @@ func (m *ReverseTunnelManager) updateActivePipes(tl *tunnelListener, delta int) 
 	}
 }
 
+func (m *ReverseTunnelManager) beginIncoming(tl *tunnelListener) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if current, ok := m.listeners[tl.addr]; ok && current == tl {
+		tl.active++
+		tl.lastUsed = time.Now()
+	}
+}
+
 func (m *ReverseTunnelManager) reapIdleListeners() {
 	interval := m.idleTimeout / 2
 	if interval < 10*time.Millisecond {
@@ -393,13 +403,13 @@ func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 			return
 		}
 
+		m.beginIncoming(tl)
 		go m.handleIncoming(tl, conn)
 	}
 }
 
 func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn) {
 	defer func() { _ = conn.Close() }()
-	m.updateActivePipes(tl, 1)
 	defer m.updateActivePipes(tl, -1)
 
 	var targetHost string
