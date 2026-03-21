@@ -50,6 +50,25 @@ type Config struct {
 	WebsocketProtocol              string        `yaml:"mode"` // "rust" or "ws"
 }
 
+func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
+	type rawConfig Config
+	aux := struct {
+		rawConfig        `yaml:",inline"`
+		LegacyPathPrefix string `yaml:"restrict_http_upgrade_path_prefix"`
+	}{}
+
+	if err := unmarshal(&aux); err != nil {
+		return err
+	}
+
+	*c = Config(aux.rawConfig)
+	if c.PathPrefix == "" {
+		c.PathPrefix = aux.LegacyPathPrefix
+	}
+
+	return nil
+}
+
 type Server struct {
 	Config Config
 	mux    *http.ServeMux
