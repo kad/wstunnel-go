@@ -510,11 +510,14 @@ func authenticateHTTPProxy(header string, credentials *protocol.Credentials) boo
 	}
 
 	expected := credentials.Username + ":" + credentials.Password
-	expectedBytes := []byte(expected)
-	if len(payload) != len(expectedBytes) {
+	return constantTimeEqualBytes(payload, []byte(expected))
+}
+
+func constantTimeEqualBytes(actual, expected []byte) bool {
+	if len(actual) != len(expected) {
 		return false
 	}
-	return subtle.ConstantTimeCompare(payload, expectedBytes) == 1
+	return subtle.ConstantTimeCompare(actual, expected) == 1
 }
 
 func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) (string, uint16, error) {
@@ -572,7 +575,8 @@ func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) 
 		password := string(buf[:plen])
 
 		status := byte(0x00)
-		if username != credentials.Username || password != credentials.Password {
+		if !constantTimeEqualBytes([]byte(username), []byte(credentials.Username)) ||
+			!constantTimeEqualBytes([]byte(password), []byte(credentials.Password)) {
 			status = 0x01
 		}
 		if _, err := conn.Write([]byte{0x01, status}); err != nil {

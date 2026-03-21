@@ -1,7 +1,10 @@
 package server
 
 import (
+	"encoding/base64"
 	"io"
+	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,6 +47,12 @@ func unsignedToken(t *testing.T) string {
 	}
 
 	return token
+}
+
+func unsupportedAlgToken() string {
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"unsupported","typ":"JWT"}`))
+	claims := base64.RawURLEncoding.EncodeToString([]byte(`{"id":"token-id","r":"example.com","p":443,"p2":{"tcp":{}}}`))
+	return header + "." + claims + ".signature"
 }
 
 func TestConfigYAMLUsesHTTPUpgradePathPrefix(t *testing.T) {
@@ -135,6 +144,39 @@ func TestParseJWTClaimsCompatibilityModeAcceptsHS256Shape(t *testing.T) {
 	}
 }
 
+func TestParseJWTClaimsRejectsUnsupportedAlgorithmWithoutPanicking(t *testing.T) {
+	t.Run("unverified", func(t *testing.T) {
+		srv := NewServer(Config{WebsocketProtocol: "rust"})
+
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("parseJWTClaims() panicked: %v", r)
+			}
+		}()
+
+		if _, err := srv.parseJWTClaims(unsupportedAlgToken()); err == nil {
+			t.Fatal("parseJWTClaims() unexpectedly accepted unsupported algorithm")
+		}
+	})
+
+	t.Run("verified", func(t *testing.T) {
+		srv := NewServer(Config{
+			WebsocketProtocol: "ws",
+			JWTSecret:         "shared-secret",
+		})
+
+		defer func() {
+			if r := recover(); r != nil {
+				t.Fatalf("parseJWTClaims() panicked: %v", r)
+			}
+		}()
+
+		if _, err := srv.parseJWTClaims(unsupportedAlgToken()); err == nil {
+			t.Fatal("parseJWTClaims() unexpectedly accepted unsupported algorithm")
+		}
+	})
+}
+
 type nopReadWriteCloser struct {
 	closed chan struct{}
 }
@@ -153,6 +195,43 @@ func (n *nopReadWriteCloser) Close() error {
 	case <-n.closed:
 	default:
 		close(n.closed)
+	}
+	return nil
+}
+
+type blockingReadWriteCloser struct {
+	readStarted chan struct{}
+	release     chan struct{}
+	closed      chan struct{}
+	once        sync.Once
+}
+
+func (b *blockingReadWriteCloser) Read(_ []byte) (int, error) {
+	b.once.Do(func() {
+		close(b.readStarted)
+	})
+
+	select {
+	case <-b.release:
+	case <-b.closed:
+	}
+	return 0, io.EOF
+}
+
+func (b *blockingReadWriteCloser) Write(p []byte) (int, error) {
+	return len(p), nil
+}
+
+func (b *blockingReadWriteCloser) Close() error {
+	select {
+	case <-b.closed:
+	default:
+		close(b.closed)
+	}
+	select {
+	case <-b.release:
+	default:
+		close(b.release)
 	}
 	return nil
 }
@@ -219,5 +298,54 @@ func TestReverseTunnelManagerPurgesFinishedWaitersBeforeEnqueue(t *testing.T) {
 	got, ok := mgr.acquireWaitingConn(tl)
 	if !ok || got != fresh {
 		t.Fatalf("acquireWaitingConn() got %#v, ok=%v; want fresh waiter", got, ok)
+	}
+}
+
+func TestReverseTunnelManagerKeepsListenerWhileIncomingConnectionIsPending(t *testing.T) {
+	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
+	tl := &tunnelListener{
+		addr:     "test",
+		waiting:  make(chan *waitingConn, 1),
+		quit:     make(chan struct{}),
+		lastUsed: time.Now().Add(-time.Second),
+	}
+	mgr.listeners[tl.addr] = tl
+
+	serverConn, clientConn := net.Pipe()
+	blocking := &blockingReadWriteCloser{
+		readStarted: make(chan struct{}),
+		release:     make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+	wait := &waitingConn{h2Conn: blocking, done: make(chan struct{})}
+	tl.waiting <- wait
+
+	done := make(chan struct{})
+	go func() {
+		mgr.handleIncoming(tl, serverConn)
+		close(done)
+	}()
+
+	select {
+	case <-blocking.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("forwarding did not start")
+	}
+
+	mgr.reapIdleListenersOnce(time.Now())
+
+	mgr.mu.Lock()
+	_, ok := mgr.listeners[tl.addr]
+	mgr.mu.Unlock()
+	if !ok {
+		t.Fatal("listener was reaped while handling an incoming connection")
+	}
+
+	_ = blocking.Close()
+	_ = clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleIncoming() did not return")
 	}
 }

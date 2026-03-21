@@ -16,12 +16,16 @@ func TestAuthenticateHTTPProxy(t *testing.T) {
 	creds := &protocol.Credentials{Username: "admin", Password: "secret"}
 	valid := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:secret"))
 	invalid := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:wrong"))
+	sameLengthInvalid := "Basic " + base64.StdEncoding.EncodeToString([]byte("admin:secrex"))
 
 	if !authenticateHTTPProxy(valid, creds) {
 		t.Fatal("authenticateHTTPProxy() rejected valid credentials")
 	}
 	if authenticateHTTPProxy(invalid, creds) {
 		t.Fatal("authenticateHTTPProxy() accepted invalid credentials")
+	}
+	if authenticateHTTPProxy(sameLengthInvalid, creds) {
+		t.Fatal("authenticateHTTPProxy() accepted same-length invalid credentials")
 	}
 	if authenticateHTTPProxy("Bearer token", creds) {
 		t.Fatal("authenticateHTTPProxy() accepted non-basic credentials")
@@ -57,8 +61,8 @@ func TestHandleSocks5RejectsInvalidCredentials(t *testing.T) {
 
 	_, _ = clientConn.Write([]byte{0x01, 0x05})
 	_, _ = clientConn.Write([]byte("admin"))
-	_, _ = clientConn.Write([]byte{0x05})
-	_, _ = clientConn.Write([]byte("wrong"))
+	_, _ = clientConn.Write([]byte{0x06})
+	_, _ = clientConn.Write([]byte("secrex"))
 
 	authReply := make([]byte, 2)
 	if _, err := io.ReadFull(clientConn, authReply); err != nil {
