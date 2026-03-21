@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -14,6 +15,7 @@ type ConnectionPool struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+	closed atomic.Bool
 }
 
 func NewConnectionPool(c *Client, minIdle int) *ConnectionPool {
@@ -78,19 +80,43 @@ func (p *ConnectionPool) maintain(minIdle int) {
 }
 
 func (p *ConnectionPool) Get(ctx context.Context) (net.Conn, error) {
+	if p.closed.Load() {
+		return nil, net.ErrClosed
+	}
+
 	select {
 	case conn := <-p.conns:
+		if p.closed.Load() {
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil, net.ErrClosed
+		}
 		// Verify connection is still alive?
 		// Hard to do without reading. Assuming it's good.
 		return conn, nil
 	default:
+		if p.closed.Load() {
+			return nil, net.ErrClosed
+		}
 		// Pool empty, dial new one
-		return p.client.dialTransport(ctx, "", "")
+		conn, err := p.client.dialTransport(ctx, "", "")
+		if err != nil {
+			return nil, err
+		}
+		if p.closed.Load() {
+			_ = conn.Close()
+			return nil, net.ErrClosed
+		}
+		return conn, nil
 	}
 }
 
 func (p *ConnectionPool) Close() {
-	p.cancel()
+	p.closed.Store(true)
+	if p.cancel != nil {
+		p.cancel()
+	}
 	p.wg.Wait()
 	for {
 		select {

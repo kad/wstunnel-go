@@ -335,6 +335,7 @@ func TestReverseTunnelManagerKeepsListenerWhileIncomingConnectionIsPending(t *te
 	tl.waiting = append(tl.waiting, wait)
 
 	done := make(chan struct{})
+	mgr.beginIncoming(tl)
 	go func() {
 		mgr.handleIncoming(tl, serverConn)
 		close(done)
