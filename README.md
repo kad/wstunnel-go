@@ -168,6 +168,8 @@ wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-cl
 
 `wstunnel-go` can be configured via command-line flags, environment variables, or a YAML configuration file.
 
+For a comprehensive YAML guide with annotated client/server examples and option descriptions, see [`docs/CONFIG.md`](docs/CONFIG.md).
+
 ### CLI Flags
 
 #### Global Flags
@@ -221,6 +223,8 @@ server:
   listen_addr: ws://0.0.0.0:8080
   restrict_config: /etc/wstunnel/rules.yaml
 ```
+
+The full set of YAML keys, tunnel examples, and detailed descriptions for both client and server config lives in [`docs/CONFIG.md`](docs/CONFIG.md).
 
 ## API Reference (Library Usage)
 
