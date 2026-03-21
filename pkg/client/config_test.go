@@ -103,6 +103,24 @@ func TestParseTunnelArg(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:      "Reverse UDP unsupported",
+			arg:       "udp://9090:localhost:443",
+			isReverse: true,
+			wantErr:   true,
+		},
+		{
+			name:      "Reverse SOCKS5 unsupported",
+			arg:       "socks5://9090",
+			isReverse: true,
+			wantErr:   true,
+		},
+		{
+			name:      "Reverse HTTP proxy unsupported",
+			arg:       "http://9090",
+			isReverse: true,
+			wantErr:   true,
+		},
 	}
 
 	for _, tt := range tests {

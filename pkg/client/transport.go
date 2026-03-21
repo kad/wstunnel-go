@@ -12,11 +12,10 @@ import (
 	"github.com/kad/wstunnel-go/internal/socket"
 )
 
-// dialTransport establishes a raw TCP or TLS connection to the server
-func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.Conn, error) {
+func (c *Client) dialRawTransport(ctx context.Context, network, addr string) (net.Conn, *url.URL, string, error) {
 	u, err := url.Parse(c.Config.ServerURL)
 	if err != nil {
-		return nil, fmt.Errorf("invalid server url: %w", err)
+		return nil, nil, "", fmt.Errorf("invalid server url: %w", err)
 	}
 
 	host := u.Hostname()
@@ -48,6 +47,16 @@ func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.C
 	}
 
 	conn, err := d.DialContext(ctx, network, addr)
+	if err != nil {
+		return nil, nil, "", err
+	}
+
+	return conn, u, host, nil
+}
+
+// dialTransport establishes a raw TCP or TLS connection to the server
+func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, u, host, err := c.dialRawTransport(ctx, network, addr)
 	if err != nil {
 		return nil, err
 	}

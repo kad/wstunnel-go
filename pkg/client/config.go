@@ -181,19 +181,19 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 		}
 	case "udp":
 		if isReverse {
-			ltr.Protocol = protocol.LocalProtocol{ReverseUdp: &protocol.ReverseUdpProtocol{Timeout: getTimeout()}}
+			return nil, fmt.Errorf("reverse UDP tunnels are not implemented")
 		} else {
 			ltr.Protocol = protocol.LocalProtocol{Udp: &protocol.UdpProtocol{Timeout: getTimeout()}}
 		}
 	case "socks5":
 		if isReverse {
-			ltr.Protocol = protocol.LocalProtocol{ReverseSocks5: &protocol.ReverseSocks5Protocol{Timeout: getTimeout(), Credentials: getCredentials()}}
+			return nil, fmt.Errorf("reverse SOCKS5 tunnels are not implemented")
 		} else {
 			ltr.Protocol = protocol.LocalProtocol{Socks5: &protocol.Socks5Protocol{Timeout: getTimeout(), Credentials: getCredentials()}}
 		}
 	case "http":
 		if isReverse {
-			ltr.Protocol = protocol.LocalProtocol{ReverseHttpProxy: &protocol.ReverseHttpProxyProtocol{Timeout: getTimeout(), Credentials: getCredentials()}}
+			return nil, fmt.Errorf("reverse HTTP proxy tunnels are not implemented")
 		} else {
 			ltr.Protocol = protocol.LocalProtocol{HttpProxy: &protocol.HttpProxyProtocol{Timeout: getTimeout(), Credentials: getCredentials(), ProxyProtocol: getProxyProtocol()}}
 		}

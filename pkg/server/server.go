@@ -29,7 +29,9 @@ import (
 
 type Config struct {
 	ListenAddr                     string        `yaml:"listen_addr"`
-	PathPrefix                     string        `yaml:"restrict_http_upgrade_path_prefix"`
+	PathPrefix                     string        `yaml:"http_upgrade_path_prefix"`
+	JWTSecret                      string        `yaml:"jwt_secret"`
+	InsecureNoJWTValidation        bool          `yaml:"insecure_no_jwt_validation"`
 	SocketSoMark                   uint32        `yaml:"socket_so_mark"`
 	WebsocketPingFrequency         time.Duration `yaml:"websocket_ping_frequency"`
 	WebsocketMaskFrame             bool          `yaml:"websocket_mask_frame"`
@@ -108,11 +110,51 @@ func NewServer(config Config) *Server {
 	s := &Server{
 		Config: config,
 		mux:    http.NewServeMux(),
-		rvMgr:  NewReverseTunnelManager(config.SocketSoMark),
+		rvMgr:  NewReverseTunnelManager(config.SocketSoMark, config.RemoteToLocalServerIdleTimeout),
 		rules:  rules,
 	}
 	s.mux.HandleFunc("/", s.ServeHTTP)
 	return s
+}
+
+func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, error) {
+	parseUnverified := func(requireHS256 bool) (*protocol.JwtTunnelConfig, error) {
+		claims := &protocol.JwtTunnelConfig{}
+		token, _, err := jwt.NewParser().ParseUnverified(tokenStr, claims)
+		if err != nil {
+			return nil, err
+		}
+		if requireHS256 && token.Method != jwt.SigningMethodHS256 {
+			return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
+		}
+		return claims, nil
+	}
+
+	if s.Config.WebsocketProtocol != "ws" {
+		return parseUnverified(true)
+	}
+
+	claims := &protocol.JwtTunnelConfig{}
+
+	if s.Config.JWTSecret != "" {
+		token, err := jwt.ParseWithClaims(tokenStr, claims, func(token *jwt.Token) (any, error) {
+			if token.Method != jwt.SigningMethodHS256 {
+				return nil, fmt.Errorf("unexpected signing method: %s", token.Method.Alg())
+			}
+			return []byte(s.Config.JWTSecret), nil
+		})
+		if err == nil && token != nil && token.Valid {
+			return claims, nil
+		}
+		if !s.Config.InsecureNoJWTValidation {
+			if err != nil {
+				return nil, err
+			}
+			return nil, fmt.Errorf("invalid JWT token")
+		}
+	}
+
+	return parseUnverified(false)
 }
 
 func (s *Server) SetRules(rules *RestrictionsRules) {
@@ -221,8 +263,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Decode JWT
-	claims := &protocol.JwtTunnelConfig{}
-	_, _, err := jwt.NewParser().ParseUnverified(tokenStr, claims)
+	claims, err := s.parseJWTClaims(tokenStr)
 	if err != nil {
 		slog.Warn("Invalid token", "err", err)
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
@@ -330,8 +371,12 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil {
 		s.rvMgr.HandleClient(wsConn, claims)
+		return
+	}
+	if claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+		slog.Warn("Unsupported reverse protocol", "proto", claims.Protocol)
 		return
 	}
 
@@ -372,8 +417,12 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil {
 		s.rvMgr.HandleGorillaClient(wsConn, claims)
+		return
+	}
+	if claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+		slog.Warn("Unsupported reverse protocol (gorilla)", "proto", claims.Protocol)
 		return
 	}
 
@@ -417,8 +466,13 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil {
 		s.rvMgr.HandleClientH2(rwc, claims)
+		return
+	}
+	if claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+		slog.Warn("Unsupported reverse protocol for HTTP/2", "proto", claims.Protocol)
+		_ = rwc.Close()
 		return
 	}
 
