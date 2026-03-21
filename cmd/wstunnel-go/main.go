@@ -35,42 +35,160 @@ func loadConfigFile(path string) (*FullConfig, error) {
 	return cfg, nil
 }
 
-func mergeClientConfig(dst, src *client.Config) {
-	if dst == nil || src == nil {
+func flagExplicitlySet(c *cli.Context, name string) bool {
+	if c == nil {
+		return false
+	}
+	return c.IsSet(name)
+}
+
+func applyClientFlagOverrides(c *cli.Context, config *client.Config, serverURL string, headers map[string]string) {
+	if config == nil {
 		return
 	}
-	if dst.ServerURL == "" {
-		dst.ServerURL = src.ServerURL
+	if serverURL != "" {
+		config.ServerURL = serverURL
 	}
-	if dst.PathPrefix == "" {
-		dst.PathPrefix = src.PathPrefix
+	if flagExplicitlySet(c, "http-upgrade-path-prefix") || config.PathPrefix == "" {
+		config.PathPrefix = c.String("http-upgrade-path-prefix")
 	}
-	if dst.JWTSecret == "" {
-		dst.JWTSecret = src.JWTSecret
+	if flagExplicitlySet(c, "jwt-secret") || config.JWTSecret == "" {
+		config.JWTSecret = c.String("jwt-secret")
 	}
-	if len(dst.LocalToRemote) == 0 {
-		dst.LocalToRemote = src.LocalToRemote
+	if flagExplicitlySet(c, "header") || len(config.Headers) == 0 {
+		config.Headers = headers
 	}
-	if len(dst.RemoteToLocal) == 0 {
-		dst.RemoteToLocal = src.RemoteToLocal
+	if flagExplicitlySet(c, "websocket-mask-frame") {
+		config.MaskFrame = c.Bool("websocket-mask-frame")
+	}
+	if flagExplicitlySet(c, "websocket-ping-frequency") || config.PingFrequency == 0 {
+		config.PingFrequency = c.Duration("websocket-ping-frequency")
+	}
+	if flagExplicitlySet(c, "tls-verify-certificate") {
+		config.TlsVerifyCert = c.Bool("tls-verify-certificate")
+	}
+	if flagExplicitlySet(c, "tls-certificate") || config.TlsClientCert == "" {
+		config.TlsClientCert = c.String("tls-certificate")
+	}
+	if flagExplicitlySet(c, "tls-private-key") || config.TlsClientKey == "" {
+		config.TlsClientKey = c.String("tls-private-key")
+	}
+	if flagExplicitlySet(c, "tls-sni-override") || config.TlsSniOverride == "" {
+		config.TlsSniOverride = c.String("tls-sni-override")
+	}
+	if flagExplicitlySet(c, "tls-sni-disable") {
+		config.TlsSniDisable = c.Bool("tls-sni-disable")
+	}
+	if flagExplicitlySet(c, "tls-ech-enable") {
+		config.TlsEchEnable = c.Bool("tls-ech-enable")
+	}
+	if flagExplicitlySet(c, "socket-so-mark") {
+		config.SocketSoMark = uint32(c.Uint("socket-so-mark"))
+	}
+	if flagExplicitlySet(c, "connection-min-idle") {
+		config.ConnectionMinIdle = uint32(c.Uint("connection-min-idle"))
+	}
+	if flagExplicitlySet(c, "connection-retry-max-backoff") || config.ConnectionRetryMaxBackoff == 0 {
+		config.ConnectionRetryMaxBackoff = c.Duration("connection-retry-max-backoff")
+	}
+	if flagExplicitlySet(c, "reverse-tunnel-connection-retry-max-backoff") || config.ReverseTunnelConnectionRetryMaxBackoff == 0 {
+		config.ReverseTunnelConnectionRetryMaxBackoff = c.Duration("reverse-tunnel-connection-retry-max-backoff")
+	}
+	if flagExplicitlySet(c, "http-proxy") || config.HttpProxy == "" {
+		config.HttpProxy = c.String("http-proxy")
+	}
+	if flagExplicitlySet(c, "http-proxy-login") || config.HttpProxyLogin == "" {
+		config.HttpProxyLogin = c.String("http-proxy-login")
+	}
+	if flagExplicitlySet(c, "http-proxy-password") || config.HttpProxyPassword == "" {
+		config.HttpProxyPassword = c.String("http-proxy-password")
+	}
+	if flagExplicitlySet(c, "http-upgrade-credentials") || config.HttpUpgradeCredentials == "" {
+		config.HttpUpgradeCredentials = c.String("http-upgrade-credentials")
+	}
+	if flagExplicitlySet(c, "http-headers-file") || config.HttpHeadersFile == "" {
+		config.HttpHeadersFile = c.String("http-headers-file")
+	}
+	if flagExplicitlySet(c, "dns-resolver") || len(config.DnsResolver) == 0 {
+		config.DnsResolver = c.StringSlice("dns-resolver")
+	}
+	if flagExplicitlySet(c, "dns-resolver-prefer-ipv4") {
+		config.DnsResolverPreferIpv4 = c.Bool("dns-resolver-prefer-ipv4")
+	}
+	if flagExplicitlySet(c, "local-to-remote") || len(config.LocalToRemote) == 0 {
+		config.LocalToRemote = c.StringSlice("local-to-remote")
+	}
+	if flagExplicitlySet(c, "remote-to-local") || len(config.RemoteToLocal) == 0 {
+		config.RemoteToLocal = c.StringSlice("remote-to-local")
+	}
+	if flagExplicitlySet(c, "mode") || config.WebsocketProtocol == "" {
+		config.WebsocketProtocol = c.String("mode")
 	}
 }
 
-func mergeServerConfig(dst, src *server.Config) {
-	if dst == nil || src == nil {
+func applyServerFlagOverrides(c *cli.Context, config *server.Config, listenAddr string) {
+	if config == nil {
 		return
 	}
-	if dst.ListenAddr == "" {
-		dst.ListenAddr = src.ListenAddr
+	if listenAddr != "" {
+		config.ListenAddr = listenAddr
 	}
-	if dst.PathPrefix == "" {
-		dst.PathPrefix = src.PathPrefix
+	if flagExplicitlySet(c, "http-upgrade-path-prefix") || config.PathPrefix == "" {
+		config.PathPrefix = c.String("http-upgrade-path-prefix")
 	}
-	if dst.JWTSecret == "" {
-		dst.JWTSecret = src.JWTSecret
+	if flagExplicitlySet(c, "jwt-secret") || config.JWTSecret == "" {
+		config.JWTSecret = c.String("jwt-secret")
 	}
-	if !dst.InsecureNoJWTValidation {
-		dst.InsecureNoJWTValidation = src.InsecureNoJWTValidation
+	if flagExplicitlySet(c, "insecure-no-jwt-validation") {
+		config.InsecureNoJWTValidation = c.Bool("insecure-no-jwt-validation")
+	}
+	if flagExplicitlySet(c, "socket-so-mark") {
+		config.SocketSoMark = uint32(c.Uint("socket-so-mark"))
+	}
+	if flagExplicitlySet(c, "websocket-ping-frequency") || config.WebsocketPingFrequency == 0 {
+		config.WebsocketPingFrequency = c.Duration("websocket-ping-frequency")
+	}
+	if flagExplicitlySet(c, "websocket-mask-frame") {
+		config.WebsocketMaskFrame = c.Bool("websocket-mask-frame")
+	}
+	if flagExplicitlySet(c, "dns-resolver") || len(config.DnsResolver) == 0 {
+		config.DnsResolver = c.StringSlice("dns-resolver")
+	}
+	if flagExplicitlySet(c, "dns-resolver-prefer-ipv4") {
+		config.DnsResolverPreferIpv4 = c.Bool("dns-resolver-prefer-ipv4")
+	}
+	if flagExplicitlySet(c, "restrict-to") || len(config.RestrictTo) == 0 {
+		config.RestrictTo = c.StringSlice("restrict-to")
+	}
+	if flagExplicitlySet(c, "restrict-http-upgrade-path-prefix") || len(config.RestrictHttpUpgradePathPrefix) == 0 {
+		config.RestrictHttpUpgradePathPrefix = c.StringSlice("restrict-http-upgrade-path-prefix")
+	}
+	if flagExplicitlySet(c, "restrict-config") || config.RestrictConfig == "" {
+		config.RestrictConfig = c.String("restrict-config")
+	}
+	if flagExplicitlySet(c, "tls-certificate") || config.TlsCertificate == "" {
+		config.TlsCertificate = c.String("tls-certificate")
+	}
+	if flagExplicitlySet(c, "tls-private-key") || config.TlsPrivateKey == "" {
+		config.TlsPrivateKey = c.String("tls-private-key")
+	}
+	if flagExplicitlySet(c, "tls-client-ca-certs") || config.TlsClientCaCerts == "" {
+		config.TlsClientCaCerts = c.String("tls-client-ca-certs")
+	}
+	if flagExplicitlySet(c, "http-proxy") || config.HttpProxy == "" {
+		config.HttpProxy = c.String("http-proxy")
+	}
+	if flagExplicitlySet(c, "http-proxy-login") || config.HttpProxyLogin == "" {
+		config.HttpProxyLogin = c.String("http-proxy-login")
+	}
+	if flagExplicitlySet(c, "http-proxy-password") || config.HttpProxyPassword == "" {
+		config.HttpProxyPassword = c.String("http-proxy-password")
+	}
+	if flagExplicitlySet(c, "remote-to-local-server-idle-timeout") || config.RemoteToLocalServerIdleTimeout == 0 {
+		config.RemoteToLocalServerIdleTimeout = c.Duration("remote-to-local-server-idle-timeout")
+	}
+	if flagExplicitlySet(c, "mode") || config.WebsocketProtocol == "" {
+		config.WebsocketProtocol = c.String("mode")
 	}
 }
 
@@ -398,42 +516,15 @@ func runClient(c *cli.Context) error {
 		}
 	}
 
-	config := &client.Config{
-		ServerURL:                              serverURL,
-		PathPrefix:                             c.String("http-upgrade-path-prefix"),
-		JWTSecret:                              c.String("jwt-secret"),
-		Headers:                                headers,
-		MaskFrame:                              c.Bool("websocket-mask-frame"),
-		PingFrequency:                          c.Duration("websocket-ping-frequency"),
-		TlsVerifyCert:                          c.Bool("tls-verify-certificate"),
-		TlsClientCert:                          c.String("tls-certificate"),
-		TlsClientKey:                           c.String("tls-private-key"),
-		TlsSniOverride:                         c.String("tls-sni-override"),
-		TlsSniDisable:                          c.Bool("tls-sni-disable"),
-		TlsEchEnable:                           c.Bool("tls-ech-enable"),
-		SocketSoMark:                           uint32(c.Uint("socket-so-mark")),
-		ConnectionMinIdle:                      uint32(c.Uint("connection-min-idle")),
-		ConnectionRetryMaxBackoff:              c.Duration("connection-retry-max-backoff"),
-		ReverseTunnelConnectionRetryMaxBackoff: c.Duration("reverse-tunnel-connection-retry-max-backoff"),
-		HttpProxy:                              c.String("http-proxy"),
-		HttpProxyLogin:                         c.String("http-proxy-login"),
-		HttpProxyPassword:                      c.String("http-proxy-password"),
-		HttpUpgradeCredentials:                 c.String("http-upgrade-credentials"),
-		HttpHeadersFile:                        c.String("http-headers-file"),
-		DnsResolver:                            c.StringSlice("dns-resolver"),
-		DnsResolverPreferIpv4:                  c.Bool("dns-resolver-prefer-ipv4"),
-		LocalToRemote:                          c.StringSlice("local-to-remote"),
-		RemoteToLocal:                          c.StringSlice("remote-to-local"),
-		WebsocketProtocol:                      c.String("mode"),
-	}
+	config := &client.Config{}
 
-	// Override from config file if provided
 	if c.String("config") != "" {
 		cfg, _ := loadConfigFile(c.String("config"))
 		if cfg != nil && cfg.Client != nil {
-			mergeClientConfig(config, cfg.Client)
+			*config = *cfg.Client
 		}
 	}
+	applyClientFlagOverrides(c, config, serverURL, headers)
 
 	if config.ServerURL == "" {
 		return fmt.Errorf("server URL is required")
@@ -479,40 +570,19 @@ func runServer(c *cli.Context) error {
 		listenAddr = c.Args().Get(c.Args().Len() - 1) // Get the last argument
 	}
 
-	if listenAddr == "" {
-		listenAddr = "ws://0.0.0.0:8080"
-	}
-
 	slog.Info("Starting server", "listenAddr", listenAddr)
 
-	config := &server.Config{
-		ListenAddr:                     listenAddr,
-		PathPrefix:                     c.String("http-upgrade-path-prefix"),
-		JWTSecret:                      c.String("jwt-secret"),
-		InsecureNoJWTValidation:        c.Bool("insecure-no-jwt-validation"),
-		SocketSoMark:                   uint32(c.Uint("socket-so-mark")),
-		WebsocketPingFrequency:         c.Duration("websocket-ping-frequency"),
-		WebsocketMaskFrame:             c.Bool("websocket-mask-frame"),
-		DnsResolver:                    c.StringSlice("dns-resolver"),
-		DnsResolverPreferIpv4:          c.Bool("dns-resolver-prefer-ipv4"),
-		RestrictTo:                     c.StringSlice("restrict-to"),
-		RestrictHttpUpgradePathPrefix:  c.StringSlice("restrict-http-upgrade-path-prefix"),
-		RestrictConfig:                 c.String("restrict-config"),
-		TlsCertificate:                 c.String("tls-certificate"),
-		TlsPrivateKey:                  c.String("tls-private-key"),
-		TlsClientCaCerts:               c.String("tls-client-ca-certs"),
-		HttpProxy:                      c.String("http-proxy"),
-		HttpProxyLogin:                 c.String("http-proxy-login"),
-		HttpProxyPassword:              c.String("http-proxy-password"),
-		RemoteToLocalServerIdleTimeout: c.Duration("remote-to-local-server-idle-timeout"),
-		WebsocketProtocol:              c.String("mode"),
-	}
+	config := &server.Config{}
 
 	if c.String("config") != "" {
 		cfg, _ := loadConfigFile(c.String("config"))
 		if cfg != nil && cfg.Server != nil {
-			mergeServerConfig(config, cfg.Server)
+			*config = *cfg.Server
 		}
+	}
+	applyServerFlagOverrides(c, config, listenAddr)
+	if config.ListenAddr == "" {
+		config.ListenAddr = "ws://0.0.0.0:8080"
 	}
 
 	return startServer(c, config)
