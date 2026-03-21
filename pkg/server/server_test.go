@@ -282,13 +282,14 @@ func TestReverseTunnelManagerPurgesFinishedWaitersBeforeEnqueue(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, time.Second)
 	tl := &tunnelListener{
 		addr:    "test",
-		waiting: make(chan *waitingConn, 1),
+		waitCap: 1,
 		quit:    make(chan struct{}),
 	}
+	tl.queueCond = sync.NewCond(&tl.queueMu)
 
 	stale := &waitingConn{done: make(chan struct{})}
 	stale.finish(false)
-	tl.waiting <- stale
+	tl.waiting = append(tl.waiting, stale)
 
 	fresh := &waitingConn{done: make(chan struct{})}
 	if !mgr.enqueueWaitingConn(tl, fresh) {
@@ -305,10 +306,11 @@ func TestReverseTunnelManagerKeepsListenerWhileIncomingConnectionIsPending(t *te
 	mgr := NewReverseTunnelManager(0, 50*time.Millisecond)
 	tl := &tunnelListener{
 		addr:     "test",
-		waiting:  make(chan *waitingConn, 1),
+		waitCap:  1,
 		quit:     make(chan struct{}),
 		lastUsed: time.Now().Add(-time.Second),
 	}
+	tl.queueCond = sync.NewCond(&tl.queueMu)
 	mgr.listeners[tl.addr] = tl
 
 	serverConn, clientConn := net.Pipe()
@@ -318,7 +320,7 @@ func TestReverseTunnelManagerKeepsListenerWhileIncomingConnectionIsPending(t *te
 		closed:      make(chan struct{}),
 	}
 	wait := &waitingConn{h2Conn: blocking, done: make(chan struct{})}
-	tl.waiting <- wait
+	tl.waiting = append(tl.waiting, wait)
 
 	done := make(chan struct{})
 	go func() {
@@ -347,5 +349,45 @@ func TestReverseTunnelManagerKeepsListenerWhileIncomingConnectionIsPending(t *te
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("handleIncoming() did not return")
+	}
+}
+
+func TestReverseTunnelManagerEnqueueWaitsForSpaceWithoutDeadlock(t *testing.T) {
+	mgr := NewReverseTunnelManager(0, time.Second)
+	tl := &tunnelListener{
+		addr:    "test",
+		waitCap: 1,
+		quit:    make(chan struct{}),
+	}
+	tl.queueCond = sync.NewCond(&tl.queueMu)
+
+	first := &waitingConn{done: make(chan struct{})}
+	second := &waitingConn{done: make(chan struct{})}
+	tl.waiting = append(tl.waiting, first)
+
+	enqueueDone := make(chan bool, 1)
+	go func() {
+		enqueueDone <- mgr.enqueueWaitingConn(tl, second)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+
+	got, ok := mgr.acquireWaitingConn(tl)
+	if !ok || got != first {
+		t.Fatalf("acquireWaitingConn() got %#v, ok=%v; want first waiter", got, ok)
+	}
+
+	select {
+	case ok := <-enqueueDone:
+		if !ok {
+			t.Fatal("enqueueWaitingConn() returned false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("enqueueWaitingConn() did not complete after space became available")
+	}
+
+	got, ok = mgr.acquireWaitingConn(tl)
+	if !ok || got != second {
+		t.Fatalf("acquireWaitingConn() got %#v, ok=%v; want second waiter", got, ok)
 	}
 }
