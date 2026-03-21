@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"io"
 	"net"
 	"sync"
@@ -51,7 +52,18 @@ func unsignedToken(t *testing.T) string {
 
 func unsupportedAlgToken() string {
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"unsupported","typ":"JWT"}`))
-	claims := base64.RawURLEncoding.EncodeToString([]byte(`{"id":"token-id","r":"example.com","p":443,"p2":{"tcp":{}}}`))
+	payload, err := json.Marshal(protocol.JwtTunnelConfig{
+		ID:     "token-id",
+		Remote: "example.com",
+		Port:   443,
+		Protocol: protocol.LocalProtocol{
+			Tcp: &protocol.TcpProtocol{},
+		},
+	})
+	if err != nil {
+		panic(err)
+	}
+	claims := base64.RawURLEncoding.EncodeToString(payload)
 	return header + "." + claims + ".signature"
 }
 

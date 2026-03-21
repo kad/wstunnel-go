@@ -64,6 +64,8 @@ type Client struct {
 
 const legacyJWTSecret = "champignonfrais"
 
+var legacyJWTSecretWarning sync.Once
+
 func NewClient(config Config) *Client {
 	c := &Client{Config: config}
 	if config.ConnectionMinIdle > 0 {
@@ -83,6 +85,9 @@ func (c *Client) generateJWT(requestID string, p protocol.LocalProtocol, remoteH
 	secret := c.Config.JWTSecret
 	if secret == "" {
 		secret = legacyJWTSecret
+		legacyJWTSecretWarning.Do(func() {
+			slog.Warn("Using legacy default JWT secret for Rust compatibility; configure jwt_secret for secure deployments")
+		})
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
@@ -514,10 +519,24 @@ func authenticateHTTPProxy(header string, credentials *protocol.Credentials) boo
 }
 
 func constantTimeEqualBytes(actual, expected []byte) bool {
-	if len(actual) != len(expected) {
-		return false
+	maxLen := len(actual)
+	if len(expected) > maxLen {
+		maxLen = len(expected)
 	}
-	return subtle.ConstantTimeCompare(actual, expected) == 1
+
+	diff := int32(len(actual) ^ len(expected))
+	for i := 0; i < maxLen; i++ {
+		var a, b byte
+		if i < len(actual) {
+			a = actual[i]
+		}
+		if i < len(expected) {
+			b = expected[i]
+		}
+		diff |= int32(a ^ b)
+	}
+
+	return subtle.ConstantTimeEq(diff, 0) == 1
 }
 
 func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) (string, uint16, error) {
