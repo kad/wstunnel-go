@@ -2,7 +2,12 @@
 # The .goreleaser.yaml file is a configuration file used by Goreleaser to
 # define how to build, package, and release Go projects.
 
+version: 2
 project_name: wstunnel-go
+
+git:
+  ignore_tags:
+    - "pkg/caddy/*"
 
 builds:
   - main: ./cmd/wstunnel-go
