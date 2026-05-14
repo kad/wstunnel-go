@@ -168,6 +168,8 @@ wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-cl
 
 `wstunnel-go` can be configured via command-line flags, environment variables, or a YAML configuration file.
 
+For a comprehensive YAML guide with annotated client/server examples and option descriptions, see [`docs/CONFIG.md`](docs/CONFIG.md).
+
 ### CLI Flags
 
 #### Global Flags
@@ -181,7 +183,7 @@ wstunnel-go server --tls-certificate cert.pem --tls-private-key key.pem --tls-cl
 -   `-R, --remote-to-local`: Define a remote-to-local (reverse) tunnel.
 -   `--http-upgrade-path-prefix`: HTTP upgrade path prefix (default: "v1").
 -   `--jwt-secret`: Shared secret used to sign tunnel JWTs.
--   `--http-upgrade-credentials`: Basic auth credentials for upgrade request.
+-   `--http-upgrade-credentials`: Raw `Authorization` header value for the upgrade request (for Basic auth, pass the full `Basic ...` value).
 -   `-H, --header`: Custom HTTP headers for upgrade request.
 -   `--http-headers-file`: File containing custom HTTP headers.
 -   `--tls-verify-certificate`: Enable/disable TLS cert verification.
@@ -221,6 +223,8 @@ server:
   listen_addr: ws://0.0.0.0:8080
   restrict_config: /etc/wstunnel/rules.yaml
 ```
+
+The full set of YAML keys, tunnel examples, and detailed descriptions for both client and server config lives in [`docs/CONFIG.md`](docs/CONFIG.md).
 
 ## API Reference (Library Usage)
 
