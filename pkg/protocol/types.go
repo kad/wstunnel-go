@@ -2,6 +2,7 @@ package protocol
 
 import (
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -83,6 +84,15 @@ type Duration struct {
 type Credentials struct {
 	Username string
 	Password string
+}
+
+// String redacts the password to prevent credential leakage in logs
+// (see upstream wstunnel issue #520)
+func (c Credentials) String() string {
+	if c.Password != "" {
+		return fmt.Sprintf("Credentials{Username: %q, Password: <redacted>}", c.Username)
+	}
+	return fmt.Sprintf("Credentials{Username: %q}", c.Username)
 }
 
 func (c Credentials) MarshalJSON() ([]byte, error) {

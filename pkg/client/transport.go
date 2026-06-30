@@ -89,7 +89,14 @@ func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.C
 		}
 
 		tlsConn := tls.Client(conn, tlsConfig)
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
+
+		// Wrap the TLS handshake with the same timeout as TCP connect to prevent
+		// connection pool exhaustion when servers accept TCP but never complete
+		// the TLS handshake (see upstream wstunnel issue #516)
+		handshakeCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
 			_ = conn.Close()
 			return nil, fmt.Errorf("tls handshake failed: %w", err)
 		}
