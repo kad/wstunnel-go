@@ -16,7 +16,7 @@ func TestTLSHandshakeTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start listener: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	acceptDone := make(chan struct{})
 	go func() {
@@ -25,7 +25,7 @@ func TestTLSHandshakeTimeout(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Accept but never complete TLS handshake - just block
 		time.Sleep(30 * time.Second)
 	}()
@@ -77,14 +77,14 @@ func TestTLSHandshakeContextCancellation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to start listener: %v", err)
 	}
-	defer listener.Close()
+	defer func() { _ = listener.Close() }()
 
 	go func() {
 		conn, err := listener.Accept()
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Block forever
 		time.Sleep(1 * time.Hour)
 	}()
