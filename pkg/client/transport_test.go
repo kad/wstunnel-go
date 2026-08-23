@@ -115,4 +115,3 @@ func TestTLSHandshakeContextCancellation(t *testing.T) {
 		t.Errorf("dialTransport() took %v, expected quick failure on context cancellation", elapsed)
 	}
 }
-

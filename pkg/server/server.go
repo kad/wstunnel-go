@@ -25,6 +25,7 @@ import (
 	"github.com/kad/wstunnel-go/pkg/tunnel"
 	"github.com/kad/wstunnel-go/pkg/wst"
 	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 )
 
 var insecureWSModeJWTWarning sync.Once
@@ -233,13 +234,14 @@ func (s *Server) Start() error {
 		return err
 	}
 
+	h2Server := &http2.Server{}
 	srv := &http.Server{
 		Addr:    bindAddr,
-		Handler: s.mux,
+		Handler: h2c.NewHandler(s.mux, h2Server),
 	}
 
 	// Enable HTTP/2 support (including cleartext h2c)
-	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
+	if err := http2.ConfigureServer(srv, h2Server); err != nil {
 		return fmt.Errorf("failed to configure HTTP/2: %w", err)
 	}
 
