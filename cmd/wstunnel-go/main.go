@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v2"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 
 	"github.com/kad/wstunnel-go/internal/rlimit"
 	"github.com/kad/wstunnel-go/pkg/client"

@@ -1,11 +1,41 @@
-# To get started with Dependabot version updates, you'll need to specify which
-# package ecosystems to update and where the package manifests are located.
-# Please see the documentation for all configuration options:
-# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
-
+# Dependabot configuration.
+# Docs: https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+#
+# This repository contains TWO Go modules, so both need an entry: the root module
+# and pkg/caddy (which carries its own go.mod and a replace back to the root).
 version: 2
 updates:
-  - package-ecosystem: "" # See documentation for possible values
-    directory: "/" # Location of package manifests
+  - package-ecosystem: "gomod"
+    directory: "/"
     schedule:
       interval: "weekly"
+    commit-message:
+      prefix: "build(deps)"
+
+  - package-ecosystem: "gomod"
+    directory: "/pkg/caddy"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "build(deps)"
+    ignore:
+      # cel-go must track whatever github.com/caddyserver/caddy/v2 requires.
+      # Bumping it independently breaks the build: v0.29.0 changed
+      # interpreter.NewCall to take []InterpretableV2, which Caddy 2.11.4's
+      # modules/caddyhttp/celmatcher.go does not compile against. Verified that
+      # both v0.29.0 and v0.30.0 still fail; only a Caddy release that adopts
+      # the new API can move this forward.
+      #
+      # Cost of holding: v0.28.1 carries GO-2026-6094 (JSON private fields
+      # exposed via NativeTypes/ParseStructTag), fixed in v0.30.0. govulncheck
+      # reports it as not called - this module never uses CEL, it is Caddy's
+      # own expression matcher - and a stock Caddy 2.11.4 build has the exact
+      # same exposure. Re-check this when bumping Caddy.
+      - dependency-name: "github.com/google/cel-go"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    commit-message:
+      prefix: "ci"

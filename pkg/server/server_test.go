@@ -14,7 +14,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/kad/wstunnel-go/pkg/protocol"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 func signedToken(t *testing.T, secret string) string {

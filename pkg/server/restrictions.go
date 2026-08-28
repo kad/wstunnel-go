@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/kad/wstunnel-go/pkg/protocol"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 type RestrictionsRules struct {
