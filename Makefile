@@ -5,6 +5,8 @@ GO_VERSION ?= 1.25
 APP_NAME ?= wstunnel-go
 BIN_DIR ?= ./bin
 GO_BUILD_LDFLAGS ?= -ldflags="-s -w"
+# Keep in sync with .github/workflows/{ci,release}.yml so local lint matches CI.
+GOLANGCI_LINT_VERSION ?= v2.13.2
 
 .PHONY: all
 all: build ## Build the application (default)
@@ -26,14 +28,38 @@ test-interop: build ## Run interoperability tests with original Rust wstunnel
 	go test -v ./tests/tester/...
 
 .PHONY: lint
-lint: ## Run linter
+lint: ## Run linter (root module)
 	@echo "Running golangci-lint..."
 	@golangci-lint run ./...
+
+.PHONY: lint-caddy
+lint-caddy: ## Run linter on the pkg/caddy module
+	@echo "Running golangci-lint (pkg/caddy)..."
+	@cd pkg/caddy && golangci-lint run ./...
+
+.PHONY: test-caddy
+test-caddy: ## Run tests for the pkg/caddy module
+	@echo "Running tests (pkg/caddy)..."
+	cd pkg/caddy && go test -race ./...
+
+.PHONY: tidy-caddy
+tidy-caddy: ## Tidy the pkg/caddy module
+	@echo "Tidying pkg/caddy module..."
+	cd pkg/caddy && go mod tidy
+
+.PHONY: check-all
+check-all: fmt build vet lint lint-caddy test test-caddy ## Full pre-commit cycle across BOTH modules
 
 .PHONY: install-tools
 install-tools: ## Install development tools (golangci-lint, goreleaser)
 	@echo "Installing development tools..."
-	go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+	# The /v2 module path is required: the v1 path resolves to v1.64.8, which is a
+	# major-version downgrade from the version CI runs.
+	# Installing from source (rather than a prebuilt release) links golangci-lint
+	# against the local Go toolchain, so it can always read the standard library's
+	# export data. A prebuilt binary built with an older Go fails with
+	# "export data version N is greater than maximum supported version M".
+	go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION)
 	go install github.com/goreleaser/goreleaser/v2@latest
 
 .PHONY: vet

@@ -20,11 +20,11 @@ jobs:
       - name: golangci-lint (root)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.10.1
+          version: v2.13.2
       - name: golangci-lint (caddy)
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.10.1
+          version: v2.13.2
           working-directory: pkg/caddy
 
   test:
