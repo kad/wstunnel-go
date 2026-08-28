@@ -236,7 +236,11 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 	tr := &http2.Transport{
 		AllowHTTP: true,
 		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
-			return c.dialTransport(ctx, network, addr)
+			// cfg is ignored on purpose: the client's own TLS settings (SNI
+			// override, mTLS material, verification policy) come from Config.
+			// Its ALPN list must still be honoured, otherwise the server
+			// negotiates HTTP/1.1 and never routes to the HTTP/2 handler.
+			return c.dialTransport(ctx, network, addr, "h2")
 		},
 	}
 	httpClient := &http.Client{Transport: tr}

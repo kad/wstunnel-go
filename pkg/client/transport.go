@@ -73,8 +73,12 @@ func (c *Client) dialRawTransport(ctx context.Context, network, addr string) (ne
 	return conn, u, host, nil
 }
 
-// dialTransport establishes a raw TCP or TLS connection to the server
-func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.Conn, error) {
+// dialTransport establishes a raw TCP or TLS connection to the server.
+//
+// nextProtos, when provided, is advertised as the ALPN protocol list during the
+// TLS handshake. HTTP/2 over TLS is only reachable when "h2" is negotiated via
+// ALPN, so the HTTP/2 transport must ask for it explicitly.
+func (c *Client) dialTransport(ctx context.Context, network, addr string, nextProtos ...string) (net.Conn, error) {
 	conn, u, host, err := c.dialRawTransport(ctx, network, addr)
 	if err != nil {
 		return nil, err
@@ -86,6 +90,9 @@ func (c *Client) dialTransport(ctx context.Context, network, addr string) (net.C
 		if err != nil {
 			_ = conn.Close()
 			return nil, err
+		}
+		if len(nextProtos) > 0 {
+			tlsConfig.NextProtos = nextProtos
 		}
 
 		tlsConn := tls.Client(conn, tlsConfig)

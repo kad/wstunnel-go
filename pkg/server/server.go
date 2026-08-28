@@ -24,8 +24,6 @@ import (
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
 	"github.com/kad/wstunnel-go/pkg/wst"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 )
 
 var insecureWSModeJWTWarning sync.Once
@@ -234,15 +232,17 @@ func (s *Server) Start() error {
 		return err
 	}
 
-	h2Server := &http2.Server{}
-	srv := &http.Server{
-		Addr:    bindAddr,
-		Handler: h2c.NewHandler(s.mux, h2Server),
-	}
+	// Enable HTTP/1.1, HTTP/2 over TLS, and cleartext HTTP/2 (h2c) so clients
+	// using prior-knowledge h2c reach the tunnel handler directly.
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
 
-	// Enable HTTP/2 support (including cleartext h2c)
-	if err := http2.ConfigureServer(srv, h2Server); err != nil {
-		return fmt.Errorf("failed to configure HTTP/2: %w", err)
+	srv := &http.Server{
+		Addr:      bindAddr,
+		Handler:   s.mux,
+		Protocols: protocols,
 	}
 
 	if s.Config.TlsCertificate != "" && s.Config.TlsPrivateKey != "" {
