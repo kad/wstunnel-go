@@ -6,6 +6,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
+	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/wst"
 )
 
@@ -217,6 +218,47 @@ func PipeBiDir(rwc1, rwc2 io.ReadWriteCloser) {
 		defer func() { _ = rwc1.Close() }()
 		defer func() { _ = rwc2.Close() }()
 		_, _ = io.Copy(rwc1, rwc2)
+	}()
+
+	wg.Wait()
+}
+
+// PipeUDP preserves UDP packet boundaries while forwarding to a framed stream.
+func PipeUDP(conn net.Conn, stream *protocol.FramedUDPReadWriteCloser) {
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		defer func() { _ = conn.Close() }()
+		defer func() { _ = stream.Close() }()
+
+		buf := make([]byte, 65535)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				return
+			}
+			if _, err := stream.Write(buf[:n]); err != nil {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		defer wg.Done()
+		defer func() { _ = conn.Close() }()
+		defer func() { _ = stream.Close() }()
+
+		for {
+			packet, err := stream.ReadPacket()
+			if err != nil {
+				return
+			}
+			if _, err := conn.Write(packet); err != nil {
+				return
+			}
+		}
 	}()
 
 	wg.Wait()

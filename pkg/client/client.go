@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"context"
 	"crypto/subtle"
-	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"fmt"
@@ -25,7 +24,6 @@ import (
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
 	"github.com/kad/wstunnel-go/pkg/wst"
-	"golang.org/x/net/http2"
 )
 
 type Config struct {
@@ -58,8 +56,9 @@ type Config struct {
 }
 
 type Client struct {
-	Config Config
-	pool   *ConnectionPool
+	Config   Config
+	pool     *ConnectionPool
+	wtClient *WebTransportClient
 }
 
 const legacyJWTSecret = "champignonfrais"
@@ -68,6 +67,7 @@ var legacyJWTSecretWarning sync.Once
 
 func NewClient(config Config) *Client {
 	c := &Client{Config: config}
+	c.wtClient = NewWebTransportClient(c)
 	if config.ConnectionMinIdle > 0 {
 		c.pool = NewConnectionPool(c, int(config.ConnectionMinIdle))
 	}
@@ -233,9 +233,15 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 		req.Header.Set("Authorization", c.Config.HttpUpgradeCredentials)
 	}
 
-	tr := &http2.Transport{
-		AllowHTTP: true,
-		DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP2(true)
+	protocols.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{
+		Protocols: protocols,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return c.dialTransport(ctx, network, addr)
+		},
+		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// cfg is ignored on purpose: the client's own TLS settings (SNI
 			// override, mTLS material, verification policy) come from Config.
 			// Its ALPN list must still be honoured, otherwise the server
@@ -284,6 +290,7 @@ type tunnelStream struct {
 	ws      *wst.Conn
 	gorilla *websocket.Conn
 	h2      io.ReadWriteCloser
+	wt      io.ReadWriteCloser
 	r       *http.Response
 	err     error
 }
@@ -297,6 +304,9 @@ func (ts *tunnelStream) Close() {
 	}
 	if ts.h2 != nil {
 		_ = ts.h2.Close()
+	}
+	if ts.wt != nil {
+		_ = ts.wt.Close()
 	}
 }
 
@@ -368,6 +378,11 @@ func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string,
 		return &tunnelStream{err: fmt.Errorf("invalid server URL: %w", err)}
 	}
 
+	if u.Scheme == "wt" || u.Scheme == "wts" {
+		wt, resp, err := c.wtClient.Connect(p, remoteHost, remotePort)
+		return &tunnelStream{wt: wt, r: resp, err: err}
+	}
+
 	if u.Scheme == "http" || u.Scheme == "https" {
 		h2, resp, err := c.connectToHttp2(p, remoteHost, remotePort)
 		return &tunnelStream{h2: h2, r: resp, err: err}
@@ -433,6 +448,8 @@ func (c *Client) startPipe(local net.Conn, ts *tunnelStream) {
 			}()
 		}
 		tunnel.PipeGorilla(local, ts.gorilla)
+	} else if ts.wt != nil {
+		tunnel.PipeBiDir(local, ts.wt)
 	} else {
 		tunnel.PipeBiDir(local, ts.h2)
 	}
@@ -554,19 +571,19 @@ func constantTimeEqualBytes(actual, expected []byte) bool {
 	return subtle.ConstantTimeEq(diff, 0) == 1
 }
 
-func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) (string, uint16, error) {
+func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) (string, uint16, func(byte) error, error) {
 	buf := make([]byte, 256)
 
 	// 1. Version/Methods
 	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	if buf[0] != 0x05 {
-		return "", 0, fmt.Errorf("invalid socks version: %d", buf[0])
+		return "", 0, nil, fmt.Errorf("invalid socks version: %d", buf[0])
 	}
 	nmethods := int(buf[1])
 	if _, err := io.ReadFull(conn, buf[:nmethods]); err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 
 	methods := buf[:nmethods]
@@ -576,35 +593,35 @@ func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) 
 	}
 	if !containsSocks5Method(methods, selectedMethod) {
 		if _, err := conn.Write([]byte{0x05, 0xFF}); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
-		return "", 0, fmt.Errorf("no acceptable authentication method")
+		return "", 0, nil, fmt.Errorf("no acceptable authentication method")
 	}
 
 	if _, err := conn.Write([]byte{0x05, selectedMethod}); err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 
 	if selectedMethod == 0x02 {
 		if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		if buf[0] != 0x01 {
-			return "", 0, fmt.Errorf("unsupported socks auth version: %d", buf[0])
+			return "", 0, nil, fmt.Errorf("unsupported socks auth version: %d", buf[0])
 		}
 
 		ulen := int(buf[1])
 		if _, err := io.ReadFull(conn, buf[:ulen]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		username := string(buf[:ulen])
 
 		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		plen := int(buf[0])
 		if _, err := io.ReadFull(conn, buf[:plen]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		password := string(buf[:plen])
 
@@ -614,59 +631,58 @@ func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) 
 			status = 0x01
 		}
 		if _, err := conn.Write([]byte{0x01, status}); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		if status != 0x00 {
-			return "", 0, fmt.Errorf("invalid socks5 credentials")
+			return "", 0, nil, fmt.Errorf("invalid socks5 credentials")
 		}
 	}
 
 	// 2. Request
 	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	if buf[0] != 0x05 || buf[1] != 0x01 {
-		return "", 0, fmt.Errorf("unsupported socks command: %d", buf[1])
+		return "", 0, nil, fmt.Errorf("unsupported socks command: %d", buf[1])
 	}
 
 	var host string
 	switch buf[3] {
 	case 0x01: // IPv4
 		if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		host = net.IP(buf[:4]).String()
 	case 0x03: // Domain
 		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		sz := int(buf[0])
 		if _, err := io.ReadFull(conn, buf[:sz]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		host = string(buf[:sz])
 	case 0x04: // IPv6
 		if _, err := io.ReadFull(conn, buf[:16]); err != nil {
-			return "", 0, err
+			return "", 0, nil, err
 		}
 		host = net.IP(buf[:16]).String()
 	default:
-		return "", 0, fmt.Errorf("unsupported address type: %d", buf[3])
+		return "", 0, nil, fmt.Errorf("unsupported address type: %d", buf[3])
 	}
 
 	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return "", 0, err
+		return "", 0, nil, err
 	}
 	port := binary.BigEndian.Uint16(buf[:2])
 
-	// 3. Respond Success
-	// [VER, REP, RSV, ATYP, BND.ADDR, BND.PORT]
-	resp := []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-	if _, err := conn.Write(resp); err != nil {
-		return "", 0, err
+	replyFunc := func(rep byte) error {
+		resp := []byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+		_, err := conn.Write(resp)
+		return err
 	}
 
-	return host, port, nil
+	return host, port, replyFunc, nil
 }
 
 func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
@@ -692,7 +708,7 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 			if ltr.Protocol.Socks5 != nil {
 				credentials = ltr.Protocol.Socks5.Credentials
 			}
-			targetHost, targetPort, err := c.handleSocks5(netConn, credentials)
+			targetHost, targetPort, replyFunc, err := c.handleSocks5(netConn, credentials)
 			if err != nil {
 				slog.Warn("SOCKS5 handshake failed", "err", err)
 				return
@@ -703,6 +719,12 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 			ts := c.connectToTransport(tcpProto, targetHost, targetPort)
 			if ts.err != nil {
 				slog.Error("Failed to connect to transport for SOCKS5", "err", ts.err)
+				_ = replyFunc(0x01)
+				return
+			}
+			if err := replyFunc(0x00); err != nil {
+				slog.Warn("Failed to send SOCKS5 reply", "err", err)
+				ts.Close()
 				return
 			}
 			c.startPipe(netConn, ts)
@@ -812,7 +834,7 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 		targetPort := ltr.Port
 		targetProto := ltr.Protocol
 
-		if ts.r.Header.Get("Set-Cookie") != "" {
+		if ts.r != nil && ts.r.Header.Get("Set-Cookie") != "" {
 			cookieStr := ts.r.Header.Get("Set-Cookie")
 			claims := &protocol.JwtTunnelConfig{}
 			_, _, err := jwt.NewParser().ParseUnverified(cookieStr, claims)
@@ -945,7 +967,21 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 							_, _ = conn.WriteToUDP(p, dest)
 						}
 					}
-				} else {
+				} else if ts.wt != nil {
+					packetReader, ok := ts.wt.(interface {
+						ReadPacket() ([]byte, error)
+					})
+					if !ok {
+						return
+					}
+					for {
+						packet, err := packetReader.ReadPacket()
+						if err != nil {
+							return
+						}
+						_, _ = conn.WriteToUDP(packet, dest)
+					}
+				} else if ts.h2 != nil {
 					buf := make([]byte, 64*1024)
 					for {
 						n, err := ts.h2.Read(buf)
@@ -965,7 +1001,9 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 			err = ts.ws.WriteMessage(wst.BinaryMessage, buf[:n])
 		} else if ts.gorilla != nil {
 			err = ts.gorilla.WriteMessage(websocket.BinaryMessage, buf[:n])
-		} else {
+		} else if ts.wt != nil {
+			_, err = ts.wt.Write(buf[:n])
+		} else if ts.h2 != nil {
 			_, err = ts.h2.Write(buf[:n])
 		}
 

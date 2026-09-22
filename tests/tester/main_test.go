@@ -375,6 +375,8 @@ func TestInteroperability(t *testing.T) {
 		{"Go-Go-H2-TLS", goBinary, goBinary, "https", false, false, nil},
 		{"Go-Go-WS-mTLS", goBinary, goBinary, "wss", false, false, []string{"mtls"}},
 		{"Go-Go-WS-RFC", goBinary, goBinary, "websocket", false, false, []string{"--mode", "ws"}},
+		{"Go-Go-WT", goBinary, goBinary, "wt", false, false, nil},
+		{"Go-Go-WT-TLS", goBinary, goBinary, "wts", false, false, nil},
 	}
 
 	for _, tc := range combinations {
@@ -419,7 +421,7 @@ func TestInteroperability(t *testing.T) {
 			var caCertFile, caKeyFile string
 			var clientCertFile, clientKeyFile string
 
-			isTLS := strings.Contains(tc.transport, "wss") || strings.Contains(tc.transport, "https") || tc.name == "Go-Go-H2-HTTPS"
+			isTLS := strings.Contains(tc.transport, "wss") || strings.Contains(tc.transport, "https") || strings.Contains(tc.transport, "wts") || tc.name == "Go-Go-H2-HTTPS"
 			isMTLS := false
 			for _, opt := range tc.options {
 				if opt == "mtls" {
@@ -497,6 +499,10 @@ func TestInteroperability(t *testing.T) {
 				}
 			case "https":
 				serverURL = "https://" + serverAddr
+			case "wt":
+				serverURL = "wt://" + serverAddr
+			case "wts":
+				serverURL = "wts://" + serverAddr
 			default:
 				t.Fatalf("Unknown transport: %s", tc.transport)
 			}

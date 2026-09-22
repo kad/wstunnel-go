@@ -71,10 +71,11 @@ func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
 }
 
 type Server struct {
-	Config Config
-	mux    *http.ServeMux
-	rvMgr  *ReverseTunnelManager
-	rules  *RestrictionsRules
+	Config   Config
+	mux      *http.ServeMux
+	rvMgr    *ReverseTunnelManager
+	rules    *RestrictionsRules
+	wtServer *WebTransportServer
 }
 
 func NewServer(config Config) *Server {
@@ -139,6 +140,7 @@ func NewServer(config Config) *Server {
 		rvMgr:  NewReverseTunnelManager(config.SocketSoMark, config.RemoteToLocalServerIdleTimeout),
 		rules:  rules,
 	}
+	s.wtServer = NewWebTransportServer(s)
 	s.mux.HandleFunc("/", s.ServeHTTP)
 	return s
 }
@@ -231,6 +233,13 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = ln.Close() }()
+	webTransportStarted := false
+	defer func() {
+		if webTransportStarted {
+			_ = s.wtServer.Close()
+		}
+	}()
 
 	// Enable HTTP/1.1, HTTP/2 over TLS, and cleartext HTTP/2 (h2c) so clients
 	// using prior-knowledge h2c reach the tunnel handler directly.
@@ -246,8 +255,13 @@ func (s *Server) Start() error {
 	}
 
 	if s.Config.TlsCertificate != "" && s.Config.TlsPrivateKey != "" {
+		certificate, err := tls.LoadX509KeyPair(s.Config.TlsCertificate, s.Config.TlsPrivateKey)
+		if err != nil {
+			return fmt.Errorf("load TLS certificate: %w", err)
+		}
 		tlsConfig := &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion:   tls.VersionTLS12,
+			Certificates: []tls.Certificate{certificate},
 		}
 
 		if s.Config.TlsClientCaCerts != "" {
@@ -262,7 +276,20 @@ func (s *Server) Start() error {
 		}
 
 		srv.TLSConfig = tlsConfig
+		if strings.HasPrefix(s.Config.ListenAddr, "wt://") || strings.HasPrefix(s.Config.ListenAddr, "wts://") {
+			if err := s.wtServer.Start(bindAddr, tlsConfig.Clone()); err != nil {
+				return fmt.Errorf("start WebTransport server: %w", err)
+			}
+			webTransportStarted = true
+		}
 		return srv.ServeTLS(ln, s.Config.TlsCertificate, s.Config.TlsPrivateKey)
+	}
+
+	if strings.HasPrefix(s.Config.ListenAddr, "wt://") || strings.HasPrefix(s.Config.ListenAddr, "wts://") {
+		if err := s.wtServer.Start(bindAddr, nil); err != nil {
+			return fmt.Errorf("start WebTransport server: %w", err)
+		}
+		webTransportStarted = true
 	}
 
 	return srv.Serve(ln)

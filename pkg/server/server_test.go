@@ -92,6 +92,34 @@ func TestConfigYAMLAcceptsLegacyRestrictHTTPUpgradePathPrefix(t *testing.T) {
 	}
 }
 
+func TestStartReturnsWebTransportListenerError(t *testing.T) {
+	tcpListener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("net.Listen() error = %v", err)
+	}
+	addr := tcpListener.Addr().String()
+	if err := tcpListener.Close(); err != nil {
+		t.Fatalf("tcpListener.Close() error = %v", err)
+	}
+
+	udpListener, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		t.Fatalf("net.ListenPacket() error = %v", err)
+	}
+	defer func() { _ = udpListener.Close() }()
+
+	srv := NewServer(Config{ListenAddr: "wt://" + addr})
+	if err := srv.Start(); err == nil {
+		t.Fatal("Start() unexpectedly succeeded while the WebTransport UDP port was in use")
+	}
+
+	tcpListener, err = net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("Start() did not close TCP listener after WebTransport startup failed: %v", err)
+	}
+	defer func() { _ = tcpListener.Close() }()
+}
+
 func TestParseJWTClaimsWithSharedSecret(t *testing.T) {
 	srv := NewServer(Config{
 		WebsocketProtocol: "ws",
