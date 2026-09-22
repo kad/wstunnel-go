@@ -59,7 +59,7 @@ func TestHandleSocks5RejectsInvalidCredentials(t *testing.T) {
 	c := &Client{}
 	errCh := make(chan error, 1)
 	go func() {
-		_, _, err := c.handleSocks5(serverConn, &protocol.Credentials{Username: "admin", Password: "secret"})
+		_, _, _, err := c.handleSocks5(serverConn, &protocol.Credentials{Username: "admin", Password: "secret"})
 		errCh <- err
 	}()
 
@@ -103,7 +103,10 @@ func TestHandleSocks5AcceptsValidCredentials(t *testing.T) {
 	}
 	resultCh := make(chan result, 1)
 	go func() {
-		host, port, err := c.handleSocks5(serverConn, &protocol.Credentials{Username: "admin", Password: "secret"})
+		host, port, replyFunc, err := c.handleSocks5(serverConn, &protocol.Credentials{Username: "admin", Password: "secret"})
+		if err == nil && replyFunc != nil {
+			_ = replyFunc(0x00)
+		}
 		resultCh <- result{host: host, port: port, err: err}
 	}()
 
