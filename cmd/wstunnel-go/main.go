@@ -313,7 +313,7 @@ func main() {
 					},
 					&cli.StringFlag{
 						Name:  "http-upgrade-credentials",
-						Usage: "Basic auth credentials for upgrade request",
+						Usage: "Raw Authorization header value for upgrade request",
 					},
 					&cli.DurationFlag{
 						Name:    "websocket-ping-frequency",
