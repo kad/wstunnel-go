@@ -174,18 +174,24 @@ func LoadRestrictions(path string) (*RestrictionsRules, error) {
 }
 
 func (r *RestrictionsRules) Validate(claims *protocol.JwtTunnelConfig, path string, auth string, commonName string) bool {
+	_, ok := r.ValidateMatch(claims, path, auth, commonName)
+	return ok
+}
+
+// ValidateMatch is Validate that also returns the restriction which admitted
+// the tunnel. The rule is nil when no restrictions are configured.
+func (r *RestrictionsRules) ValidateMatch(claims *protocol.JwtTunnelConfig, path string, auth string, commonName string) (*RestrictionConfig, bool) {
 	if r == nil || len(r.Restrictions) == 0 {
-		return true
+		return nil, true
 	}
 
-	for _, restr := range r.Restrictions {
-		if restr.Matches(path, auth, commonName) {
-			if restr.Allows(claims) {
-				return true
-			}
+	for i := range r.Restrictions {
+		restr := &r.Restrictions[i]
+		if restr.Matches(path, auth, commonName) && restr.Allows(claims) {
+			return restr, true
 		}
 	}
-	return false
+	return nil, false
 }
 
 func (rc *RestrictionConfig) Matches(path string, auth string, commonName string) bool {
