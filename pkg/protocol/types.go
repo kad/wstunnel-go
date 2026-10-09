@@ -24,6 +24,15 @@ type LocalProtocol struct {
 	ReverseHttpProxy *ReverseHttpProxyProtocol `json:"ReverseHttpProxy,omitempty"`
 	ReverseUnix      *ReverseUnixProtocol      `json:"ReverseUnix,omitempty"`
 	Unix             *UnixProtocol             `json:"Unix,omitempty"`
+	// Tun is a Go-only extension: the connection carries raw IP packets.
+	// Rust wstunnel rejects it as an unknown variant.
+	Tun *TunProtocol `json:"Tun,omitempty"`
+}
+
+// TunProtocol requests a packet-level tun session. Mtu is the client's TUN
+// MTU; the server uses the same value for its side of the session.
+type TunProtocol struct {
+	Mtu uint16 `json:"mtu"`
 }
 
 type TcpProtocol struct {

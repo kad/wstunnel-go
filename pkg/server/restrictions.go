@@ -372,5 +372,8 @@ func getProtoName(p protocol.LocalProtocol) string {
 	if p.ReverseUnix != nil {
 		return "ReverseUnix"
 	}
+	if p.Tun != nil {
+		return "Tun"
+	}
 	return "Unknown"
 }
