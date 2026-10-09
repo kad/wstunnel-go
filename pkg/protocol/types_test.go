@@ -100,3 +100,21 @@ func TestJwtTunnelConfig_JSON(t *testing.T) {
 		t.Errorf("Unmarshal() protocol mismatch: got %+v, want %+v", got.Protocol.Tcp, cfg.Protocol.Tcp)
 	}
 }
+
+func TestLocalProtocolTunJSON(t *testing.T) {
+	b, err := json.Marshal(LocalProtocol{Tun: &TunProtocol{Mtu: 1400}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := string(b), `{"Tun":{"mtu":1400}}`; got != want {
+		t.Fatalf("Marshal = %s, want %s", got, want)
+	}
+
+	var p LocalProtocol
+	if err := json.Unmarshal([]byte(`{"Tun":{"mtu":9000}}`), &p); err != nil {
+		t.Fatal(err)
+	}
+	if p.Tun == nil || p.Tun.Mtu != 9000 {
+		t.Fatalf("Unmarshal Tun = %+v, want mtu 9000", p.Tun)
+	}
+}

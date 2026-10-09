@@ -609,3 +609,9 @@ func TestReverseTunnelManagerRemovesDeadListenerAfterAcceptError(t *testing.T) {
 		t.Fatal("dead listener remained registered after accept error")
 	}
 }
+
+func TestGetProtoNameTun(t *testing.T) {
+	if got := getProtoName(protocol.LocalProtocol{Tun: &protocol.TunProtocol{}}); got != "Tun" {
+		t.Fatalf("getProtoName(Tun) = %q, want Tun", got)
+	}
+}
