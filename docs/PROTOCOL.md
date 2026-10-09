@@ -75,6 +75,32 @@ The protocol supports the following inner protocols via the `p` claim:
 - `http`: HTTP Connect proxying.
 - `stdio`: Forwarding to/from stdin/stdout.
 - `unix`: Unix domain socket forwarding.
+- `Tun` (Go-only extension): the connection carries raw IP packets. See [Tun mode](#tun-mode-go-only-extension).
+
+## Tun mode (Go-only extension)
+
+Rust wstunnel has no packet mode and rejects this variant as unknown.
+
+### Claim
+
+`{"p": {"Tun": {"mtu": 1500}}, "r": "0.0.0.0", "rp": 0}`. `mtu` is the client's TUN MTU (1280 to 65535; 0 means 1500). `r` and `rp` are placeholders and ignored.
+
+### Framing
+
+After the handshake the connection carries IP packets:
+
+| Transport | Framing |
+|---|---|
+| `--mode rust`, `--mode ws` | one binary message per IP packet |
+| HTTP/2, WebTransport stream | `[u16 big-endian length][packet]`, as for UDP tunnels |
+
+### Addressing and lifetime
+
+There is no address assignment and no control message. The server terminates each session in its own userspace stack that accepts any source and destination, so every client may use the same inside address (the client default is `198.18.0.1`). Closing the connection ends the session and all of its flows.
+
+### Server-side forwarding
+
+Each new TCP connection or UDP association is authorized and then dialed as an ordinary outbound connection. A refused TCP flow is answered with RST. ICMP is not forwarded.
 
 ## Examples
 

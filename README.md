@@ -14,6 +14,7 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
     -   **Unix Domain Sockets**: Tunneling to/from local unix sockets.
     -   **Stdio**: Tunneling via standard input/output.
 -   **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
+-   **Tun mode (Go-only, server side)**: With `--enable-tun`, the server accepts packet-level tun sessions and forwards each TCP/UDP flow to the real network through a userspace TCP/IP stack. The client side (`tun://`) is in progress.
 -   **Reverse Tunneling**: Stable support for static reverse TCP and reverse Unix socket tunnels (server-to-client).
 -   **Transports**:
     -   **WebSocket-like transport**: Secure WebSocket-style transport (default) with intentional RFC 6455 deviations for compatibility with the original Rust implementation.
@@ -207,6 +208,8 @@ For a comprehensive YAML guide with annotated client/server examples and option 
 -   `--tls-certificate`, `--tls-private-key`: Paths to TLS cert/key for the server.
 -   `--tls-client-ca-certs`: Enable mTLS by providing CA certificates to verify clients.
 -   `--remote-to-local-server-idle-timeout`: Idle timeout for reverse tunnel server.
+-   `--enable-tun`: Accept packet-level tun sessions (Go-only extension). Off by default, and required even when restrictions allow every protocol.
+-   `--tun-udp-timeout`: Close a tun UDP flow after this long without traffic (default `30s`).
 
 ### YAML Configuration Example
 
@@ -270,6 +273,7 @@ func main() {
 | mTLS | ✅ | ✅ |
 | HTTP/2 Transport | ✅ | ✅ |
 | TProxy (Linux) | ✅ | ✅ |
+| Tun mode (packet tunnel) | 🚧 server only | n/a (Go-only) |
 | JWT Authentication | ✅ | ✅ |
 
 ### Performance Metrics
