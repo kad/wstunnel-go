@@ -10,8 +10,10 @@ import (
 	"net/netip"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/pkg/tun/internal/netstackutil"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
 	"gvisor.dev/gvisor/pkg/tcpip/transport/tcp"
@@ -148,12 +150,22 @@ func Serve(ctx context.Context, pc PacketConn, opts Options) error {
 	return err
 }
 
+// isClosedErr reports whether err only says that the peer or the local side
+// went away, as opposed to a genuine failure.
 func isClosedErr(err error) bool {
-	return err == nil ||
+	if err == nil {
+		return true
+	}
+	var ce *websocket.CloseError
+	return errors.As(err, &ce) ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, io.ErrClosedPipe) ||
 		errors.Is(err, net.ErrClosed) ||
-		errors.Is(err, context.Canceled)
+		errors.Is(err, context.Canceled) ||
+		errors.Is(err, websocket.ErrCloseSent) ||
+		errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, syscall.ECONNRESET)
 }
 
 // admit authorizes f and takes a flow slot. The caller must call release once

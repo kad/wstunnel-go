@@ -373,3 +373,70 @@ func TestServeForwardsTCPOverIPv6(t *testing.T) {
 		t.Fatalf("flow source = %s, want %s", f.Src.Addr(), tuntest.Addr6)
 	}
 }
+
+// TestServeCleanDisconnectWhileWriting drops the transport while the server is
+// actively streaming packets to the client, so PumpOut's write error races
+// PumpIn's EOF. Either must count as a clean disconnect.
+func TestServeCleanDisconnectWhileWriting(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		c, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer func() { _ = c.Close() }()
+		chunk := make([]byte, 32*1024)
+		for {
+			if _, err := c.Write(chunk); err != nil {
+				return
+			}
+		}
+	}()
+
+	serverEnd, clientEnd := tuntest.Pipe()
+	h, done := startSessionOn(t, serverEnd, clientEnd, tun.Options{Authorize: allowAll})
+	c := dialTCP(t, h, ln.Addr().(*net.TCPAddr).AddrPort())
+	buf := make([]byte, 4096)
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(c, buf); err != nil {
+		t.Fatal(err)
+	}
+
+	_ = clientEnd.Close()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Serve returned %v after disconnect during writes, want nil", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after peer disconnect")
+	}
+}
+
+func TestServeLargeUDPDatagrams(t *testing.T) {
+	h, _ := startSession(t, tun.Options{Authorize: allowAll})
+	c, err := h.DialUDP(udpEchoServer(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	for _, size := range []int{8000, 60000} {
+		want := bytes.Repeat([]byte{byte(size / 1000)}, size)
+		if _, err := c.Write(want); err != nil {
+			t.Fatal(err)
+		}
+		got := make([]byte, 65535)
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		n, err := c.Read(got)
+		if err != nil {
+			t.Fatalf("read %d-byte echo: %v", size, err)
+		}
+		if !bytes.Equal(got[:n], want) {
+			t.Fatalf("echo of %d bytes came back as %d bytes (truncated or corrupt)", size, n)
+		}
+	}
+}
