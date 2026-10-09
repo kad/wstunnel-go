@@ -196,6 +196,8 @@ server:
 - `http_proxy_login`: currently a no-op; reserved for an optional proxy username override.
 - `http_proxy_password`: currently a no-op; reserved for an optional proxy password override.
 - `remote_to_local_server_idle_timeout`: how long an idle reverse listener may stay bound without new client use.
+- `enable_tun`: accept packet-level tun sessions (Go-only extension). Default `false`. Required even when restrictions allow every protocol, because an empty `protocol:` list admits all of them.
+- `tun_udp_timeout`: close a tun UDP flow after this long without traffic in either direction. Default `30s`.
 
 ## Restriction config example
 
@@ -238,3 +240,29 @@ restrictions:
 - `!ReverseTunnel` for reverse listeners (`ReverseTcp`, `ReverseUnix`, and related reverse tunnel protocol names)
 
 Use `restrict_config` when simple `restrict_to` lists are not expressive enough.
+
+### Tun sessions
+
+A tun session is admitted by a rule that allows protocol `Tun`. Every flow inside it is then checked as a `Tcp` or `Udp` tunnel to the flow's destination IP and port, against the **same** rule:
+
+```yaml
+restrictions:
+  - name: office-vpn
+    match:
+      - PathPrefix: "^/vpn"
+    allow:
+      - !Tunnel
+        protocol: [Tun]
+      - !Tunnel
+        protocol: [Tcp, Udp]
+        cidr: [10.0.0.0/8]
+      - !Tunnel
+        protocol: [Tcp]
+        port: ["443"]
+        cidr: [0.0.0.0/0]
+```
+
+- Put `Tun` in its own `!Tunnel` entry. The session claim carries the placeholder destination `0.0.0.0:0`, so `port` or `cidr` filters on the same entry would reject the session itself.
+- Loopback, link-local (including `169.254.169.254`), unspecified, multicast, broadcast and `fd00:ec2::254` are denied even when a rule matches. A rule lifts this only with a CIDR that names the address specifically (prefix length above 0), for example `127.0.0.1/32`. `0.0.0.0/0` does not.
+- Rules built from `--restrict-to host:port` match a host name, and a flow only has an IP, so they admit tun sessions but only flows whose `host` was written as an IP literal.
+- Without any restrictions, `enable_tun` alone admits sessions, and every flow outside the deny list is allowed.

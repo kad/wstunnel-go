@@ -76,6 +76,9 @@ The project supports multiple transport protocols for tunneling:
 -  **WebSocket**: (Default) WebSocket-based transport with specific tweaks for compatibility with original Rust implementation. Uses `Sec-WebSocket-Protocol` header for JWT authentication.
 -  **RFC 6455 WebSocket**: Strict RFC-compliant mode enabled via `--mode ws`. Recommended for use with standard Go WebSocket clients but may not be compatible with the original Rust implementation.
 -  **HTTP/2**: Provides full-duplex streaming over HTTP/2 POST requests. Uses `Cookie` header for JWT authentication.
+-  **WebTransport**: `wt://`/`wts://` over HTTP/3; the JWT is sent as a length-prefixed preamble on each stream.
+
+Every protocol branch has to exist in all four server handlers: `handleConnection`, `handleGorillaConnection`, `handleHttp2Connection` and the WebTransport `handleStream`. That includes the Go-only `Tun` branch, which hands the connection to `pkg/tun` through the matching `PacketConn` adapter.
 
 ### Client Configuration
 The **Client** determines the transport based on the server URL scheme (e.g., `ws://` for WebSocket, `http://` for HTTP/2).
