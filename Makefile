@@ -1,7 +1,7 @@
 # Makefile for wstunnel-go
 
 # Variables
-GO_VERSION ?= 1.25
+GO_VERSION ?= 1.27.1
 APP_NAME ?= wstunnel-go
 BIN_DIR ?= ./bin
 GO_BUILD_LDFLAGS ?= -ldflags="-s -w"
