@@ -134,6 +134,17 @@ func (w *Wstunnel) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 				w.Config.RemoteToLocalServerIdleTimeout = dur
 			case "mask_frame":
 				w.Config.WebsocketMaskFrame = true
+			case "enable_tun":
+				w.Config.EnableTun = true
+			case "tun_udp_timeout":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				dur, err := caddy.ParseDuration(d.Val())
+				if err != nil {
+					return d.Errf("invalid tun_udp_timeout: %v", err)
+				}
+				w.Config.TunUdpTimeout = dur
 			case "restrict_to":
 				w.Config.RestrictTo = append(w.Config.RestrictTo, d.RemainingArgs()...)
 			default:
