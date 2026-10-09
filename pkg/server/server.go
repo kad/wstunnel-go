@@ -22,6 +22,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
+	"github.com/kad/wstunnel-go/pkg/tun"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
 	"github.com/kad/wstunnel-go/pkg/wst"
 )
@@ -341,23 +342,31 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate restrictions
+	var rule *RestrictionConfig
 	if s.rules != nil {
 		auth := r.Header.Get("Authorization")
 		commonName := ""
 		if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
 			commonName = r.TLS.PeerCertificates[0].Subject.CommonName
 		}
-		if !s.rules.Validate(claims, r.URL.Path, auth, commonName) {
+		var ok bool
+		rule, ok = s.rules.ValidateMatch(claims, r.URL.Path, auth, commonName)
+		if !ok {
 			slog.Warn("Tunnel rejected by restrictions", "tunnel_id", claims.ID)
 			http.Error(w, "Forbidden by restrictions", http.StatusForbidden)
 			return
 		}
 	}
+	if err := s.admitTun(claims); err != nil {
+		slog.Warn("Tunnel rejected", "tunnel_id", claims.ID, "err", err)
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 
 	// If HTTP/2 and not a websocket upgrade, handle as HTTP/2 tunnel
 	isWebsocket := strings.ToLower(r.Header.Get("Upgrade")) == "websocket"
 	if r.ProtoAtLeast(2, 0) && !isWebsocket {
-		s.handleHttp2Connection(w, r, claims)
+		s.handleHttp2Connection(w, r, claims, rule)
 		return
 	}
 
@@ -379,7 +388,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		slog.Info("Accepted gorilla tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port, "subprotocol", wsConn.Subprotocol())
-		go s.handleGorillaConnection(wsConn, claims)
+		go s.handleGorillaConnection(wsConn, claims, rule)
 		return
 	}
 
@@ -403,16 +412,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("Accepted tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port, "subprotocol", wsConn.Subprotocol())
-	go s.handleConnection(wsConn, claims)
+	go s.handleConnection(wsConn, claims, rule)
 }
 
-func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelConfig) {
+func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
 	defer func() { _ = wsConn.Close() }()
 
 	// Handle PING from client
 	wsConn.SetPingHandler(func(appData string) error {
 		return wsConn.WriteMessage(wst.PongMessage, []byte(appData))
 	})
+
+	if claims.Protocol.Tun != nil {
+		s.serveTun(tun.NewWSTPacketConn(wsConn), claims, rule)
+		return
+	}
 
 	// Forward Tunnel
 	if claims.Protocol.Tcp != nil || claims.Protocol.Udp != nil || claims.Protocol.Socks5 != nil || claims.Protocol.HttpProxy != nil || claims.Protocol.Unix != nil {
@@ -453,12 +467,19 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 	slog.Warn("Unsupported protocol", "proto", claims.Protocol)
 }
 
-func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig) {
+func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
 	defer func() { _ = wsConn.Close() }()
 
 	wsConn.SetPingHandler(func(appData string) error {
 		return wsConn.WriteMessage(websocket.PongMessage, []byte(appData))
 	})
+
+	if claims.Protocol.Tun != nil {
+		// NewGorillaPacketConn replaces the ping handler above with one that is
+		// safe alongside the session's packet writer.
+		s.serveTun(tun.NewGorillaPacketConn(wsConn), claims, rule)
+		return
+	}
 
 	// Forward Tunnel
 	if claims.Protocol.Tcp != nil || claims.Protocol.Udp != nil || claims.Protocol.Socks5 != nil || claims.Protocol.HttpProxy != nil || claims.Protocol.Unix != nil {
@@ -499,7 +520,7 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 	slog.Warn("Unsupported protocol (gorilla)", "proto", claims.Protocol)
 }
 
-func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, claims *protocol.JwtTunnelConfig) {
+func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
 	w.WriteHeader(http.StatusOK)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -514,6 +535,11 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 		ReadCloser: r.Body,
 		writer:     w,
 		flusher:    flusher,
+	}
+
+	if claims.Protocol.Tun != nil {
+		s.serveTun(tun.NewFramedPacketConn(rwc), claims, rule)
+		return
 	}
 
 	// Forward Tunnel
@@ -556,6 +582,37 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 
 	slog.Warn("Unsupported protocol for HTTP/2", "proto", claims.Protocol)
 	_ = rwc.Close()
+}
+
+// admitTun rejects tun sessions unless EnableTun is set. It is checked
+// separately from restrictions because an empty protocol list in a rule
+// admits every protocol.
+func (s *Server) admitTun(claims *protocol.JwtTunnelConfig) error {
+	if claims.Protocol.Tun != nil && !s.Config.EnableTun {
+		return fmt.Errorf("tun mode is disabled on this server")
+	}
+	return nil
+}
+
+// serveTun runs a tun session until the client disconnects. rule is the
+// restriction that admitted the session, or nil when none are configured.
+//
+// Flows dial like forward tunnels do: tun.DefaultDialTimeout (10s) and no
+// SO_MARK, since socket_so_mark only applies to listener sockets.
+func (s *Server) serveTun(pc tun.PacketConn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
+	log := slog.With("tunnel_id", claims.ID)
+	log.Info("Accepted tun session", "mtu", claims.Protocol.Tun.Mtu)
+	err := tun.Serve(context.Background(), pc, tun.Options{
+		MTU:            uint32(claims.Protocol.Tun.Mtu),
+		Authorize:      func(f tun.Flow) bool { return tunFlowAllowed(rule, f) },
+		UDPIdleTimeout: s.Config.TunUdpTimeout,
+		Logger:         log,
+	})
+	if err != nil {
+		log.Warn("Tun session failed", "err", err)
+		return
+	}
+	log.Info("Tun session closed")
 }
 
 type http2ReadWriteCloser struct {

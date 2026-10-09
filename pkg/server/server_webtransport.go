@@ -20,6 +20,7 @@ import (
 
 	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
+	"github.com/kad/wstunnel-go/pkg/tun"
 	"github.com/kad/wstunnel-go/pkg/tunnel"
 	"github.com/quic-go/quic-go/http3"
 	"github.com/quic-go/webtransport-go"
@@ -189,11 +190,22 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 	destAddr := claims.Remote
 	destPort := claims.Port
 
+	var rule *RestrictionConfig
 	if w.server.rules != nil {
-		if !w.server.rules.Validate(claims, request.path, request.auth, request.commonName) {
+		var ok bool
+		rule, ok = w.server.rules.ValidateMatch(claims, request.path, request.auth, request.commonName)
+		if !ok {
 			slog.Warn("WebTransport access restricted", "dest", destAddr, "port", destPort)
 			return
 		}
+	}
+	if err := w.server.admitTun(claims); err != nil {
+		slog.Warn("WebTransport stream rejected", "tunnel_id", claims.ID, "err", err)
+		return
+	}
+	if claims.Protocol.Tun != nil {
+		w.server.serveTun(tun.NewFramedPacketConn(stream), claims, rule)
+		return
 	}
 
 	var streamRWC io.ReadWriteCloser = stream
