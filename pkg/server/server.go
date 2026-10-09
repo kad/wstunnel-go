@@ -49,6 +49,10 @@ type Config struct {
 	HttpProxyPassword              string        `yaml:"http_proxy_password"`
 	RemoteToLocalServerIdleTimeout time.Duration `yaml:"remote_to_local_server_idle_timeout"`
 	WebsocketProtocol              string        `yaml:"mode"` // "rust" or "ws"
+	// EnableTun admits packet-level tun sessions (a Go-only extension). It is
+	// required even when restrictions allow every protocol.
+	EnableTun     bool          `yaml:"enable_tun"`
+	TunUdpTimeout time.Duration `yaml:"tun_udp_timeout"`
 }
 
 func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {

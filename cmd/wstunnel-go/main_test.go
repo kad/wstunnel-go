@@ -45,6 +45,8 @@ func newTestContext(t *testing.T, args []string) *cli.Context {
 	fs.String("restrict-config", "", "")
 	fs.String("tls-client-ca-certs", "", "")
 	fs.Duration("remote-to-local-server-idle-timeout", 0, "")
+	fs.Bool("enable-tun", false, "")
+	fs.Duration("tun-udp-timeout", 30*time.Second, "")
 
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("Parse() error = %v", err)
@@ -104,5 +106,31 @@ func TestApplyServerFlagOverridesRespectsExplicitBoolOverride(t *testing.T) {
 	}
 	if cfg.WebsocketPingFrequency != time.Minute {
 		t.Fatalf("WebsocketPingFrequency = %v, want %v", cfg.WebsocketPingFrequency, time.Minute)
+	}
+}
+
+func TestApplyServerFlagOverridesTunSettings(t *testing.T) {
+	cfg := &server.Config{TunUdpTimeout: time.Minute}
+	applyServerFlagOverrides(newTestContext(t, []string{"--enable-tun"}), cfg, "")
+	if !cfg.EnableTun {
+		t.Fatal("EnableTun = false, want true from --enable-tun")
+	}
+	if cfg.TunUdpTimeout != time.Minute {
+		t.Fatalf("TunUdpTimeout = %v, want config value %v over the flag default", cfg.TunUdpTimeout, time.Minute)
+	}
+
+	cfg = &server.Config{EnableTun: true}
+	applyServerFlagOverrides(newTestContext(t, []string{"--enable-tun=false", "--tun-udp-timeout=5s"}), cfg, "")
+	if cfg.EnableTun {
+		t.Fatal("EnableTun remained true despite explicit --enable-tun=false")
+	}
+	if cfg.TunUdpTimeout != 5*time.Second {
+		t.Fatalf("TunUdpTimeout = %v, want 5s", cfg.TunUdpTimeout)
+	}
+
+	cfg = &server.Config{}
+	applyServerFlagOverrides(newTestContext(t, nil), cfg, "")
+	if cfg.EnableTun || cfg.TunUdpTimeout != 30*time.Second {
+		t.Fatalf("defaults = EnableTun %v, TunUdpTimeout %v; want false, 30s", cfg.EnableTun, cfg.TunUdpTimeout)
 	}
 }

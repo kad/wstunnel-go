@@ -187,6 +187,12 @@ func applyServerFlagOverrides(c *cli.Context, config *server.Config, listenAddr 
 	if flagExplicitlySet(c, "remote-to-local-server-idle-timeout") || config.RemoteToLocalServerIdleTimeout == 0 {
 		config.RemoteToLocalServerIdleTimeout = c.Duration("remote-to-local-server-idle-timeout")
 	}
+	if flagExplicitlySet(c, "enable-tun") {
+		config.EnableTun = c.Bool("enable-tun")
+	}
+	if flagExplicitlySet(c, "tun-udp-timeout") || config.TunUdpTimeout == 0 {
+		config.TunUdpTimeout = c.Duration("tun-udp-timeout")
+	}
 	if flagExplicitlySet(c, "mode") || config.WebsocketProtocol == "" {
 		config.WebsocketProtocol = c.String("mode")
 	}
@@ -449,6 +455,15 @@ func main() {
 						Aliases: []string{"remote-to-local-server-idle-timeout-sec"},
 						Value:   3 * time.Minute,
 						Usage:   "Idle timeout for reverse tunnel server",
+					},
+					&cli.BoolFlag{
+						Name:  "enable-tun",
+						Usage: "Accept packet-level tun sessions (Go-only extension). Flows are still subject to restrictions",
+					},
+					&cli.DurationFlag{
+						Name:  "tun-udp-timeout",
+						Value: 30 * time.Second,
+						Usage: "Close a tun UDP flow after this long without traffic",
 					},
 				},
 				Action: runServer,
