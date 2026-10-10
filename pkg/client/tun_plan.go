@@ -1,6 +1,7 @@
 package client
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -45,6 +46,9 @@ type netConfigurer interface {
 func planTunNetConfig(spec *TunSpec, serverAddrs []netip.Addr) ([]netOp, error) {
 	if !spec.Configure {
 		return nil, nil
+	}
+	if len(spec.Routes) > 0 && len(serverAddrs) == 0 {
+		return nil, errors.New("cannot check tun:// routes against the tunnel server because its address is unknown")
 	}
 	for _, route := range spec.Routes {
 		for _, server := range serverAddrs {

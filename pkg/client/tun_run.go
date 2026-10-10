@@ -79,6 +79,12 @@ func (c *Client) StartTun(spec *TunSpec) error {
 	return nil
 }
 
+// lookupNetIP resolves a host name; a variable so tests can simulate a resolver
+// that returns nothing.
+var lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
+	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+}
+
 // resolveServerAddrs returns the addresses the tunnel server name resolves to.
 func (c *Client) resolveServerAddrs() ([]netip.Addr, error) {
 	u, err := url.Parse(c.Config.ServerURL)
@@ -86,14 +92,21 @@ func (c *Client) resolveServerAddrs() ([]netip.Addr, error) {
 		return nil, fmt.Errorf("invalid server url: %w", err)
 	}
 	host := u.Hostname()
+	if host == "" {
+		return nil, fmt.Errorf("invalid server url %q: no hostname", c.Config.ServerURL)
+	}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return []netip.Addr{ip}, nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), tunResolveTimeout)
 	defer cancel()
-	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	addrs, err := lookupNetIP(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve tunnel server %q: %w", host, err)
+	}
+	if len(addrs) == 0 {
+		// The loop guard must never run against an empty list.
+		return nil, fmt.Errorf("resolve tunnel server %q: no addresses", host)
 	}
 	return addrs, nil
 }
@@ -183,10 +196,23 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 	stop := context.AfterFunc(ctx, func() { _ = pc.Close() })
 	defer stop()
 
+	var lastAlive atomic.Int64
+	lastAlive.Store(time.Now().UnixNano())
 	if c.Config.PingFrequency > 0 {
+		// The pong handler runs inside ReadMessage, hence the atomic.
+		pong := func(string) error {
+			lastAlive.Store(time.Now().UnixNano())
+			return nil
+		}
+		switch {
+		case ts.ws != nil:
+			ts.ws.SetPongHandler(pong)
+		case ts.gorilla != nil:
+			ts.gorilla.SetPongHandler(pong)
+		}
 		keepCtx, keepCancel := context.WithCancel(ctx)
 		defer keepCancel()
-		go c.tunKeepAlive(keepCtx, ts)
+		go c.tunKeepAlive(keepCtx, ts, pc, &lastAlive)
 	}
 
 	slog.Info("Tun session established", "mtu", mtu)
@@ -195,6 +221,7 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 		if err != nil {
 			return err
 		}
+		lastAlive.Store(time.Now().UnixNano())
 		if err := dev.WritePacket(pkt); err != nil {
 			if errors.Is(err, os.ErrClosed) {
 				return err
@@ -206,8 +233,14 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 	}
 }
 
-// tunKeepAlive sends websocket pings so idle NAT and proxy state stays alive.
-func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream) {
+// tunKeepAlive sends websocket pings so idle NAT and proxy state stays alive,
+// and drops the session when the peer has shown no sign of life (no packet and
+// no pong) for three ping intervals, so a silently dead connection ends and
+// runTun reconnects instead of hanging until the kernel's TCP timeout.
+//
+// HTTP/2 and WebTransport have no ping mechanism in this client, so they have
+// no watchdog; their dead-peer detection is out of scope for this milestone.
+func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream, pc tun.PacketConn, lastAlive *atomic.Int64) {
 	ticker := time.NewTicker(c.Config.PingFrequency)
 	defer ticker.Stop()
 	for {
@@ -215,6 +248,12 @@ func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		}
+		idle := time.Since(time.Unix(0, lastAlive.Load()))
+		if idle > 3*c.Config.PingFrequency {
+			slog.Warn("Tun peer unresponsive; dropping the session", "idle", idle)
+			_ = pc.Close()
+			return
 		}
 		var err error
 		switch {
@@ -228,6 +267,7 @@ func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream) {
 			return
 		}
 		if err != nil {
+			_ = pc.Close()
 			return
 		}
 	}

@@ -112,7 +112,7 @@ func TestPlanTunNetConfigLoopGuardMappedAndV6(t *testing.T) {
 
 func TestApplyNetOpsStopsAtFirstRequiredFailure(t *testing.T) {
 	spec := mustSpec(t, "tun://wst0?addr=10.9.0.2/32&route=10.0.0.0/8")
-	ops, _ := planTunNetConfig(spec, nil)
+	ops, _ := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")})
 	boom := errors.New("boom")
 	rec := &recordingConfigurer{failOn: "addr wst0 10.9.0.2/32", failErr: boom}
 	err := applyNetOps("wst0", ops, rec)
@@ -128,7 +128,7 @@ func TestApplyNetOpsStopsAtFirstRequiredFailure(t *testing.T) {
 
 func TestApplyNetOpsSkipsOptionalDefaultIPv6(t *testing.T) {
 	spec := mustSpec(t, "tun://wst0?route=10.0.0.0/8") // default addresses: v4 required, v6 optional
-	ops, _ := planTunNetConfig(spec, nil)
+	ops, _ := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")})
 	rec := &recordingConfigurer{failOn: "addr wst0 fd77:7473::1/128", failErr: errors.New("ipv6 disabled")}
 	if err := applyNetOps("wst0", ops, rec); err != nil {
 		t.Fatalf("a failing default IPv6 address must not abort startup: %v", err)
@@ -140,9 +140,24 @@ func TestApplyNetOpsSkipsOptionalDefaultIPv6(t *testing.T) {
 
 func TestApplyNetOpsOperatorIPv6IsRequired(t *testing.T) {
 	spec := mustSpec(t, "tun://wst0?addr=fd00::2/128")
-	ops, _ := planTunNetConfig(spec, nil)
+	ops, _ := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")})
 	rec := &recordingConfigurer{failOn: "addr wst0 fd00::2/128", failErr: errors.New("ipv6 disabled")}
 	if err := applyNetOps("wst0", ops, rec); err == nil {
 		t.Fatal("an IPv6 address the operator asked for must be required")
+	}
+}
+
+func TestPlanTunNetConfigFailsClosedWithoutServerAddress(t *testing.T) {
+	spec := mustSpec(t, "tun://wst0?route=10.0.0.0/8")
+	for _, addrs := range [][]netip.Addr{nil, {}} {
+		if _, err := planTunNetConfig(spec, addrs); err == nil {
+			t.Errorf("routes with server addresses %#v must be refused", addrs)
+		}
+	}
+	if _, err := planTunNetConfig(mustSpec(t, "tun://wst0"), []netip.Addr{}); err != nil {
+		t.Errorf("no routes needs no server address: %v", err)
+	}
+	if _, err := planTunNetConfig(mustSpec(t, "tun://wst0?configure=false"), []netip.Addr{}); err != nil {
+		t.Errorf("configure=false needs no server address: %v", err)
 	}
 }
