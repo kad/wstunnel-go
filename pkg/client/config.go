@@ -35,6 +35,12 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 	proto := parts[0]
 	info := parts[1]
 
+	if proto == "tun" {
+		// tun:// carries device settings that LocalToRemote cannot hold; see
+		// ParseTunArg and StartTun.
+		return nil, fmt.Errorf("tun:// is a packet tunnel and is only valid with -L (parsed by ParseTunArg)")
+	}
+
 	// Split by '?' to get options
 	options := make(map[string]string)
 	if idx := strings.Index(info, "?"); idx != -1 {
