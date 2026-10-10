@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -535,6 +536,7 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 		ReadCloser: r.Body,
 		writer:     w,
 		flusher:    flusher,
+		rw:         w,
 	}
 
 	if claims.Protocol.Tun != nil {
@@ -619,6 +621,8 @@ type http2ReadWriteCloser struct {
 	io.ReadCloser
 	writer  io.Writer
 	flusher http.Flusher
+	// rw, when set, lets Close unblock a Write stuck on flow control.
+	rw http.ResponseWriter
 }
 
 func (h *http2ReadWriteCloser) Write(p []byte) (int, error) {
@@ -630,5 +634,13 @@ func (h *http2ReadWriteCloser) Write(p []byte) (int, error) {
 }
 
 func (h *http2ReadWriteCloser) Close() error {
+	if h.rw != nil {
+		// Wake a Write blocked on the peer's flow-control window. Not every
+		// ResponseWriter supports deadlines; that is fine.
+		err := http.NewResponseController(h.rw).SetWriteDeadline(time.Now())
+		if err != nil && !errors.Is(err, http.ErrNotSupported) {
+			slog.Debug("HTTP/2 tunnel: could not unblock writer", "err", err)
+		}
+	}
 	return h.ReadCloser.Close()
 }

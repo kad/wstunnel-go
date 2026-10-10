@@ -108,7 +108,12 @@ func Serve(ctx context.Context, pc PacketConn, opts Options) error {
 	if err != nil {
 		return err
 	}
-	defer s.Close()
+	stackOwned := false // true once Serve's teardown path owns closing s
+	defer func() {
+		if !stackOwned {
+			s.Close()
+		}
+	}()
 
 	// Accept packets from any source to any destination: every client may use
 	// the same inside address, and replies go back to whatever source it used.
@@ -137,13 +142,25 @@ func Serve(ctx context.Context, pc PacketConn, opts Options) error {
 	go func() { errc <- netstackutil.PumpOut(ctx, ep, pc.WritePacket) }()
 	go func() { errc <- netstackutil.PumpIn(pc.ReadPacket, ep) }()
 
+	pumps := 2
 	select {
 	case err = <-errc:
+		pumps--
 	case <-ctx.Done():
 		err = nil
 	}
-	// cancel (deferred) tears down every flow via context.AfterFunc; closing
-	// pc unblocks PumpIn.
+	// Teardown order matters. cancel tears down every flow via
+	// context.AfterFunc and wakes PumpOut; closing pc unblocks a pump stuck
+	// in a transport read or write. Serve must not return (so the transport
+	// handler must not finish) while a pump can still touch pc or the stack,
+	// hence the wait before closing the stack.
+	cancel()
+	_ = pc.Close()
+	for ; pumps > 0; pumps-- {
+		<-errc
+	}
+	stackOwned = true
+	s.Close()
 	if isClosedErr(err) {
 		return nil
 	}

@@ -234,3 +234,95 @@ func TestTunSessionDeniesLoopbackByDefault(t *testing.T) {
 		t.Fatalf("DialTCP to server loopback = %v, want connection refused", err)
 	}
 }
+
+// streamingUDPServer replies to every datagram it receives with a continuous
+// stream of datagrams until the test ends.
+func streamingUDPServer(t *testing.T) netip.AddrPort {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done); _ = pc.Close() })
+	go func() {
+		buf := make([]byte, 64)
+		for {
+			_, from, err := pc.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			go func() {
+				payload := make([]byte, 1000)
+				for {
+					select {
+					case <-done:
+						return
+					default:
+					}
+					if _, err := pc.WriteTo(payload, from); err != nil {
+						return
+					}
+					time.Sleep(50 * time.Microsecond)
+				}
+			}()
+		}
+	}()
+	return pc.LocalAddr().(*net.UDPAddr).AddrPort()
+}
+
+// TestTunH2HalfCloseDoesNotCrashServer: the client ends its request body while
+// the server is still streaming to it. Serve must not return (and so the
+// handler must not finish) while a pump can still write to the ResponseWriter,
+// or net/http panics with "Write called after Handler finished".
+func TestTunH2HalfCloseDoesNotCrashServer(t *testing.T) {
+	s := NewServer(Config{WebsocketProtocol: "rust", EnableTun: true})
+	s.SetRules(tunRules(t, tunLoopbackRules))
+	addr := startTunServer(t, s)
+	udpAddr := streamingUDPServer(t)
+
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{Protocols: protocols}
+	t.Cleanup(tr.CloseIdleConnections)
+
+	for i := 0; i < 25; i++ {
+		pr, pw := io.Pipe()
+		req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/events", pr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Cookie", tunToken(t, 1500))
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pc := tun.NewFramedPacketConn(&h2Stream{body: resp.Body, w: pw})
+		host := tuntest.NewHost(t, pc, 1500)
+
+		c, err := host.DialUDP(udpAddr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := c.Write([]byte("go")); err != nil {
+			t.Fatal(err)
+		}
+		_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if _, err := c.Read(make([]byte, 2000)); err != nil {
+			t.Fatalf("no streamed datagram: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond) // let the server queue more output
+		_ = pw.Close()                   // half-close: END_STREAM on the request body
+
+		// The server must end the response; keep draining so it is not just
+		// blocked on flow control.
+		drained := make(chan struct{})
+		go func() { _, _ = io.Copy(io.Discard, resp.Body); close(drained) }()
+		select {
+		case <-drained:
+		case <-time.After(10 * time.Second):
+			t.Fatal("server did not end the response after half-close")
+		}
+		_ = c.Close()
+	}
+}

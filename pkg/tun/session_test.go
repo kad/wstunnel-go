@@ -440,3 +440,59 @@ func TestServeLargeUDPDatagrams(t *testing.T) {
 		}
 	}
 }
+
+// slowExitConn blocks WritePacket until Close and then takes a while to
+// finish, counting pump calls still inside the transport.
+type slowExitConn struct {
+	tun.PacketConn
+	live      atomic.Int32
+	writing   chan struct{}
+	closed    chan struct{}
+	closeOnce sync.Once
+}
+
+func (c *slowExitConn) WritePacket(p []byte) error {
+	c.live.Add(1)
+	defer c.live.Add(-1)
+	select {
+	case c.writing <- struct{}{}:
+	default:
+	}
+	<-c.closed
+	time.Sleep(150 * time.Millisecond)
+	return net.ErrClosed
+}
+
+func (c *slowExitConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return c.PacketConn.Close()
+}
+
+func TestServeWaitsForPumpsBeforeReturning(t *testing.T) {
+	serverEnd, clientEnd := tuntest.Pipe()
+	sc := &slowExitConn{PacketConn: serverEnd, writing: make(chan struct{}, 1), closed: make(chan struct{})}
+	host, done := startSessionOn(t, sc, clientEnd, tun.Options{Authorize: func(tun.Flow) bool { return false }})
+
+	// A denied SYN makes the stack emit a reset, which parks PumpOut in WritePacket.
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_, _ = host.DialTCP(ctx, netip.MustParseAddrPort("203.0.113.1:80"))
+	}()
+	select {
+	case <-sc.writing:
+	case <-time.After(5 * time.Second):
+		t.Fatal("PumpOut never reached WritePacket")
+	}
+
+	// The peer going away ends PumpIn first; Serve must still wait for PumpOut.
+	_ = clientEnd.Close()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return")
+	}
+	if n := sc.live.Load(); n != 0 {
+		t.Fatalf("Serve returned with %d pump(s) still inside the transport", n)
+	}
+}
