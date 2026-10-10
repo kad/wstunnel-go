@@ -3,6 +3,8 @@
 package tester
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -11,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -34,9 +37,15 @@ import (
 // client carries the packets to the server in B over the veth, and the server
 // dials 198.51.100.9:7, which is local to B.
 //
-// The test binary re-executes itself in three roles, selected by environment:
-// the driver (runs in A as root of the user namespace), and the echo helper
-// (runs in B).
+// The test binary plays three roles: the parent (TestTunNetns, which starts the
+// driver), the driver (runs in A as root of the user namespace) and the echo
+// helper (runs in B); the last two are selected by environment. The driver runs
+// in its own PID namespace, so when it dies for any reason (panic on timeout,
+// SIGKILL) the kernel kills every process it started.
+//
+// Two extra networks are routed into the tunnel's device: 198.51.100.0/24 is
+// allowed by the server rule, 198.51.101.0/24 is routed but refused. A third,
+// 198.51.102.0/24, is not routed at all.
 const (
 	tunDriverEnv = "WST_TUN_NETNS_DRIVER" // transport case name; set only for the driver
 	tunBinEnv    = "WST_TUN_NETNS_BIN"    // absolute path of the wstunnel-go binary
@@ -49,7 +58,16 @@ const (
 	tunTargetIP   = "198.51.100.9"
 	tunTargetNet  = "198.51.100.0/24"
 	tunTargetPort = 7
+
+	tunRefusedIP  = "198.51.101.9" // routed into the tunnel, refused by the server rule
+	tunRefusedNet = "198.51.101.0/24"
+	tunUnroutedIP = "198.51.102.9" // not routed into the tunnel
 )
+
+// tunUnshareArgs are the unshare flags for the driver: fresh user, network and
+// PID namespaces, with /proc remounted so pids and /proc/<pid>/ns/net match the
+// namespace, and every process killed when the driver exits.
+var tunUnshareArgs = []string{"-rn", "--pid", "--fork", "--mount-proc", "--kill-child"}
 
 var tunNetnsCases = []struct {
 	name   string
@@ -70,11 +88,15 @@ func TestTunNetns(t *testing.T) {
 			t.Skipf("%s not found in PATH", tool)
 		}
 	}
-	if err := exec.Command("unshare", "-rn", "true").Run(); err != nil {
+	if err := exec.Command("unshare", "-rn", "--pid", "--fork", "--mount-proc", "true").Run(); err != nil {
 		t.Skipf("user and network namespaces are unavailable: %v", err)
 	}
 	if _, err := os.Stat("/dev/net/tun"); err != nil {
 		t.Skipf("/dev/net/tun is unavailable: %v", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
 	}
 	bin, err := filepath.Abs(goBinary)
 	if err != nil {
@@ -91,7 +113,10 @@ func TestTunNetns(t *testing.T) {
 					t.Skip("setpriv not found in PATH; it is needed to run the client without CAP_NET_ADMIN")
 				}
 			}
-			cmd := exec.Command("unshare", "-rn", os.Args[0], "-test.run=^TestTunNetnsDriver$", "-test.v", "-test.timeout=120s")
+			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+			defer cancel()
+			args := append(append([]string{}, tunUnshareArgs...), exe, "-test.run=^TestTunNetnsDriver$", "-test.v", "-test.timeout=120s")
+			cmd := exec.CommandContext(ctx, "unshare", args...)
 			cmd.Env = append(os.Environ(), tunDriverEnv+"="+tc.name, tunBinEnv+"="+bin)
 			out, err := cmd.CombinedOutput()
 			if err != nil || !strings.Contains(string(out), tunNetnsOK) {
@@ -109,6 +134,10 @@ func TestTunNetnsDriver(t *testing.T) {
 		t.Skip("runs only inside the namespace driver process")
 	}
 	bin := os.Getenv(tunBinEnv)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
 	var scheme string
 	var flags []string
 	var attach bool
@@ -140,7 +169,10 @@ func TestTunNetnsDriver(t *testing.T) {
 		_ = holder.Wait()
 	}()
 	pid := strconv.Itoa(holder.Process.Pid)
-	mine, _ := os.Readlink("/proc/self/ns/net")
+	mine, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := waitUntil(5*time.Second, func() bool {
 		theirs, err := os.Readlink("/proc/" + pid + "/ns/net")
 		return err == nil && theirs != mine
@@ -159,6 +191,7 @@ func TestTunNetnsDriver(t *testing.T) {
 	run(inB("ip", "addr", "add", tunServerHost+"/24", "dev", "vB")...)
 	run(inB("ip", "link", "set", "vB", "up")...)
 	run(inB("ip", "addr", "add", tunTargetIP+"/32", "dev", "lo")...)
+	run(inB("ip", "addr", "add", tunRefusedIP+"/32", "dev", "lo")...)
 
 	// The server admits tun sessions and flows to the target network only.
 	rules := filepath.Join(t.TempDir(), "rules.yaml")
@@ -186,8 +219,8 @@ func TestTunNetnsDriver(t *testing.T) {
 	}
 	defer srv.Stop()
 
-	echo, err := startProcess("Echo-"+name, "nsenter", []string{"-t", pid, "-n", "--", os.Args[0], "-test.run=^TestTunNetnsHelperEcho$"},
-		append(os.Environ(), tunEchoEnv+fmt.Sprintf("=%s:%d", tunTargetIP, tunTargetPort)))
+	echo, err := startProcess("Echo-"+name, "nsenter", []string{"-t", pid, "-n", "--", exe, "-test.run=^TestTunNetnsHelperEcho$"},
+		append(os.Environ(), tunEchoEnv+fmt.Sprintf("=%s:%d,%s:%d", tunTargetIP, tunTargetPort, tunRefusedIP, tunTargetPort)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -197,7 +230,7 @@ func TestTunNetnsDriver(t *testing.T) {
 		t.Fatalf("server in namespace B did not start: %v", err)
 	}
 
-	tunArg := fmt.Sprintf("tun://wst0?addr=198.18.0.1/32&route=%s", tunTargetNet)
+	tunArg := fmt.Sprintf("tun://wst0?addr=198.18.0.1/32&route=%s&route=%s", tunTargetNet, tunRefusedNet)
 	if attach {
 		// An administrator pre-creates the device and owns its configuration; the
 		// client only attaches to it and must not change anything.
@@ -206,6 +239,7 @@ func TestTunNetnsDriver(t *testing.T) {
 		run("ip", "addr", "add", "198.18.0.1/32", "dev", "wst0")
 		run("ip", "link", "set", "wst0", "up")
 		run("ip", "route", "add", tunTargetNet, "dev", "wst0")
+		run("ip", "route", "add", tunRefusedNet, "dev", "wst0")
 		tunArg = "tun://wst0?configure=false"
 	}
 	clientArgs := append([]string{"--log-lvl", "DEBUG", "client", "--http-upgrade-path-prefix", "v1"}, flags...)
@@ -224,11 +258,13 @@ func TestTunNetnsDriver(t *testing.T) {
 	}
 	defer cli.Stop()
 
-	if err := waitUntil(10*time.Second, func() bool {
-		out, err := exec.Command("ip", "route", "show", tunTargetNet).CombinedOutput()
-		return err == nil && strings.Contains(string(out), "wst0")
-	}); err != nil {
-		t.Fatalf("the client did not create wst0 with its route: %v", err)
+	if !attach {
+		if err := waitUntil(10*time.Second, func() bool {
+			out, err := exec.Command("ip", "route", "show", tunTargetNet).CombinedOutput()
+			return err == nil && strings.Contains(string(out), "wst0")
+		}); err != nil {
+			t.Fatalf("the client did not create wst0 with its route: %v", err)
+		}
 	}
 
 	// The app dials the target; the kernel routes it into wst0.
@@ -244,49 +280,71 @@ func TestTunNetnsDriver(t *testing.T) {
 		t.Fatalf("UDP through the tunnel: %v", err)
 	}
 
-	// Traffic that is not routed into the tunnel must not use it.
-	if conn, err := net.DialTimeout("tcp", "198.51.101.9:7", 500*time.Millisecond); err == nil {
+	// Routed into the tunnel but refused by the server rule. The echo target at
+	// this address is alive, so a connection reset can only come from the
+	// server refusing the flow.
+	refused := net.JoinHostPort(tunRefusedIP, strconv.Itoa(tunTargetPort))
+	if conn, err := net.DialTimeout("tcp", refused, 3*time.Second); err == nil {
 		_ = conn.Close()
-		t.Fatal("a destination outside the routed network was reachable")
+		t.Fatal("a flow the server rule does not allow was accepted")
+	} else if !errors.Is(err, syscall.ECONNREFUSED) {
+		t.Fatalf("dial to routed but refused %s: %v, want ECONNREFUSED", refused, err)
+	}
+
+	// Not routed into the tunnel at all: the kernel has no route.
+	unrouted := net.JoinHostPort(tunUnroutedIP, strconv.Itoa(tunTargetPort))
+	if conn, err := net.DialTimeout("tcp", unrouted, 3*time.Second); err == nil {
+		_ = conn.Close()
+		t.Fatal("a destination outside the routed networks was reachable")
+	} else if !errors.Is(err, syscall.ENETUNREACH) {
+		t.Fatalf("dial to unrouted %s: %v, want ENETUNREACH", unrouted, err)
 	}
 
 	fmt.Println(tunNetnsOK)
 }
 
-// TestTunNetnsHelperEcho is a TCP and UDP echo server for namespace B.
+// TestTunNetnsHelperEcho is a TCP and UDP echo server for namespace B. The
+// environment holds a comma-separated list of addresses.
 func TestTunNetnsHelperEcho(t *testing.T) {
-	addr := os.Getenv(tunEchoEnv)
-	if addr == "" {
+	env := os.Getenv(tunEchoEnv)
+	if env == "" {
 		t.Skip("runs only as the namespace echo helper")
 	}
-	ln, err := net.Listen("tcp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pc, err := net.ListenPacket("udp", addr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	go func() {
-		buf := make([]byte, 65535)
-		for {
-			n, from, err := pc.ReadFrom(buf)
-			if err != nil {
-				return
-			}
-			_, _ = pc.WriteTo(buf[:n], from)
+	errc := make(chan error, 1)
+	for _, addr := range strings.Split(env, ",") {
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}()
-	for {
-		c, err := ln.Accept()
+		pc, err := net.ListenPacket("udp", addr)
 		if err != nil {
 			t.Fatal(err)
 		}
 		go func() {
-			defer func() { _ = c.Close() }()
-			_, _ = io.Copy(c, c)
+			buf := make([]byte, 65535)
+			for {
+				n, from, err := pc.ReadFrom(buf)
+				if err != nil {
+					return
+				}
+				_, _ = pc.WriteTo(buf[:n], from)
+			}
+		}()
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					errc <- err
+					return
+				}
+				go func() {
+					defer func() { _ = c.Close() }()
+					_, _ = io.Copy(c, c)
+				}()
+			}
 		}()
 	}
+	t.Fatal(<-errc)
 }
 
 func waitUntil(timeout time.Duration, cond func() bool) error {
@@ -326,7 +384,6 @@ func echoUDP(addr, msg string) error {
 		return err
 	}
 	defer func() { _ = c.Close() }()
-	_ = c.SetDeadline(time.Now().Add(5 * time.Second))
 	// UDP has no handshake, so retry until the first datagram gets through.
 	buf := make([]byte, 2048)
 	for i := 0; i < 5; i++ {
