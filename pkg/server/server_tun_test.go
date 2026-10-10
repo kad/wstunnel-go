@@ -460,3 +460,69 @@ restrictions:
 		}
 	}
 }
+
+// TestH2ForwardTunnelEndsCleanly: a forward h2 tunnel whose target sends data
+// and closes must end the response with END_STREAM, not RST_STREAM.
+func TestH2ForwardTunnelEndsCleanly(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				_, _ = c.Write(make([]byte, 100_000))
+				_ = c.Close()
+			}()
+		}
+	}()
+	target := ln.Addr().(*net.TCPAddr)
+
+	s := NewServer(Config{WebsocketProtocol: "rust"})
+	addr := startTunServer(t, s)
+	claims := protocol.JwtTunnelConfig{
+		ID:       "fwd",
+		Protocol: protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}},
+		Remote:   "127.0.0.1",
+		Port:     uint16(target.Port),
+	}
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("test-secret"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	protocols := new(http.Protocols)
+	protocols.SetUnencryptedHTTP2(true)
+	tr := &http.Transport{Protocols: protocols}
+	t.Cleanup(tr.CloseIdleConnections)
+
+	bad := 0
+	const iterations = 50
+	for i := 0; i < iterations; i++ {
+		pr, pw := io.Pipe()
+		req, err := http.NewRequest(http.MethodPost, "http://"+addr+"/v1/events", pr)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Cookie", token)
+		resp, err := tr.RoundTrip(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := io.Copy(io.Discard, resp.Body)
+		if err != nil || n != 100_000 {
+			bad++
+			t.Logf("iteration %d: read %d bytes, err = %v", i, n, err)
+		}
+		_ = pw.Close()
+		_ = resp.Body.Close()
+	}
+	if bad != 0 {
+		t.Fatalf("%d/%d forward h2 tunnels did not end cleanly", bad, iterations)
+	}
+}

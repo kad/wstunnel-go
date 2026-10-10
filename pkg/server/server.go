@@ -564,10 +564,13 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 		ReadCloser: r.Body,
 		writer:     w,
 		flusher:    flusher,
-		rw:         w,
 	}
 
 	if claims.Protocol.Tun != nil {
+		// Only tun sessions need Close to unblock a stuck Write. A write
+		// deadline in the past resets the stream, which forward and reverse
+		// tunnels must not do: they end with a clean END_STREAM.
+		rwc.rw = w
 		s.serveTun(tun.NewFramedPacketConn(rwc), claims, rule)
 		return
 	}
