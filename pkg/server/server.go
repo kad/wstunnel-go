@@ -150,6 +150,11 @@ func NewServer(config Config) *Server {
 					})
 				}
 			}
+			// Admit tun sessions; their flows are then checked against the
+			// host/port entries above.
+			rc.Allow = append(rc.Allow, AllowConfig{
+				Tunnel: &AllowTunnelConfig{Protocol: []string{"Tun"}},
+			})
 		} else {
 			rc.Allow = append(rc.Allow, AllowConfig{
 				Tunnel:        &AllowTunnelConfig{},
@@ -363,6 +368,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
+	normalizeTunClaims(claims)
 
 	// Validate restrictions
 	var rule *RestrictionConfig

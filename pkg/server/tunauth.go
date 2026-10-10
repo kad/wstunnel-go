@@ -82,3 +82,14 @@ func (at *AllowTunnelConfig) namesExplicitly(ip netip.Addr) bool {
 	}
 	return false
 }
+
+// normalizeTunClaims discards the client-supplied destination of a tun claim.
+// A tun session has no single destination, so the server evaluates restrictions
+// against the fixed placeholder 0.0.0.0:0 whatever the client put in r and rp;
+// each flow is authorized separately by tunFlowAllowed.
+func normalizeTunClaims(claims *protocol.JwtTunnelConfig) {
+	if claims.Protocol.Tun != nil {
+		claims.Remote = "0.0.0.0"
+		claims.Port = 0
+	}
+}

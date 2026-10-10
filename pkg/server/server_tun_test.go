@@ -37,10 +37,17 @@ restrictions:
 
 func tunToken(t *testing.T, mtu uint16) string {
 	t.Helper()
+	return tunTokenFor(t, mtu, "0.0.0.0", 0)
+}
+
+// tunTokenFor signs a tun claim with an arbitrary (possibly forged) r and rp.
+func tunTokenFor(t *testing.T, mtu uint16, remote string, port uint16) string {
+	t.Helper()
 	claims := protocol.JwtTunnelConfig{
 		ID:       "tun-test",
 		Protocol: protocol.LocalProtocol{Tun: &protocol.TunProtocol{Mtu: mtu}},
-		Remote:   "0.0.0.0",
+		Remote:   remote,
+		Port:     port,
 	}
 	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte("test-secret"))
 	if err != nil {
@@ -429,6 +436,27 @@ func TestTunMaxSessionsRefusesExtraSessions(t *testing.T) {
 		_ = third.Close()
 		if time.Now().After(deadline) {
 			t.Fatalf("session slot not freed: %v", err)
+		}
+	}
+}
+
+func TestTunForgedDestinationClaimDoesNotAdmit(t *testing.T) {
+	s := NewServer(Config{WebsocketProtocol: "rust", EnableTun: true})
+	s.SetRules(tunRules(t, `
+restrictions:
+  - name: host-port-only
+    match: [Any]
+    allow:
+      - !Tunnel
+        cidr: [10.0.0.1/32]
+        port: ["22"]
+`))
+	addr := startTunServer(t, s)
+	for _, tok := range []string{tunTokenFor(t, 1500, "0.0.0.0", 0), tunTokenFor(t, 1500, "10.0.0.1", 22)} {
+		_, err := dialTunWST(t, addr, tok)
+		var se *statusError
+		if !errors.As(err, &se) || se.code != http.StatusForbidden {
+			t.Fatalf("dial error = %v, want 403", err)
 		}
 	}
 }

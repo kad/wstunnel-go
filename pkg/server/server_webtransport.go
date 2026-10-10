@@ -186,6 +186,7 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 		slog.Warn("WebTransport stream invalid JWT", "err", err)
 		return
 	}
+	normalizeTunClaims(claims)
 
 	destAddr := claims.Remote
 	destPort := claims.Port
