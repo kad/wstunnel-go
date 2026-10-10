@@ -2,6 +2,8 @@ package main
 
 import (
 	"flag"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -154,5 +156,24 @@ func TestApplyServerFlagOverridesTunLimits(t *testing.T) {
 	applyServerFlagOverrides(newTestContext(t, nil), cfg, "")
 	if cfg.TunMaxFlows != 4096 || cfg.TunMaxSessions != 256 {
 		t.Fatalf("defaults = %d/%d, want 4096/256", cfg.TunMaxFlows, cfg.TunMaxSessions)
+	}
+}
+
+func TestLoadConfigFileCarriesTunTunnel(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.yaml")
+	const arg = "tun://wst0?addr=198.18.0.1/32&route=10.0.0.0/8&route=172.16.0.0/12&mtu=1400"
+	if err := os.WriteFile(path, []byte("mode: client\nclient:\n  remote_addr: wss://tunnel.example.com\n  local_to_remote:\n    - \""+arg+"\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Client == nil || len(cfg.Client.LocalToRemote) != 1 || cfg.Client.LocalToRemote[0] != arg {
+		t.Fatalf("LocalToRemote = %+v, want the tun:// argument unchanged", cfg.Client)
+	}
+	spec, err := client.ParseTunArg(cfg.Client.LocalToRemote[0])
+	if err != nil || spec.MTU != 1400 || len(spec.Routes) != 2 {
+		t.Fatalf("ParseTunArg = %+v, %v", spec, err)
 	}
 }
