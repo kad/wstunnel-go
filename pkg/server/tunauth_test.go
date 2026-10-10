@@ -136,3 +136,109 @@ restrictions:
 		t.Fatalf("nil rules ValidateMatch = %v, %v; want nil, true", rule, ok)
 	}
 }
+
+func tunClaim(remote string, port uint16) *protocol.JwtTunnelConfig {
+	return &protocol.JwtTunnelConfig{
+		ID:       "t",
+		Protocol: protocol.LocalProtocol{Tun: &protocol.TunProtocol{Mtu: 1500}},
+		Remote:   remote,
+		Port:     port,
+	}
+}
+
+// admitAndAuthorize mimics the handler: normalize the claim, match a rule,
+// then authorize one flow against the matched rule.
+func admitAndAuthorize(t *testing.T, s *Server, claims *protocol.JwtTunnelConfig, network, dst string) (admitted, flowOK bool) {
+	t.Helper()
+	normalizeTunClaims(claims)
+	rule, ok := s.rules.ValidateMatch(claims, "/v1/events", "", "")
+	if !ok {
+		return false, false
+	}
+	return true, tunFlowAllowed(rule, flow(network, dst))
+}
+
+func TestRestrictToAdmitsTunSessions(t *testing.T) {
+	s := NewServer(Config{EnableTun: true, RestrictTo: []string{"10.0.0.1:22"}})
+	for _, tc := range []struct {
+		name     string
+		claim    *protocol.JwtTunnelConfig
+		dst      string
+		admitted bool
+		flowOK   bool
+	}{
+		{"honest, allowed flow", tunClaim("0.0.0.0", 0), "10.0.0.1:22", true, true},
+		{"honest, other host", tunClaim("0.0.0.0", 0), "10.0.0.2:22", true, false},
+		{"honest, other port", tunClaim("0.0.0.0", 0), "10.0.0.1:23", true, false},
+		{"forged r/rp behave the same", tunClaim("10.0.0.1", 22), "10.0.0.2:22", true, false},
+		{"forged r/rp to elsewhere", tunClaim("192.0.2.9", 9), "10.0.0.1:22", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			admitted, flowOK := admitAndAuthorize(t, s, tc.claim, "tcp", tc.dst)
+			if admitted != tc.admitted || flowOK != tc.flowOK {
+				t.Fatalf("admitted=%v flowOK=%v, want %v/%v", admitted, flowOK, tc.admitted, tc.flowOK)
+			}
+		})
+	}
+}
+
+func TestTunClaimNotAdmittedByTcpOnlyRule(t *testing.T) {
+	s := &Server{rules: tunRules(t, `
+restrictions:
+  - name: tcp-only
+    match: [Any]
+    allow:
+      - !Tunnel
+        protocol: [Tcp]
+        cidr: [10.0.0.1/32]
+        port: ["22"]
+`)}
+	for _, c := range []*protocol.JwtTunnelConfig{tunClaim("0.0.0.0", 0), tunClaim("10.0.0.1", 22)} {
+		if admitted, _ := admitAndAuthorize(t, s, c, "tcp", "10.0.0.1:22"); admitted {
+			t.Fatalf("tun claim r=%s rp=%d admitted by a Tcp-only rule", c.Remote, c.Port)
+		}
+	}
+}
+
+func TestProtocolLessRuleDoesNotDependOnForgedClaim(t *testing.T) {
+	// No protocol list: only the (client-controlled) r/rp could satisfy it.
+	s := &Server{rules: tunRules(t, `
+restrictions:
+  - name: host-port-only
+    match: [Any]
+    allow:
+      - !Tunnel
+        cidr: [10.0.0.1/32]
+        port: ["22"]
+`)}
+	for _, c := range []*protocol.JwtTunnelConfig{tunClaim("0.0.0.0", 0), tunClaim("10.0.0.1", 22)} {
+		if admitted, _ := admitAndAuthorize(t, s, c, "tcp", "10.0.0.1:22"); admitted {
+			t.Fatalf("tun claim r=%s rp=%d admitted through forged destination", c.Remote, c.Port)
+		}
+	}
+}
+
+func TestEmptyTunnelRuleAdmitsTunAndAllNonDeniedFlows(t *testing.T) {
+	s := &Server{rules: tunRules(t, `
+restrictions:
+  - name: everything
+    match: [Any]
+    allow:
+      - !Tunnel {}
+`)}
+	for _, tc := range []struct {
+		dst  string
+		want bool
+	}{
+		{"203.0.113.7:443", true},
+		{"10.9.9.9:1", true},
+		{"[2001:db8::1]:443", true},
+		{"127.0.0.1:80", false},
+		{"169.254.169.254:80", false},
+	} {
+		admitted, ok := admitAndAuthorize(t, s, tunClaim("0.0.0.0", 0), "tcp", tc.dst)
+		if !admitted || ok != tc.want {
+			t.Errorf("%s: admitted=%v flowOK=%v, want admitted and %v", tc.dst, admitted, ok, tc.want)
+		}
+	}
+}
