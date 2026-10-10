@@ -9,7 +9,8 @@ import (
 )
 
 // tunDeniedPrefixes are destinations a tun flow reaches only when the
-// restriction that admitted the session names them with a specific CIDR.
+// restriction that admitted the session names them with a CIDR inside the
+// denied prefix.
 // Without this, a tun client could reach the server's own loopback services
 // or the cloud metadata endpoint.
 var tunDeniedPrefixes = []netip.Prefix{
@@ -69,18 +70,47 @@ func tunFlowAllowed(rule *RestrictionConfig, f tun.Flow) bool {
 	return false
 }
 
-// namesExplicitly reports whether one of the CIDRs contains ip with a non-zero
-// prefix length. 0.0.0.0/0 and ::/0 match everything and so do not count.
+// namesExplicitly reports whether one of the CIDRs lifts the deny list for
+// ip: the CIDR must lie entirely inside a denied prefix that contains ip.
+// A broad CIDR such as 0.0.0.0/1, 128.0.0.0/1 or ::/0 therefore lifts nothing,
+// while 127.0.0.1/32 and 127.0.0.0/8 lift loopback.
 func (at *AllowTunnelConfig) namesExplicitly(ip netip.Addr) bool {
-	for _, c := range at.CIDR {
-		if c.IPNet == nil {
+	for _, d := range tunDeniedPrefixes {
+		if !d.Contains(ip) {
 			continue
 		}
-		if ones, _ := c.Mask.Size(); ones > 0 && c.Contains(net.IP(ip.AsSlice())) {
-			return true
+		for _, c := range at.CIDR {
+			p, ok := ipNetPrefix(c.IPNet)
+			if ok && d.Contains(p.Addr()) && p.Bits() >= d.Bits() {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// ipNetPrefix converts n to a netip.Prefix. IPv4 networks held in 16-byte form
+// (with a /96 or longer mask) are unmapped so they compare with IPv4 prefixes.
+func ipNetPrefix(n *net.IPNet) (netip.Prefix, bool) {
+	if n == nil {
+		return netip.Prefix{}, false
+	}
+	addr, ok := netip.AddrFromSlice(n.IP)
+	if !ok {
+		return netip.Prefix{}, false
+	}
+	ones, bits := n.Mask.Size()
+	if bits == 0 {
+		return netip.Prefix{}, false // non-canonical mask
+	}
+	if addr.Is4In6() && bits == 128 && ones >= 96 {
+		addr, ones = addr.Unmap(), ones-96
+	}
+	p := netip.PrefixFrom(addr, ones)
+	if !p.IsValid() {
+		return netip.Prefix{}, false
+	}
+	return p.Masked(), true
 }
 
 // normalizeTunClaims discards the client-supplied destination of a tun claim.

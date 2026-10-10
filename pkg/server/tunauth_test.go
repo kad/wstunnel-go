@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/netip"
+	"strings"
 	"testing"
 
 	"github.com/kad/wstunnel-go/pkg/protocol"
@@ -240,5 +241,41 @@ restrictions:
 		if !admitted || ok != tc.want {
 			t.Errorf("%s: admitted=%v flowOK=%v, want admitted and %v", tc.dst, admitted, ok, tc.want)
 		}
+	}
+}
+
+func TestTunDenyListLiftRequiresCIDRInsideDeniedPrefix(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cidr string
+		dst  string
+		want bool
+	}{
+		{"routing pair low half", "0.0.0.0/1, 128.0.0.0/1", "127.0.0.1:80", false},
+		{"routing pair metadata", "0.0.0.0/1, 128.0.0.0/1", "169.254.169.254:80", false},
+		{"routing pair unspecified", "0.0.0.0/1, 128.0.0.0/1", "0.0.0.0:80", false},
+		{"routing pair multicast", "0.0.0.0/1, 128.0.0.0/1", "224.0.0.1:80", false},
+		{"routing pair public", "0.0.0.0/1, 128.0.0.0/1", "203.0.113.7:80", true},
+		{"default route v4", "0.0.0.0/0", "127.0.0.1:80", false},
+		{"default route v6", "::/0", "[::1]:80", false},
+		{"v6 half", "::/1", "[::1]:80", false},
+		{"/8 lifts loopback", "127.0.0.0/8", "127.0.0.1:80", true},
+		{"/8 lifts other loopback", "127.0.0.0/8", "127.9.9.9:80", true},
+		{"/8 does not lift link-local", "127.0.0.0/8", "169.254.169.254:80", false},
+		{"/32 lifts that address", "127.0.0.1/32", "127.0.0.1:80", true},
+		{"/32 not another address", "127.0.0.1/32", "127.0.0.2:80", false},
+		{"/16 link-local lifts metadata", "169.254.0.0/16", "169.254.169.254:80", true},
+		{"/15 straddling link-local", "169.254.0.0/15", "169.254.169.254:80", false},
+		{"straddle 126.0.0.0/7", "126.0.0.0/7", "127.0.0.1:80", false},
+		{"v6 loopback /128", "::1/128", "[::1]:80", true},
+		{"v6 loopback not link-local", "::1/128", "[fe80::1]:80", false},
+		{"mapped destination", "127.0.0.1/32", "[::ffff:127.0.0.1]:80", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rule := &tunRules(t, "restrictions:\n  - name: r\n    match: [Any]\n    allow:\n      - !Tunnel\n        protocol: [Tcp]\n        cidr: [\""+strings.ReplaceAll(tc.cidr, ", ", "\", \"")+"\"]\n").Restrictions[0]
+			if got := tunFlowAllowed(rule, flow("tcp", tc.dst)); got != tc.want {
+				t.Fatalf("cidr %s, dst %s: allowed = %v, want %v", tc.cidr, tc.dst, got, tc.want)
+			}
+		})
 	}
 }
