@@ -198,6 +198,8 @@ server:
 - `remote_to_local_server_idle_timeout`: how long an idle reverse listener may stay bound without new client use.
 - `enable_tun`: accept packet-level tun sessions (Go-only extension). Default `false`. Required even when restrictions allow every protocol, because an empty `protocol:` list admits all of them.
 - `tun_udp_timeout`: close a tun UDP flow after this long without traffic in either direction. Default `30s`.
+- `tun_max_flows`: budget of concurrent outbound flows (TCP connections plus UDP associations) shared by ALL tun sessions on the server. Default `4096`. A session is additionally capped at 4096 flows of its own. Flows over the budget are refused (TCP gets a reset). Worst-case memory is roughly 128 KiB per live UDP flow (two 64 KiB relay buffers), so it is bounded by `tun_max_flows` server-wide, plus a gVisor stack and NIC queue (up to 32 MiB at MTU 65535) per session.
+- `tun_max_sessions`: maximum concurrent tun sessions. Default `256`. The check runs after the connection is upgraded, so a client over the limit sees the connection closed immediately (not an HTTP 503). On WebTransport every stream is a session.
 
 ## Restriction config example
 

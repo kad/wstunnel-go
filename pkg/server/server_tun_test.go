@@ -326,3 +326,109 @@ func TestTunH2HalfCloseDoesNotCrashServer(t *testing.T) {
 		_ = c.Close()
 	}
 }
+
+func TestTunMaxFlowsIsSharedAcrossSessions(t *testing.T) {
+	s := NewServer(Config{WebsocketProtocol: "rust", EnableTun: true, TunMaxFlows: 2})
+	s.SetRules(tunRules(t, tunLoopbackRules))
+	addr := startTunServer(t, s)
+	echo := echoListener(t)
+
+	newHost := func() *tuntest.Host {
+		pc, err := dialTunWST(t, addr, tunToken(t, 1500))
+		if err != nil {
+			t.Fatalf("dial: %v", err)
+		}
+		return tuntest.NewHost(t, pc, 1500)
+	}
+	a, b := newHost(), newHost()
+	dial := func(h *tuntest.Host) (net.Conn, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return h.DialTCP(ctx, echo)
+	}
+
+	c1, err := dial(a)
+	if err != nil {
+		t.Fatalf("flow 1: %v", err)
+	}
+	c2, err := dial(b)
+	if err != nil {
+		t.Fatalf("flow 2: %v", err)
+	}
+	defer func() { _ = c2.Close() }()
+	if c3, err := dial(a); err == nil {
+		_ = c3.Close()
+		t.Fatal("third flow was admitted past tun_max_flows=2")
+	}
+
+	_ = c1.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		c4, err := dial(b)
+		if err == nil {
+			_ = c4.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("slot not freed after closing a flow: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func TestTunMaxSessionsRefusesExtraSessions(t *testing.T) {
+	s := NewServer(Config{WebsocketProtocol: "rust", EnableTun: true, TunMaxSessions: 1})
+	s.SetRules(tunRules(t, tunLoopbackRules))
+	addr := startTunServer(t, s)
+
+	first, err := dialTunWST(t, addr, tunToken(t, 1500))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	host := tuntest.NewHost(t, first, 1500)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, err := host.DialTCP(ctx, echoListener(t)) // ensures session 1 is registered
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+
+	second, err := dialTunWST(t, addr, tunToken(t, 1500))
+	if err != nil {
+		t.Fatalf("upgrade should still succeed: %v", err)
+	}
+	read := make(chan error, 1)
+	go func() { _, err := second.ReadPacket(); read <- err }()
+	select {
+	case err := <-read:
+		if err == nil {
+			t.Fatal("read data from a refused session")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second session was not closed")
+	}
+
+	// Closing the first session frees its slot.
+	_ = first.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		third, err := dialTunWST(t, addr, tunToken(t, 1500))
+		if err != nil {
+			t.Fatal(err)
+		}
+		h := tuntest.NewHost(t, third, 1500)
+		cctx, ccancel := context.WithTimeout(context.Background(), 2*time.Second)
+		c3, err := h.DialTCP(cctx, echoListener(t))
+		ccancel()
+		if err == nil {
+			_ = c3.Close()
+			return
+		}
+		_ = third.Close()
+		if time.Now().After(deadline) {
+			t.Fatalf("session slot not freed: %v", err)
+		}
+	}
+}

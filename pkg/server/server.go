@@ -55,7 +55,17 @@ type Config struct {
 	// required even when restrictions allow every protocol.
 	EnableTun     bool          `yaml:"enable_tun"`
 	TunUdpTimeout time.Duration `yaml:"tun_udp_timeout"`
+	// TunMaxFlows bounds the outbound flows of all tun sessions together;
+	// TunMaxSessions bounds concurrent tun sessions. Zero selects the defaults.
+	TunMaxFlows    int `yaml:"tun_max_flows"`
+	TunMaxSessions int `yaml:"tun_max_sessions"`
 }
+
+// Server-wide tun limits applied when the Config leaves them zero.
+const (
+	DefaultTunMaxFlows    = tun.DefaultMaxFlows
+	DefaultTunMaxSessions = 256
+)
 
 func (c *Config) UnmarshalYAML(unmarshal func(any) error) error {
 	type rawConfig Config
@@ -82,9 +92,18 @@ type Server struct {
 	rvMgr    *ReverseTunnelManager
 	rules    *RestrictionsRules
 	wtServer *WebTransportServer
+
+	tunFlowSlots    chan struct{} // shared by all tun sessions
+	tunSessionSlots chan struct{}
 }
 
 func NewServer(config Config) *Server {
+	if config.TunMaxFlows <= 0 {
+		config.TunMaxFlows = DefaultTunMaxFlows
+	}
+	if config.TunMaxSessions <= 0 {
+		config.TunMaxSessions = DefaultTunMaxSessions
+	}
 	if config.WebsocketProtocol == "ws" && config.JWTSecret == "" {
 		insecureWSModeJWTWarning.Do(func() {
 			slog.Warn("Server running in ws mode without jwt_secret; tunnel JWTs are parsed but not cryptographically verified")
@@ -145,6 +164,9 @@ func NewServer(config Config) *Server {
 		mux:    http.NewServeMux(),
 		rvMgr:  NewReverseTunnelManager(config.SocketSoMark, config.RemoteToLocalServerIdleTimeout),
 		rules:  rules,
+
+		tunFlowSlots:    make(chan struct{}, config.TunMaxFlows),
+		tunSessionSlots: make(chan struct{}, config.TunMaxSessions),
 	}
 	s.wtServer = NewWebTransportServer(s)
 	s.mux.HandleFunc("/", s.ServeHTTP)
@@ -603,12 +625,21 @@ func (s *Server) admitTun(claims *protocol.JwtTunnelConfig) error {
 // SO_MARK, since socket_so_mark only applies to listener sockets.
 func (s *Server) serveTun(pc tun.PacketConn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
 	log := slog.With("tunnel_id", claims.ID)
+	select {
+	case s.tunSessionSlots <- struct{}{}:
+		defer func() { <-s.tunSessionSlots }()
+	default:
+		log.Warn("Tun session refused: server-wide session limit reached", "max_sessions", cap(s.tunSessionSlots))
+		_ = pc.Close()
+		return
+	}
 	log.Info("Accepted tun session", "mtu", claims.Protocol.Tun.Mtu)
 	err := tun.Serve(context.Background(), pc, tun.Options{
-		MTU:            uint32(claims.Protocol.Tun.Mtu),
-		Authorize:      func(f tun.Flow) bool { return tunFlowAllowed(rule, f) },
-		UDPIdleTimeout: s.Config.TunUdpTimeout,
-		Logger:         log,
+		MTU:             uint32(claims.Protocol.Tun.Mtu),
+		Authorize:       func(f tun.Flow) bool { return tunFlowAllowed(rule, f) },
+		UDPIdleTimeout:  s.Config.TunUdpTimeout,
+		SharedFlowSlots: s.tunFlowSlots,
+		Logger:          log,
 	})
 	if err != nil {
 		log.Warn("Tun session failed", "err", err)

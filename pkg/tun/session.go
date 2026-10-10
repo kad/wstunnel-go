@@ -51,7 +51,11 @@ type Options struct {
 	UDPIdleTimeout time.Duration
 	MaxInFlightSYN int
 	MaxFlows       int
-	Logger         *slog.Logger
+	// SharedFlowSlots, when non-nil, is a budget shared by every session that
+	// uses the same channel: each admitted flow also holds one slot in it for
+	// its lifetime. Nil means no shared limit.
+	SharedFlowSlots chan struct{}
+	Logger          *slog.Logger
 }
 
 func (o Options) withDefaults() (Options, error) {
@@ -194,14 +198,28 @@ func (s *session) admit(f Flow) bool {
 	}
 	select {
 	case s.slots <- struct{}{}:
-		return true
 	default:
 		s.log.Warn("tun flow limit reached", "network", f.Network, "dst", f.Dst, "max_flows", s.opts.MaxFlows)
 		return false
 	}
+	if shared := s.opts.SharedFlowSlots; shared != nil {
+		select {
+		case shared <- struct{}{}:
+		default:
+			<-s.slots
+			s.log.Warn("tun server-wide flow limit reached", "network", f.Network, "dst", f.Dst, "max_flows", cap(shared))
+			return false
+		}
+	}
+	return true
 }
 
-func (s *session) release() { <-s.slots }
+func (s *session) release() {
+	if shared := s.opts.SharedFlowSlots; shared != nil {
+		<-shared
+	}
+	<-s.slots
+}
 
 func (s *session) dial(network string, dst netip.AddrPort) (net.Conn, error) {
 	ctx, cancel := context.WithTimeout(s.ctx, s.opts.DialTimeout)

@@ -210,6 +210,8 @@ For a comprehensive YAML guide with annotated client/server examples and option 
 -   `--remote-to-local-server-idle-timeout`: Idle timeout for reverse tunnel server.
 -   `--enable-tun`: Accept packet-level tun sessions (Go-only extension). Off by default, and required even when restrictions allow every protocol.
 -   `--tun-udp-timeout`: Close a tun UDP flow after this long without traffic (default `30s`).
+-   `--tun-max-flows`: Maximum concurrent outbound flows across all tun sessions (default `4096`).
+-   `--tun-max-sessions`: Maximum concurrent tun sessions; extra sessions are closed immediately (default `256`).
 
 ### YAML Configuration Example
 
