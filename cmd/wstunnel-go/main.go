@@ -245,7 +245,7 @@ func main() {
 					&cli.StringSliceFlag{
 						Name:    "local-to-remote",
 						Aliases: []string{"L"},
-						Usage:   "Local to remote tunnel {tcp,udp,socks5,http,stdio,unix}://[BIND:]PORT:HOST:PORT",
+						Usage:   "Local to remote tunnel {tcp,udp,socks5,http,stdio,unix}://[BIND:]PORT:HOST:PORT, or a Linux packet tunnel tun://[NAME]?addr=PREFIX&route=PREFIX&mtu=N&configure=BOOL (Go-only; needs a server started with --enable-tun)",
 					},
 					&cli.StringSliceFlag{
 						Name:    "remote-to-local",
@@ -569,7 +569,30 @@ func startClient(c *cli.Context, config *client.Config) error {
 	wstClient := client.NewClient(*config)
 	hasTunnels := false
 
+	// Reject this before anything starts, so a misconfiguration does not leave a
+	// half-created device behind.
+	tunTunnels := 0
 	for _, arg := range config.LocalToRemote {
+		if client.IsTunArg(arg) {
+			tunTunnels++
+		}
+	}
+	if tunTunnels > 1 {
+		return fmt.Errorf("only one tun:// tunnel is supported per client")
+	}
+
+	for _, arg := range config.LocalToRemote {
+		if client.IsTunArg(arg) {
+			spec, err := client.ParseTunArg(arg)
+			if err != nil {
+				return fmt.Errorf("failed to parse local-to-remote tunnel %s: %w", arg, err)
+			}
+			if err := wstClient.StartTun(spec); err != nil {
+				return fmt.Errorf("failed to start tun tunnel %s: %w", arg, err)
+			}
+			hasTunnels = true
+			continue
+		}
 		ltr, err := client.ParseTunnelArg(arg, false)
 		if err != nil {
 			return fmt.Errorf("failed to parse local-to-remote tunnel %s: %w", arg, err)
