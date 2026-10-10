@@ -265,7 +265,7 @@ restrictions:
 ```
 
 - Put `Tun` in its own `!Tunnel` entry. The session claim carries the placeholder destination `0.0.0.0:0`, so `port` or `cidr` filters on the same entry would reject the session itself.
-- Loopback, link-local (including `169.254.169.254`), unspecified, multicast, broadcast and `fd00:ec2::254` are denied even when a rule matches. A rule lifts this only with a CIDR that names the address specifically (prefix length above 0), for example `127.0.0.1/32`. `0.0.0.0/0` does not.
+- Loopback, link-local (including `169.254.169.254`), unspecified, multicast, broadcast and `fd00:ec2::254` are denied even when a rule matches. A rule lifts this only with a CIDR that lies entirely inside a denied prefix containing the destination, for example `127.0.0.1/32` or `127.0.0.0/8` for loopback. Broad CIDRs never lift it: `0.0.0.0/0`, `::/0`, `::/1` and the routing pair `0.0.0.0/1` + `128.0.0.0/1` lift nothing, and neither does a CIDR that merely straddles a denied prefix (`126.0.0.0/7` for `127.0.0.0/8`).
 - The server ignores the `r` and `rp` a client puts in a tun claim: it evaluates restrictions against the fixed placeholder `0.0.0.0:0`, so a forged destination changes nothing.
 - Rules built from `--restrict-to host:port` (and `restrict_to`) also admit tun sessions, still subject to `enable_tun`. Each flow is then checked against the same `host`/`port` entries, and a flow only has an IP, so only flows whose destination IP matches a `host` that was written as an IP literal, on that port, are allowed. Use IP literals in `restrict_to` if you want tun access.
 - A `!Tunnel {}` entry with no `protocol` list allows everything, including tun sessions and every flow outside the deny list.
