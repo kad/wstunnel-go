@@ -204,7 +204,7 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 		return
 	}
 	if claims.Protocol.Tun != nil {
-		w.server.serveTun(tun.NewFramedPacketConn(stream), claims, rule)
+		w.server.serveTun(tun.NewFramedPacketConn(tunStream{stream}), claims, rule)
 		return
 	}
 
@@ -256,4 +256,15 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 	}
 
 	slog.Warn("WebTransport unsupported protocol target", "protocol", claims.Protocol)
+}
+
+// tunStream adapts a WebTransport stream for tun.Serve, which closes the
+// connection to unblock pumps stuck in a read or write. webtransport.Stream.Close
+// only ends the send side, so also abort the receive side and any blocked write.
+type tunStream struct{ *webtransport.Stream }
+
+func (t tunStream) Close() error {
+	t.CancelRead(0)
+	_ = t.SetWriteDeadline(time.Now())
+	return t.Stream.Close()
 }
