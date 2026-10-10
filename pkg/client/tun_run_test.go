@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -175,7 +176,11 @@ func startTunClient(t *testing.T, cfg Config, retry tunRetry) (*tuntest.Host, fu
 			return nil
 		}
 	}
-	t.Cleanup(func() { _ = stop() })
+	t.Cleanup(func() {
+		if err := stop(); err != nil {
+			t.Errorf("runTun returned %v after its context was cancelled, want nil", err)
+		}
+	})
 	return host, stop
 }
 
@@ -343,4 +348,25 @@ func TestResolveServerAddrsIPLiteral(t *testing.T) {
 
 func protocolTunClaim(mtu uint16) protocol.LocalProtocol {
 	return protocol.LocalProtocol{Tun: &protocol.TunProtocol{Mtu: mtu}}
+}
+
+func TestResolveServerAddrsFailsClosed(t *testing.T) {
+	for _, u := range []string{"wss://", "ws:///x", "ws://:8080"} {
+		if addrs, err := NewClient(Config{ServerURL: u}).resolveServerAddrs(); err == nil {
+			t.Errorf("%q: got %v, want an error", u, addrs)
+		}
+	}
+
+	orig := lookupNetIP
+	t.Cleanup(func() { lookupNetIP = orig })
+	lookupNetIP = func(context.Context, string) ([]netip.Addr, error) { return nil, nil }
+	addrs, err := NewClient(Config{ServerURL: "wss://tun.example.test"}).resolveServerAddrs()
+	if err == nil || !strings.Contains(err.Error(), "no addresses") {
+		t.Fatalf("empty lookup result = %v, %v; want a no-addresses error", addrs, err)
+	}
+
+	lookupNetIP = func(context.Context, string) ([]netip.Addr, error) { return nil, errors.New("boom") }
+	if _, err := NewClient(Config{ServerURL: "wss://tun.example.test"}).resolveServerAddrs(); err == nil {
+		t.Fatal("lookup failure must be an error")
+	}
 }
