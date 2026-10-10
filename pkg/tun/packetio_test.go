@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/kad/wstunnel-go/pkg/tun"
@@ -98,5 +99,44 @@ func TestWSTPacketConnSkipsTextMessages(t *testing.T) {
 	got, err := tun.NewWSTPacketConn(cb).ReadPacket()
 	if err != nil || !bytes.Equal(got, []byte{0x45}) {
 		t.Fatalf("ReadPacket = %v, %v; want [0x45], nil", got, err)
+	}
+}
+
+// An oversized message must be cut off at the read limit, not buffered, and
+// Serve must report it as a failure rather than a clean disconnect.
+func TestGorillaPacketConnEnforcesReadLimit(t *testing.T) {
+	served := make(chan error, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			served <- err
+			return
+		}
+		served <- tun.Serve(r.Context(), tun.NewGorillaPacketConn(c), tun.Options{
+			Authorize: func(tun.Flow) bool { return false },
+		})
+	}))
+	defer srv.Close()
+
+	c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.Close() }()
+	if err := c.WriteMessage(websocket.BinaryMessage, make([]byte, tun.MaxPacketSize+1)); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-served:
+		if !errors.Is(err, websocket.ErrReadLimit) {
+			t.Fatalf("Serve error = %v, want websocket.ErrReadLimit", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Serve did not return after an oversized message")
+	}
+	_ = c.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := c.ReadMessage(); err == nil {
+		t.Fatal("connection still readable after oversized message")
 	}
 }
