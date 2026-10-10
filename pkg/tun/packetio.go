@@ -77,10 +77,15 @@ type gorillaPacketConn struct {
 // NewGorillaPacketConn carries one IP packet per binary message on an RFC 6455
 // (--mode ws) connection.
 //
+// Messages over MaxPacketSize make ReadPacket fail with websocket.ErrReadLimit.
+//
 // gorilla allows only one concurrent writer, so this replaces the connection's
 // ping handler with one that answers through WriteControl, which gorilla
 // documents as safe to call alongside WriteMessage.
 func NewGorillaPacketConn(c *websocket.Conn) PacketConn {
+	// gorilla reads a whole message before returning it, so without a limit an
+	// oversized message is buffered in full before the size check in ReadPacket.
+	c.SetReadLimit(MaxPacketSize)
 	c.SetPingHandler(func(appData string) error {
 		err := c.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
 		if errors.Is(err, websocket.ErrCloseSent) {
