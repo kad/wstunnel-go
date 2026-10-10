@@ -47,6 +47,8 @@ func newTestContext(t *testing.T, args []string) *cli.Context {
 	fs.Duration("remote-to-local-server-idle-timeout", 0, "")
 	fs.Bool("enable-tun", false, "")
 	fs.Duration("tun-udp-timeout", 30*time.Second, "")
+	fs.Int("tun-max-flows", 4096, "")
+	fs.Int("tun-max-sessions", 256, "")
 
 	if err := fs.Parse(args); err != nil {
 		t.Fatalf("Parse() error = %v", err)
@@ -132,5 +134,25 @@ func TestApplyServerFlagOverridesTunSettings(t *testing.T) {
 	applyServerFlagOverrides(newTestContext(t, nil), cfg, "")
 	if cfg.EnableTun || cfg.TunUdpTimeout != 30*time.Second {
 		t.Fatalf("defaults = EnableTun %v, TunUdpTimeout %v; want false, 30s", cfg.EnableTun, cfg.TunUdpTimeout)
+	}
+}
+
+func TestApplyServerFlagOverridesTunLimits(t *testing.T) {
+	cfg := &server.Config{TunMaxFlows: 10}
+	applyServerFlagOverrides(newTestContext(t, nil), cfg, "")
+	if cfg.TunMaxFlows != 10 || cfg.TunMaxSessions != 256 {
+		t.Fatalf("limits = %d/%d, want config 10 and default 256", cfg.TunMaxFlows, cfg.TunMaxSessions)
+	}
+
+	cfg = &server.Config{TunMaxFlows: 10, TunMaxSessions: 3}
+	applyServerFlagOverrides(newTestContext(t, []string{"--tun-max-flows=7", "--tun-max-sessions=2"}), cfg, "")
+	if cfg.TunMaxFlows != 7 || cfg.TunMaxSessions != 2 {
+		t.Fatalf("limits = %d/%d, want explicit flags 7/2", cfg.TunMaxFlows, cfg.TunMaxSessions)
+	}
+
+	cfg = &server.Config{}
+	applyServerFlagOverrides(newTestContext(t, nil), cfg, "")
+	if cfg.TunMaxFlows != 4096 || cfg.TunMaxSessions != 256 {
+		t.Fatalf("defaults = %d/%d, want 4096/256", cfg.TunMaxFlows, cfg.TunMaxSessions)
 	}
 }

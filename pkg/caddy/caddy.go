@@ -2,6 +2,7 @@ package caddy
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/caddyserver/caddy/v2"
@@ -94,6 +95,10 @@ func (w *Wstunnel) ServeHTTP(rw http.ResponseWriter, r *http.Request, next caddy
 //	    idle_timeout 60s
 //	    mask_frame
 //	    restrict_to host:port ...
+//	    enable_tun
+//	    tun_udp_timeout 30s
+//	    tun_max_flows 4096
+//	    tun_max_sessions 256
 //	}
 func (w *Wstunnel) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 	for d.Next() {
@@ -145,6 +150,20 @@ func (w *Wstunnel) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.Errf("invalid tun_udp_timeout: %v", err)
 				}
 				w.Config.TunUdpTimeout = dur
+			case "tun_max_flows", "tun_max_sessions":
+				directive := d.Val()
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				n, err := strconv.Atoi(d.Val())
+				if err != nil || n < 1 {
+					return d.Errf("invalid %s %q: want a positive integer", directive, d.Val())
+				}
+				if directive == "tun_max_flows" {
+					w.Config.TunMaxFlows = n
+				} else {
+					w.Config.TunMaxSessions = n
+				}
 			case "restrict_to":
 				w.Config.RestrictTo = append(w.Config.RestrictTo, d.RemainingArgs()...)
 			default:

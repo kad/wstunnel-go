@@ -193,6 +193,12 @@ func applyServerFlagOverrides(c *cli.Context, config *server.Config, listenAddr 
 	if flagExplicitlySet(c, "tun-udp-timeout") || config.TunUdpTimeout == 0 {
 		config.TunUdpTimeout = c.Duration("tun-udp-timeout")
 	}
+	if flagExplicitlySet(c, "tun-max-flows") || config.TunMaxFlows == 0 {
+		config.TunMaxFlows = c.Int("tun-max-flows")
+	}
+	if flagExplicitlySet(c, "tun-max-sessions") || config.TunMaxSessions == 0 {
+		config.TunMaxSessions = c.Int("tun-max-sessions")
+	}
 	if flagExplicitlySet(c, "mode") || config.WebsocketProtocol == "" {
 		config.WebsocketProtocol = c.String("mode")
 	}
@@ -464,6 +470,16 @@ func main() {
 						Name:  "tun-udp-timeout",
 						Value: 30 * time.Second,
 						Usage: "Close a tun UDP flow after this long without traffic",
+					},
+					&cli.IntFlag{
+						Name:  "tun-max-flows",
+						Value: server.DefaultTunMaxFlows,
+						Usage: "Maximum concurrent outbound flows across all tun sessions",
+					},
+					&cli.IntFlag{
+						Name:  "tun-max-sessions",
+						Value: server.DefaultTunMaxSessions,
+						Usage: "Maximum concurrent tun sessions; extra sessions are closed immediately",
 					},
 				},
 				Action: runServer,

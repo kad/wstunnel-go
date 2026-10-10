@@ -496,3 +496,27 @@ func TestServeWaitsForPumpsBeforeReturning(t *testing.T) {
 		t.Fatalf("Serve returned with %d pump(s) still inside the transport", n)
 	}
 }
+
+func TestServeSharedFlowSlotsAreReleased(t *testing.T) {
+	shared := make(chan struct{}, 1)
+	echo := tcpEchoServer(t)
+	host, _ := startSession(t, tun.Options{Authorize: allowAll, SharedFlowSlots: shared})
+	c := dialTCP(t, host, echo)
+	if len(shared) != 1 {
+		t.Fatalf("shared slots in use = %d, want 1", len(shared))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+	if c2, err := host.DialTCP(ctx, echo); err == nil {
+		_ = c2.Close()
+		t.Fatal("second flow admitted past a shared budget of 1")
+	}
+	_ = c.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for len(shared) != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("shared slot not released after the flow ended")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
