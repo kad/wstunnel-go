@@ -152,7 +152,8 @@ WebTransport is not served through Caddy.
 `wstunnel-go` in Caddy automatically leverages Caddy's TLS termination, including mTLS.
 When Caddy reloads its configuration the old handler is cleaned up: its tun sessions
 and reverse-tunnel listeners are closed, so a reload applies new rules and limits to
-every client.
+tun sessions and reverse tunnels. Forward tunnels that are already open keep running
+under the old rules until they end.
 
 ## Usage
 

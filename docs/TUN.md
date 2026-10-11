@@ -152,8 +152,9 @@ and `tun_udp_timeout`.
 ## Deployment
 
 The examples below are also in `packaging/examples` and `packaging/systemd`.
-The server never needs `CAP_NET_ADMIN`: it terminates packets in userspace. Only
-the client creates a device and needs that capability.
+The server does not need `CAP_NET_ADMIN` for tun mode: it terminates packets in
+userspace. Only the client creates a device and needs that capability. (Setting
+`socket_so_mark` on the server does need it, but that is unrelated to tun.)
 
 `--config` is a global option, so it goes before the subcommand:
 `wstunnel-go --config FILE server`, not `wstunnel-go server --config FILE`.

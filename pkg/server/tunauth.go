@@ -111,8 +111,11 @@ func ParseTunAllow(entries []string) ([]netip.Prefix, error) {
 			}
 			p = netip.PrefixFrom(a, a.BitLen())
 		}
+		if p.Addr().Is4In6() && p.Bits() < 96 {
+			return nil, fmt.Errorf("tun_allow %q: an IPv4-mapped prefix needs at least 96 bits; write the IPv4 network instead", e)
+		}
 		p = p.Masked()
-		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+		if a := p.Addr(); a.Is4In6() {
 			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
 		}
 		out = append(out, p)
