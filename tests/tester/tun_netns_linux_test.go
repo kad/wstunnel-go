@@ -517,6 +517,8 @@ var fullCases = []fullCase{
 	{"Go-Go-Tun-Full-Auto-StrictRP", "auto", 1, "basic", "pin"},
 	{"Go-Go-Tun-Full-Auto-LooseRP", "", 2, "basic", "fwmark"},
 	{"Go-Go-Tun-Full-Fwmark-StrictRP-Refused", "fwmark", 1, "refuse", ""},
+	{"Go-Go-Tun-Full-Inbound-Fwmark", "fwmark", 2, "inbound", "fwmark"},
+	{"Go-Go-Tun-Full-Inbound-Pin", "pin", 2, "inbound", "pin"},
 	{"Go-Go-Tun-Full-PersistentDevice-Refused", "fwmark", 2, "refuse-persistent", ""},
 	{"Go-Go-Tun-Full-Cleanup-Fwmark", "fwmark", 2, "cleanup", "fwmark"},
 	{"Go-Go-Tun-Full-Cleanup-Pin", "pin", 2, "cleanup", "pin"},
@@ -842,6 +844,55 @@ func TestTunNetnsFullDriver(t *testing.T) {
 	leaks := func() int { return strings.Count(sniff.output(), "LEAK ") - leakBase }
 
 	switch tc.scenario {
+	case "inbound":
+		// Replies of unmarked local sockets (an ssh daemon answering a remote
+		// administrator, say) follow the full tunnel's routing: a peer that is
+		// only reachable through the default route is cut off, a peer on a
+		// directly connected network or behind a more specific route is not.
+		if _, err := exec.LookPath("python3"); err != nil {
+			t.Skip("python3 is needed to open a connection with a chosen source address")
+		}
+		const adminIP, adminNet, port = "198.51.100.77", "198.51.100.0/24", "5999"
+		run(inB("ip", "addr", "add", adminIP+"/32", "dev", "lo")...)
+		ln, err := net.Listen("tcp", "10.200.0.1:"+port)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = ln.Close() }()
+		go func() {
+			for {
+				c, err := ln.Accept()
+				if err != nil {
+					return
+				}
+				_, _ = c.Write([]byte("hi"))
+				_ = c.Close()
+			}
+		}()
+		connectFromB := func(src string) bool {
+			out := try(inB("python3", "-c", `import socket,sys
+s=socket.socket()
+s.bind((sys.argv[1],0))
+s.settimeout(3)
+s.connect(("10.200.0.1",`+port+`))
+print("CONNECTED" if s.recv(2)==b"hi" else "NO")`, src)...)
+			return strings.Contains(out, "CONNECTED")
+		}
+		cli := startClient()
+		defer cli.kill()
+		waitEchoOK("tunnel up", 20*time.Second)
+		if !connectFromB("10.200.0.2") {
+			t.Error("a peer on the directly connected network lost its connection to the host")
+		}
+		if connectFromB(adminIP) {
+			t.Errorf("a peer reachable only through the default route kept its connection; the docs say it is cut off:\n%s", rulesText())
+		}
+		run("ip", "route", "add", adminNet, "via", "10.200.0.2")
+		if !connectFromB(adminIP) {
+			t.Errorf("a more specific route in the main table did not keep the peer connected (mode %s)", tc.wantMode)
+		}
+		run("ip", "route", "del", adminNet, "via", "10.200.0.2")
+
 	case "refuse-persistent":
 		// A persistent device would outlive a crashed client and keep the default
 		// route: the client must refuse to use one for a full tunnel.

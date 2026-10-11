@@ -869,3 +869,30 @@ func TestConfigureDNSEachCommandHasADeadline(t *testing.T) {
 		}
 	}
 }
+
+// A start that fails after the client's sockets were armed must not leave the
+// mark, the marked resolver or the cached server addresses behind: the client
+// can be used for other tunnels afterwards.
+func TestFailedFullTunnelStartResetsTheClient(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.nl.failOn = "rule add ipv4 pref 32761 not fwmark 0x7774 table 30580"
+	f.nl.failErr = syscall.EPERM
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	if _, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry); err == nil {
+		t.Fatal("startTun succeeded although a rule could not be installed")
+	}
+	if m := c.fullTunnelMark.Load(); m != 0 {
+		t.Errorf("full-tunnel mark %#x left set after a failed start", m)
+	}
+	if c.socketMark() != 0 {
+		t.Errorf("socket mark %#x left set after a failed start", c.socketMark())
+	}
+	if c.resolver.Load() != nil {
+		t.Error("marked resolver left set after a failed start")
+	}
+	if c.serverAddrs.Load() != nil {
+		t.Error("pinned server addresses left set after a failed start")
+	}
+}

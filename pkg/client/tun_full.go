@@ -321,6 +321,14 @@ func (c *Client) prepareFullTunnel(spec *TunSpec, servers []netip.Addr, deps tun
 	return ft, nil
 }
 
+// resetFullTunnel undoes what prepareFullTunnel and the session loop armed on
+// the client.
+func (c *Client) resetFullTunnel() {
+	c.fullTunnelMark.Store(0)
+	c.resolver.Store(nil)
+	c.serverAddrs.Store(nil)
+}
+
 // install adds the routing for device ifname and returns the cleanup that
 // removes it. On failure it removes whatever it had added.
 func (ft *fullTunnel) install(ifname string, nl netConfigurer) (cleanup func() error, err error) {

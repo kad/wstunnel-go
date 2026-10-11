@@ -87,6 +87,8 @@ func TestParseTunArgErrors(t *testing.T) {
 		"tun://wst0?bogus=1":                          "unknown tun:// option",
 		"tun://averyveryverylongname0":                "longer than 15",
 		"tun://a/b":                                   "invalid tun:// device name",
+		"tun://-wst0":                                 "must not start with '-'",
+		"tun://--help":                                "must not start with '-'",
 		"tun://wst0?configure=false&addr=10.0.0.1/32": "no effect with configure=false",
 		"tun://wst0?configure=false&route=10.0.0.0/8": "no effect with configure=false",
 		"tun://?configure=false":                      "needs the name of an existing device",
