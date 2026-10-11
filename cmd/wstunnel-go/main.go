@@ -251,7 +251,7 @@ func main() {
 					&cli.StringSliceFlag{
 						Name:    "local-to-remote",
 						Aliases: []string{"L"},
-						Usage:   "Local to remote tunnel {tcp,udp,socks5,http,stdio,unix}://[BIND:]PORT:HOST:PORT, or a Linux packet tunnel tun://[NAME]?addr=PREFIX&route=PREFIX&mtu=N&configure=BOOL (Go-only; needs a server started with --enable-tun)",
+						Usage:   "Local to remote tunnel {tcp,udp,socks5,http,stdio,unix}://[BIND:]PORT:HOST:PORT, or a Linux packet tunnel tun://[NAME]?addr=PREFIX&route=PREFIX|default&routing=auto|fwmark|pin&dns=ADDR&mtu=N&configure=BOOL (Go-only; needs a server started with --enable-tun)",
 					},
 					&cli.StringSliceFlag{
 						Name:    "remote-to-local",

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -59,6 +60,22 @@ type Client struct {
 	Config   Config
 	pool     *ConnectionPool
 	wtClient *WebTransportClient
+
+	// fullTunnelMark is the fwmark a full tunnel (route=default, fwmark mode)
+	// forces onto the client's own sockets; 0 means use Config.SocketSoMark. It
+	// is set after the client is built, so it cannot live in Config.
+	fullTunnelMark atomic.Uint32
+	// resolver, when set, resolves the server name instead of the system
+	// resolver (full tunnel, fwmark mode: its sockets carry the mark).
+	resolver atomic.Pointer[net.Resolver]
+}
+
+// socketMark is the SO_MARK for the client's own sockets, 0 for none.
+func (c *Client) socketMark() uint32 {
+	if m := c.fullTunnelMark.Load(); m != 0 {
+		return m
+	}
+	return c.Config.SocketSoMark
 }
 
 const legacyJWTSecret = "champignonfrais"

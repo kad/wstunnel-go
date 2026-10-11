@@ -5,18 +5,26 @@ import (
 	"fmt"
 	"net/netip"
 	"reflect"
+	"slices"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 )
 
 type recordingConfigurer struct {
+	mu      sync.Mutex
 	calls   []string
 	failOn  string // exact call text that returns an error
 	failErr error
 	routes  routeGetter // answers RouteGet
+
+	existingRules []ruleSpec // returned by ListRules
 }
 
 func (r *recordingConfigurer) record(call string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.calls = append(r.calls, call)
 	if call == r.failOn {
 		return r.failErr
@@ -53,13 +61,53 @@ func (r *recordingConfigurer) DelHostRoute(dst netip.Prefix, gw netip.Addr, link
 	return r.record(fmt.Sprintf("delhostroute %s via %s dev %s", dst, gw, link))
 }
 func (r *recordingConfigurer) AddRule(rule ruleSpec) error {
-	return r.record("rule add " + rule.String())
+	if err := r.record("rule add " + rule.String()); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	r.existingRules = append(r.existingRules, rule)
+	r.mu.Unlock()
+	return nil
 }
+
+// DelRule behaves like the kernel: it removes one matching rule, or says there
+// is none (ENOENT).
 func (r *recordingConfigurer) DelRule(rule ruleSpec) error {
-	return r.record("rule del " + rule.String())
+	if err := r.record("rule del " + rule.String()); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, have := range r.existingRules {
+		if have == rule {
+			r.existingRules = slices.Delete(r.existingRules, i, i+1)
+			return nil
+		}
+	}
+	return syscall.ENOENT
+}
+
+func (r *recordingConfigurer) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.calls)
+}
+func (r *recordingConfigurer) ListRules(family int) ([]ruleSpec, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, fmt.Sprintf("listrules %d", family))
+	var out []ruleSpec
+	for _, rule := range r.existingRules {
+		if rule.Family == family {
+			out = append(out, rule)
+		}
+	}
+	return out, nil
 }
 func (r *recordingConfigurer) RouteGet(ip netip.Addr, avoid string) (routeInfo, error) {
+	r.mu.Lock()
 	r.calls = append(r.calls, fmt.Sprintf("routeget %s avoid %s", ip, avoid))
+	r.mu.Unlock()
 	if r.routes == nil {
 		return routeInfo{}, errors.New("no route")
 	}

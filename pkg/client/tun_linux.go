@@ -95,6 +95,17 @@ func deviceMTU(ifname string) (int, error) {
 	return iface.MTU, nil
 }
 
+// linkByName is netlink.LinkByName with a missing link reported as ENODEV, so
+// cleanup can tell "already gone" from a real failure.
+func linkByName(name string) (netlink.Link, error) {
+	link, err := netlink.LinkByName(name)
+	var notFound netlink.LinkNotFoundError
+	if errors.As(err, &notFound) {
+		return nil, fmt.Errorf("%w: %v", unix.ENODEV, err)
+	}
+	return link, err
+}
+
 func newNetConfigurer() netConfigurer { return netlinkConfigurer{} }
 
 type netlinkConfigurer struct{}
@@ -107,7 +118,7 @@ func ipNet(p netip.Prefix) *net.IPNet {
 }
 
 func (netlinkConfigurer) SetMTU(ifname string, mtu int) error {
-	link, err := netlink.LinkByName(ifname)
+	link, err := linkByName(ifname)
 	if err != nil {
 		return err
 	}
@@ -115,7 +126,7 @@ func (netlinkConfigurer) SetMTU(ifname string, mtu int) error {
 }
 
 func (netlinkConfigurer) AddAddr(ifname string, p netip.Prefix) error {
-	link, err := netlink.LinkByName(ifname)
+	link, err := linkByName(ifname)
 	if err != nil {
 		return err
 	}
@@ -123,7 +134,7 @@ func (netlinkConfigurer) AddAddr(ifname string, p netip.Prefix) error {
 }
 
 func (netlinkConfigurer) LinkUp(ifname string) error {
-	link, err := netlink.LinkByName(ifname)
+	link, err := linkByName(ifname)
 	if err != nil {
 		return err
 	}
@@ -131,7 +142,7 @@ func (netlinkConfigurer) LinkUp(ifname string) error {
 }
 
 func (netlinkConfigurer) AddRoute(ifname string, dst netip.Prefix) error {
-	link, err := netlink.LinkByName(ifname)
+	link, err := linkByName(ifname)
 	if err != nil {
 		return err
 	}
@@ -143,7 +154,7 @@ func (netlinkConfigurer) AddRoute(ifname string, dst netip.Prefix) error {
 }
 
 func (netlinkConfigurer) DelRoute(ifname string, dst netip.Prefix) error {
-	link, err := netlink.LinkByName(ifname)
+	link, err := linkByName(ifname)
 	if err != nil {
 		return err
 	}
@@ -155,7 +166,7 @@ func (netlinkConfigurer) DelRoute(ifname string, dst netip.Prefix) error {
 }
 
 func (netlinkConfigurer) tableRoute(ifname string, dst netip.Prefix, table int) (*netlink.Route, error) {
-	link, err := netlink.LinkByName(ifname)
+	link, err := linkByName(ifname)
 	if err != nil {
 		return nil, err
 	}
@@ -184,7 +195,7 @@ func (n netlinkConfigurer) DelTableRoute(ifname string, dst netip.Prefix, table 
 }
 
 func hostRoute(dst netip.Prefix, gw netip.Addr, linkName string) (*netlink.Route, error) {
-	link, err := netlink.LinkByName(linkName)
+	link, err := linkByName(linkName)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +212,9 @@ func (netlinkConfigurer) AddHostRoute(dst netip.Prefix, gw netip.Addr, link stri
 	if err != nil {
 		return err
 	}
-	return netlink.RouteAdd(r)
+	// Replace, not add: a pin left by a crashed run, or by the previous attempt
+	// whose removal failed, must not make the new one fail with EEXIST.
+	return netlink.RouteReplace(r)
 }
 
 func (netlinkConfigurer) DelHostRoute(dst netip.Prefix, gw netip.Addr, link string) error {
@@ -230,6 +243,29 @@ func toNetlinkRule(r ruleSpec) *netlink.Rule {
 	return nr
 }
 
+func (netlinkConfigurer) ListRules(family int) ([]ruleSpec, error) {
+	fam := netlink.FAMILY_V4
+	if family == 6 {
+		fam = netlink.FAMILY_V6
+	}
+	rules, err := netlink.RuleList(fam)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]ruleSpec, 0, len(rules))
+	for _, r := range rules {
+		out = append(out, ruleSpec{
+			Family:   family,
+			Priority: r.Priority,
+			Table:    r.Table,
+			Mark:     r.Mark,
+			NotMark:  r.Invert && (r.Mark != 0 || r.Mask != nil),
+			Suppress: r.SuppressPrefixlen,
+		})
+	}
+	return out, nil
+}
+
 func (netlinkConfigurer) AddRule(r ruleSpec) error { return netlink.RuleAdd(toNetlinkRule(r)) }
 func (netlinkConfigurer) DelRule(r ruleSpec) error { return netlink.RuleDel(toNetlinkRule(r)) }
 
@@ -240,7 +276,7 @@ func (netlinkConfigurer) DelRule(r ruleSpec) error { return netlink.RuleDel(toNe
 func (netlinkConfigurer) RouteGet(ip netip.Addr, avoidLink string) (routeInfo, error) {
 	avoidIdx := 0
 	if avoidLink != "" {
-		if l, err := netlink.LinkByName(avoidLink); err == nil {
+		if l, err := linkByName(avoidLink); err == nil {
 			avoidIdx = l.Attrs().Index
 		}
 	}

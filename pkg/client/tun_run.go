@@ -124,9 +124,10 @@ func (h *TunHandle) Close() error {
 // client reconnects. The tunnel runs until the returned handle is closed, ctx
 // ends, or the device fails; the library never terminates the process.
 func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error) {
-	if spec.FullTunnel {
-		return nil, errors.New("tun:// route=default is parsed but not implemented yet")
-	}
+	return c.startTun(ctx, spec, defaultTunDeps(), defaultTunRetry)
+}
+
+func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retry tunRetry) (*TunHandle, error) {
 	serverAddrs, err := c.resolveServerAddrs()
 	if err != nil {
 		return nil, err
@@ -135,20 +136,35 @@ func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error
 	if err != nil {
 		return nil, err
 	}
+	var full *fullTunnel
+	if spec.FullTunnel {
+		if full, err = c.prepareFullTunnel(spec, serverAddrs, deps); err != nil {
+			return nil, err
+		}
+	}
 
-	dev, err := openTunDevice(spec.Name)
+	dev, err := deps.openDevice(spec.Name)
 	if err != nil {
 		return nil, err
 	}
 
 	mtu := spec.MTU
+	var cleanups []func() error
 	if spec.Configure {
-		if err := applyNetOps(dev.Name(), ops, newNetConfigurer()); err != nil {
+		if err := applyNetOps(dev.Name(), ops, deps.nl); err != nil {
 			_ = dev.Close()
 			return nil, err
 		}
+		if full != nil {
+			cleanup, err := full.install(dev.Name(), deps.nl)
+			if err != nil {
+				_ = dev.Close()
+				return nil, err
+			}
+			cleanups = append(cleanups, cleanup, configureDNS(ctx, deps, dev.Name(), spec.DNS))
+		}
 	} else {
-		current, err := deviceMTU(dev.Name())
+		current, err := deps.deviceMTU(dev.Name())
 		if err != nil || current < tunMinMTU || current > tunMaxMTU {
 			_ = dev.Close()
 			return nil, tunMTUError(dev.Name(), current, err)
@@ -157,7 +173,18 @@ func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error
 	}
 
 	slog.Info("Tun device ready", "interface", dev.Name(), "mtu", mtu, "configured", spec.Configure)
-	return c.startTunHandle(ctx, dev, dev.Name(), mtu, defaultTunRetry, c.newTunGuard(spec, serverAddrs), nil), nil
+	servers := c.newTunServers(spec, serverAddrs)
+	preConnect := servers.guard
+	if full != nil && full.pins != nil {
+		preConnect = func(ctx context.Context) error {
+			addrs, err := servers.refresh(ctx)
+			if err != nil {
+				return err
+			}
+			return full.pins.refresh(addrs)
+		}
+	}
+	return c.startTunHandle(ctx, dev, dev.Name(), mtu, retry, preConnect, cleanups), nil
 }
 
 // startTunHandle runs the session loop for dev in the background. cleanups run
@@ -218,7 +245,7 @@ func (c *Client) resolveServerAddrsCtx(ctx context.Context) ([]netip.Addr, error
 	}
 	ctx, cancel := context.WithTimeout(ctx, tunResolveTimeout)
 	defer cancel()
-	addrs, err := lookupNetIP(ctx, host)
+	addrs, err := c.lookupHost(ctx, host)
 	if err != nil {
 		return nil, fmt.Errorf("resolve tunnel server %q: %w", host, err)
 	}
@@ -229,32 +256,50 @@ func (c *Client) resolveServerAddrsCtx(ctx context.Context) ([]netip.Addr, error
 	return addrs, nil
 }
 
-// newTunGuard returns the loop guard to run before every session attempt. The
-// server name is resolved again each time, because the answer can change while
-// the client runs, and the loop checks are repeated against the new answer.
-// When resolution fails or returns nothing the last addresses that passed the
-// checks are used, so a reconnect works while DNS is unreachable; if there never
-// were any, the guard fails closed. A refusal leaves those addresses unchanged.
-func (c *Client) newTunGuard(spec *TunSpec, initial []netip.Addr) func(context.Context) error {
-	var mu sync.Mutex
-	last := slices.Clone(initial)
-	return func(ctx context.Context) error {
-		mu.Lock()
-		defer mu.Unlock()
-		servers, err := c.resolveServerAddrsCtx(ctx)
-		if err != nil {
-			if len(last) == 0 {
-				return fmt.Errorf("tunnel server address never resolved: %w", err)
-			}
-			slog.Warn("Cannot re-resolve the tunnel server; using the last known addresses", "err", err, "addresses", last)
-			servers = last
+// tunServers tracks the addresses of the tunnel server across reconnects.
+type tunServers struct {
+	c    *Client
+	spec *TunSpec
+	mu   sync.Mutex
+	last []netip.Addr
+}
+
+func (c *Client) newTunServers(spec *TunSpec, initial []netip.Addr) *tunServers {
+	return &tunServers{c: c, spec: spec, last: slices.Clone(initial)}
+}
+
+// refresh is the loop guard: the server name is resolved again, because the
+// answer can change while the client runs, and the loop checks are repeated
+// against the new answer. When resolution fails or returns nothing the last
+// addresses that passed the checks are used, so a reconnect works while DNS is
+// unreachable; if there never were any, it fails closed. A refusal leaves those
+// addresses unchanged.
+func (s *tunServers) refresh(ctx context.Context) ([]netip.Addr, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	servers, err := s.c.resolveServerAddrsCtx(ctx)
+	if err != nil {
+		if len(s.last) == 0 {
+			return nil, fmt.Errorf("tunnel server address never resolved: %w", err)
 		}
-		if err := checkTunLoops(spec, servers); err != nil {
-			return err
-		}
-		last = slices.Clone(servers)
-		return nil
+		slog.Warn("Cannot re-resolve the tunnel server; using the last known addresses", "err", err, "addresses", s.last)
+		servers = s.last
 	}
+	if err := checkTunLoops(s.spec, servers); err != nil {
+		return nil, err
+	}
+	s.last = slices.Clone(servers)
+	return slices.Clone(servers), nil
+}
+
+func (s *tunServers) guard(ctx context.Context) error {
+	_, err := s.refresh(ctx)
+	return err
+}
+
+// newTunGuard returns the loop guard to run before every session attempt.
+func (c *Client) newTunGuard(spec *TunSpec, initial []netip.Addr) func(context.Context) error {
+	return c.newTunServers(spec, initial).guard
 }
 
 // connectWithContext runs dial, which cannot be interrupted, in the background
