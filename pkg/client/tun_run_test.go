@@ -73,6 +73,13 @@ type testTunServer struct {
 
 func newTestTunServer(t *testing.T, mode, addr string) *testTunServer {
 	t.Helper()
+	return newTestTunServerTLS(t, mode, addr, false)
+}
+
+// newTestTunServerTLS is newTestTunServer, optionally serving TLS (HTTP/1.1 and
+// HTTP/2 over ALPN) with httptest's self-signed certificate.
+func newTestTunServerTLS(t *testing.T, mode, addr string, useTLS bool) *testTunServer {
+	t.Helper()
 	rulesPath := filepath.Join(t.TempDir(), "rules.yaml")
 	if err := os.WriteFile(rulesPath, []byte(allowLoopbackRules), 0o600); err != nil {
 		t.Fatal(err)
@@ -98,10 +105,15 @@ func newTestTunServer(t *testing.T, mode, addr string) *testTunServer {
 	tracked := &trackingListener{Listener: ln}
 	srv := httptest.NewUnstartedServer(s)
 	srv.Listener = tracked
-	srv.Config.Protocols = new(http.Protocols)
-	srv.Config.Protocols.SetHTTP1(true)
-	srv.Config.Protocols.SetUnencryptedHTTP2(true)
-	srv.Start()
+	if useTLS {
+		srv.EnableHTTP2 = true
+		srv.StartTLS()
+	} else {
+		srv.Config.Protocols = new(http.Protocols)
+		srv.Config.Protocols.SetHTTP1(true)
+		srv.Config.Protocols.SetUnencryptedHTTP2(true)
+		srv.Start()
+	}
 	ts := &testTunServer{addr: ln.Addr().String(), srv: srv, ln: tracked}
 	t.Cleanup(ts.stop)
 	return ts

@@ -249,6 +249,18 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 			return c.dialTransport(ctx, network, addr, "h2")
 		},
 	}
+	if p.Tun != nil && c.Config.PingFrequency > 0 {
+		// A tun session is long-lived and must notice a peer that vanished
+		// without closing the connection, like the websocket watchdog does:
+		// after one ping interval without a frame the transport sends a PING
+		// and closes the connection if it is not answered within two more,
+		// three intervals in total. Closing fails the stream, so the session
+		// loop reconnects. Other HTTP/2 tunnels are left as they were.
+		tr.HTTP2 = &http.HTTP2Config{
+			SendPingTimeout: c.Config.PingFrequency,
+			PingTimeout:     2 * c.Config.PingFrequency,
+		}
+	}
 	httpClient := &http.Client{Transport: tr}
 
 	resp, err := httpClient.Do(req)
