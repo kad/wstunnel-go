@@ -187,7 +187,7 @@ last addresses that passed the loop check are used, and if there never were any 
 client does not connect. Whichever addresses result are what the connection is
 actually made to, on every transport (the Rust-compatible and RFC 6455 websockets,
 HTTP/2 over TCP, and WebTransport over QUIC): the addresses are tried in order and
-the first that connects wins, while the host name from the server URL is still what
+the first that connects wins (the 10 second dial deadline is shared out, so an address that silently drops packets gets its share, at least 2 seconds, and the next one is still tried), while the host name from the server URL is still what
 TLS sends as SNI and verifies, what the HTTP `Host` and websocket URL carry. So a
 reconnect works while DNS is unreachable. This applies to `route=default` only; a
 partial-route tun tunnel re-resolves for the loop check but dials by name. A server
