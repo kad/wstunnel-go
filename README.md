@@ -14,7 +14,7 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
     -   **Unix Domain Sockets**: Tunneling to/from local unix sockets.
     -   **Stdio**: Tunneling via standard input/output.
 -   **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
--   **Tun mode (Go-only, server side)**: With `--enable-tun`, the server accepts packet-level tun sessions and forwards each TCP/UDP flow to the real network through a userspace TCP/IP stack. The client side (`tun://`) is in progress.
+-   **Tun mode (Go-only, Linux client)**: Route whole subnets through the server with a TUN device: `-L 'tun://wst0?route=10.0.0.0/8'` on the client, `--enable-tun` on the server. The server forwards each TCP/UDP flow to the real network through a userspace TCP/IP stack. See [docs/TUN.md](docs/TUN.md).
 -   **Reverse Tunneling**: Stable support for static reverse TCP and reverse Unix socket tunnels (server-to-client).
 -   **Transports**:
     -   **WebSocket-like transport**: Secure WebSocket-style transport (default) with intentional RFC 6455 deviations for compatibility with the original Rust implementation.
@@ -153,6 +153,9 @@ wstunnel-go client -L tcp://8080:google.com:443 https://my-server.com
 
 # Use custom DNS resolver and prefer IPv4
 wstunnel-go client --dns-resolver 8.8.8.8 --dns-resolver-prefer-ipv4 -L tcp://8080:google.com:443 wss://my-server.com
+
+# Route 10.0.0.0/8 through the server with a TUN device (Linux, Go-only; see docs/TUN.md)
+sudo wstunnel-go client -L 'tun://wst0?route=10.0.0.0/8' wss://my-server.com
 ```
 
 ### Server Mode
@@ -275,7 +278,7 @@ func main() {
 | mTLS | ✅ | ✅ |
 | HTTP/2 Transport | ✅ | ✅ |
 | TProxy (Linux) | ✅ | ✅ |
-| Tun mode (packet tunnel) | 🚧 server only | n/a (Go-only) |
+| Tun mode (packet tunnel, Linux client) | ✅ | n/a (Go-only) |
 | JWT Authentication | ✅ | ✅ |
 
 ### Performance Metrics
