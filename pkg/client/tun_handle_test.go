@@ -20,6 +20,11 @@ func tunGoroutines() []string {
 	buf = buf[:runtime.Stack(buf, true)]
 	var found []string
 	for _, g := range strings.Split(string(buf), "\n\n") {
+		// An abandoned dial cannot be interrupted (see connectWithContext); it
+		// ends on its own timeout and closes whatever it opened.
+		if strings.Contains(g, "connectWithContext") {
+			continue
+		}
 		for _, fn := range []string{"(*Client).runTun", "(*Client).tunSession", "(*Client).tunKeepAlive"} {
 			if strings.Contains(g, "pkg/client."+fn) {
 				found = append(found, g)
@@ -37,7 +42,7 @@ func newHandleForTest(t *testing.T, cleanups ...func() error) (*TunHandle, *clos
 	dev := &closeCountingDevice{PacketConn: devEnd}
 	host := tuntest.NewHost(t, hostEnd, 1500)
 	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust", PingFrequency: 50 * time.Millisecond})
-	h := c.startTunHandle(context.Background(), dev, "tun-test", 1500, fastRetry, cleanups)
+	h := c.startTunHandle(context.Background(), dev, "tun-test", 1500, fastRetry, nil, cleanups)
 	t.Cleanup(func() { _ = h.Close() })
 
 	// Wait for a live session so Close has keepalive and pump goroutines to stop.
@@ -119,7 +124,7 @@ func TestTunHandleDoneCarriesDeviceError(t *testing.T) {
 	devEnd, hostEnd := tuntest.Pipe()
 	var cleaned atomic.Int32
 	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
-	h := c.startTunHandle(context.Background(), devEnd, "tun-test", 1500, fastRetry, []func() error{func() error { cleaned.Add(1); return nil }})
+	h := c.startTunHandle(context.Background(), devEnd, "tun-test", 1500, fastRetry, nil, []func() error{func() error { cleaned.Add(1); return nil }})
 	t.Cleanup(func() { _ = h.Close() })
 
 	_ = hostEnd.Close() // the device disappears
@@ -147,7 +152,7 @@ func TestTunHandleParentContextEndsIt(t *testing.T) {
 	devEnd, _ := tuntest.Pipe()
 	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
 	ctx, cancel := context.WithCancel(context.Background())
-	h := c.startTunHandle(ctx, devEnd, "tun-test", 1500, fastRetry, nil)
+	h := c.startTunHandle(ctx, devEnd, "tun-test", 1500, fastRetry, nil, nil)
 	cancel()
 	select {
 	case <-h.Done():

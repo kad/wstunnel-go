@@ -47,31 +47,8 @@ func planTunNetConfig(spec *TunSpec, serverAddrs []netip.Addr) ([]netOp, error) 
 	if !spec.Configure {
 		return nil, nil
 	}
-	if len(spec.Routes) > 0 && len(serverAddrs) == 0 {
-		return nil, errors.New("cannot check tun:// routes against the tunnel server because its address is unknown")
-	}
-	for _, route := range spec.Routes {
-		if err := checkNotWholeHost(normalizePrefix(route)); err != nil {
-			return nil, err
-		}
-	}
-	servers := make([]netip.Addr, 0, len(serverAddrs))
-	for _, server := range serverAddrs {
-		servers = append(servers, server.WithZone("").Unmap())
-	}
-	for _, route := range spec.Routes {
-		if err := checkLoop(normalizePrefix(route), "route", route, servers); err != nil {
-			return nil, err
-		}
-	}
-	for _, addr := range spec.Addrs {
-		// An address shorter than a host prefix makes the kernel install a
-		// route for its whole network into the device.
-		if addr.Bits() < addr.Addr().BitLen() {
-			if err := checkLoop(normalizePrefix(addr).Masked(), "addr", addr, servers); err != nil {
-				return nil, err
-			}
-		}
+	if err := checkTunLoops(spec, serverAddrs); err != nil {
+		return nil, err
 	}
 
 	ops := []netOp{{Kind: opSetMTU, MTU: int(spec.MTU)}}
@@ -87,6 +64,44 @@ func planTunNetConfig(spec *TunSpec, serverAddrs []netip.Addr) ([]netOp, error) 
 		ops = append(ops, netOp{Kind: opAddRoute, Prefix: route})
 	}
 	return ops, nil
+}
+
+// checkTunLoops refuses a configuration whose routes or connected addresses
+// would send the tunnel's own traffic to the server into the device. It is a
+// pure function of the spec and the server addresses, so the client can run it
+// again whenever the server name resolves to something new. Without a known
+// server address it fails closed.
+func checkTunLoops(spec *TunSpec, serverAddrs []netip.Addr) error {
+	if !spec.Configure {
+		return nil
+	}
+	if len(spec.Routes) > 0 && len(serverAddrs) == 0 {
+		return errors.New("cannot check tun:// routes against the tunnel server because its address is unknown")
+	}
+	for _, route := range spec.Routes {
+		if err := checkNotWholeHost(normalizePrefix(route)); err != nil {
+			return err
+		}
+	}
+	servers := make([]netip.Addr, 0, len(serverAddrs))
+	for _, server := range serverAddrs {
+		servers = append(servers, server.WithZone("").Unmap())
+	}
+	for _, route := range spec.Routes {
+		if err := checkLoop(normalizePrefix(route), "route", route, servers); err != nil {
+			return err
+		}
+	}
+	for _, addr := range spec.Addrs {
+		// An address shorter than a host prefix makes the kernel install a
+		// route for its whole network into the device.
+		if addr.Bits() < addr.Addr().BitLen() {
+			if err := checkLoop(normalizePrefix(addr).Masked(), "addr", addr, servers); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // normalizePrefix turns a 4in6 prefix such as ::ffff:203.0.113.0/120 into the
