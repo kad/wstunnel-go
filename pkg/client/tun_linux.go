@@ -40,10 +40,7 @@ func openTunDevice(name string) (tunDevice, error) {
 	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
 	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 		_ = unix.Close(fd)
-		if errors.Is(err, unix.EPERM) || errors.Is(err, unix.EACCES) || errors.Is(err, unix.EBUSY) {
-			return nil, fmt.Errorf("cannot create or attach tun device %q: %w (creating a device needs CAP_NET_ADMIN; as an unprivileged user attach to a persistent one: ip tuntap add mode tun user $USER name NAME, then use tun://NAME?configure=false)", name, err)
-		}
-		return nil, fmt.Errorf("create tun device %q: %w", name, err)
+		return nil, describeTunOpenError(name, err)
 	}
 	if err := unix.SetNonblock(fd, true); err != nil {
 		_ = unix.Close(fd)
@@ -54,6 +51,17 @@ func openTunDevice(name string) (tunDevice, error) {
 		name: ifr.Name(),
 		rbuf: make([]byte, 65536),
 	}, nil
+}
+
+// describeTunOpenError explains a failed TUNSETIFF in terms of what to do.
+func describeTunOpenError(name string, err error) error {
+	switch {
+	case errors.Is(err, unix.EBUSY):
+		return fmt.Errorf("tun device %q is already attached by another process: %w (a persistent device can be used by one process at a time; stop the other one or use another device)", name, err)
+	case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):
+		return fmt.Errorf("cannot create or attach tun device %q: %w (creating a device needs CAP_NET_ADMIN; as an unprivileged user attach to a persistent one: ip tuntap add mode tun user $USER name NAME, then use tun://NAME?configure=false)", name, err)
+	}
+	return fmt.Errorf("create tun device %q: %w", name, err)
 }
 
 func (t *linuxTun) Name() string { return t.name }

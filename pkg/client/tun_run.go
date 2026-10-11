@@ -64,7 +64,7 @@ func (c *Client) StartTun(spec *TunSpec) error {
 		current, err := deviceMTU(dev.Name())
 		if err != nil || current < tunMinMTU || current > tunMaxMTU {
 			_ = dev.Close()
-			return fmt.Errorf("tun device %s: usable MTU is %d..%d, device reports %d (err %v)", dev.Name(), tunMinMTU, tunMaxMTU, current, err)
+			return tunMTUError(dev.Name(), current, err)
 		}
 		mtu = uint16(current)
 	}
@@ -83,6 +83,14 @@ func (c *Client) StartTun(spec *TunSpec) error {
 // that returns nothing.
 var lookupNetIP = func(ctx context.Context, host string) ([]netip.Addr, error) {
 	return net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+}
+
+// tunMTUError explains why the MTU of an attached device cannot be used.
+func tunMTUError(name string, current int, err error) error {
+	if err != nil {
+		return fmt.Errorf("tun device %s: cannot read its MTU: %w", name, err)
+	}
+	return fmt.Errorf("tun device %s: usable MTU is %d..%d, device reports %d", name, tunMinMTU, tunMaxMTU, current)
 }
 
 // resolveServerAddrs returns the addresses the tunnel server name resolves to.

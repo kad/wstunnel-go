@@ -370,3 +370,14 @@ func TestResolveServerAddrsFailsClosed(t *testing.T) {
 		t.Fatal("lookup failure must be an error")
 	}
 }
+
+func TestTunMTUErrorIsCleanInBothCases(t *testing.T) {
+	rangeErr := tunMTUError("wst0", 70000, nil).Error()
+	if strings.Contains(rangeErr, "nil") || !strings.Contains(rangeErr, "70000") {
+		t.Errorf("range error %q should name the MTU and not print a nil error", rangeErr)
+	}
+	readErr := tunMTUError("wst0", 0, errors.New("no such device"))
+	if !strings.Contains(readErr.Error(), "no such device") || strings.Contains(readErr.Error(), "device reports 0") {
+		t.Errorf("read error %q should report the cause, not an MTU of 0", readErr)
+	}
+}
