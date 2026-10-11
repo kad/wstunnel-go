@@ -557,8 +557,11 @@ func runClient(c *cli.Context) error {
 	config := &client.Config{}
 
 	if c.String("config") != "" {
-		cfg, _ := loadConfigFile(c.String("config"))
-		if cfg != nil && cfg.Client != nil {
+		cfg, err := loadConfigFile(c.String("config"))
+		if err != nil {
+			return fmt.Errorf("loading config file: %w", err)
+		}
+		if cfg.Client != nil {
 			*config = *cfg.Client
 		}
 	}
@@ -634,8 +637,11 @@ func runServer(c *cli.Context) error {
 	config := &server.Config{}
 
 	if c.String("config") != "" {
-		cfg, _ := loadConfigFile(c.String("config"))
-		if cfg != nil && cfg.Server != nil {
+		cfg, err := loadConfigFile(c.String("config"))
+		if err != nil {
+			return fmt.Errorf("loading config file: %w", err)
+		}
+		if cfg.Server != nil {
 			*config = *cfg.Server
 		}
 	}
