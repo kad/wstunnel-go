@@ -80,9 +80,8 @@ func TestPlanTunNetConfigLoopGuard(t *testing.T) {
 	}{
 		{"203.0.113.0/24", true},
 		{"203.0.113.5/32", true},
-		{"0.0.0.0/0", true},
-		{"128.0.0.0/1", true}, // 203.x has its top bit set: the upper half
-		{"0.0.0.0/1", false},
+		{"203.0.112.0/23", true},
+		{"203.0.0.0/8", true},
 		{"10.0.0.0/8", false},
 		{"203.0.114.0/24", false},
 	} {
@@ -193,5 +192,36 @@ func TestPlanTunNetConfigLoopGuardNormalisesAddresses(t *testing.T) {
 	spec = &TunSpec{Configure: true, MTU: 1500, Routes: []netip.Prefix{netip.MustParsePrefix("fe80::/10")}}
 	if _, err := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("fe80::1%eth0")}); err == nil {
 		t.Error("a zoned server address inside the route must be refused")
+	}
+}
+
+func TestPlanTunNetConfigRejectsWholeHostRoutes(t *testing.T) {
+	v4 := []netip.Addr{netip.MustParseAddr("203.0.113.5")}
+	v6 := []netip.Addr{netip.MustParseAddr("2001:db8::1")}
+	for _, tc := range []struct {
+		route   string
+		servers []netip.Addr
+	}{
+		{"::/0", v4},      // the server is in the other family: the loop guard cannot see it
+		{"0.0.0.0/0", v6}, // likewise
+		{"0.0.0.0/0", v4},
+		{"0.0.0.0/1", v4},
+		{"128.0.0.0/1", v6},
+		{"::/1", v4},
+		{"8000::/1", v4},
+	} {
+		_, err := planTunNetConfig(mustSpec(t, "tun://wst0?route="+tc.route), tc.servers)
+		if err == nil || !strings.Contains(err.Error(), "would capture all") || !strings.Contains(err.Error(), "not supported yet") {
+			t.Errorf("route %s: error = %v, want a whole-host routing refusal", tc.route, err)
+		}
+	}
+	for _, route := range []string{"0.0.0.0/2", "10.0.0.0/8", "8.0.0.0/5", "fd00::/8", "::/2"} {
+		if _, err := planTunNetConfig(mustSpec(t, "tun://wst0?route="+route), v4); err != nil {
+			t.Errorf("route %s must stay accepted: %v", route, err)
+		}
+	}
+	// Only configured devices get routes; configure=false is untouched.
+	if _, err := planTunNetConfig(mustSpec(t, "tun://wst0?configure=false"), v4); err != nil {
+		t.Error(err)
 	}
 }

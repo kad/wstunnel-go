@@ -50,6 +50,11 @@ func planTunNetConfig(spec *TunSpec, serverAddrs []netip.Addr) ([]netOp, error) 
 	if len(spec.Routes) > 0 && len(serverAddrs) == 0 {
 		return nil, errors.New("cannot check tun:// routes against the tunnel server because its address is unknown")
 	}
+	for _, route := range spec.Routes {
+		if err := checkNotWholeHost(normalizePrefix(route)); err != nil {
+			return nil, err
+		}
+	}
 	servers := make([]netip.Addr, 0, len(serverAddrs))
 	for _, server := range serverAddrs {
 		servers = append(servers, server.WithZone("").Unmap())
@@ -91,6 +96,29 @@ func normalizePrefix(p netip.Prefix) netip.Prefix {
 		return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
 	}
 	return p
+}
+
+// checkNotWholeHost refuses a default route and the two /1 halves that together
+// make one. They would capture all of the host's traffic of that family, DNS and
+// replies to inbound connections included; full-tunnel routing needs more than
+// a route and is not supported yet.
+func checkNotWholeHost(p netip.Prefix) error {
+	if p.Bits() > 1 {
+		return nil
+	}
+	if p.Bits() == 1 {
+		switch p.Addr() {
+		case netip.AddrFrom4([4]byte{}), netip.AddrFrom4([4]byte{128}),
+			netip.IPv6Unspecified(), netip.MustParseAddr("8000::"):
+		default:
+			return nil
+		}
+	}
+	family := "IPv4"
+	if p.Addr().Is6() {
+		family = "IPv6"
+	}
+	return fmt.Errorf("tun:// route %s would capture all %s traffic; routing the whole host through the tunnel is not supported yet", p, family)
 }
 
 // checkLoop refuses a network routed into the device that holds a tunnel server.
