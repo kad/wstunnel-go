@@ -238,9 +238,41 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 // no pong) for three ping intervals, so a silently dead connection ends and
 // runTun reconnects instead of hanging until the kernel's TCP timeout.
 //
+// The idle check and the ping write run independently: a ping write can block
+// behind a packet write stuck on a full send buffer (the wst connection has no
+// write deadline), and the check must still be able to close the session, which
+// is what unblocks that write.
+//
 // HTTP/2 and WebTransport have no ping mechanism in this client, so they have
 // no watchdog; their dead-peer detection is out of scope for this milestone.
 func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream, pc tun.PacketConn, lastAlive *atomic.Int64) {
+	if ts.ws == nil && ts.gorilla == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(c.Config.PingFrequency)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			var err error
+			if ts.ws != nil {
+				err = ts.ws.WriteMessage(wst.PingMessage, nil)
+			} else {
+				// gorilla allows one writer; WriteControl is the call it documents
+				// as safe alongside the packet writer.
+				err = ts.gorilla.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
+			}
+			if err != nil {
+				_ = pc.Close()
+				return
+			}
+		}
+	}()
+
 	ticker := time.NewTicker(c.Config.PingFrequency)
 	defer ticker.Stop()
 	for {
@@ -252,21 +284,6 @@ func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream, pc tun.Pack
 		idle := time.Since(time.Unix(0, lastAlive.Load()))
 		if idle > 3*c.Config.PingFrequency {
 			slog.Warn("Tun peer unresponsive; dropping the session", "idle", idle)
-			_ = pc.Close()
-			return
-		}
-		var err error
-		switch {
-		case ts.ws != nil:
-			err = ts.ws.WriteMessage(wst.PingMessage, nil)
-		case ts.gorilla != nil:
-			// gorilla allows one writer; WriteControl is the call it documents as
-			// safe alongside the packet writer.
-			err = ts.gorilla.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second))
-		default:
-			return
-		}
-		if err != nil {
 			_ = pc.Close()
 			return
 		}

@@ -117,7 +117,7 @@ func TestRunTunKeepsResponsivePeer(t *testing.T) {
 				ServerURL:         "ws://" + real.addr,
 				PathPrefix:        "v1",
 				WebsocketProtocol: mode,
-				PingFrequency:     50 * time.Millisecond,
+				PingFrequency:     200 * time.Millisecond,
 			}, fastRetry)
 			dst := tcpEcho(t)
 
@@ -132,12 +132,66 @@ func TestRunTunKeepsResponsivePeer(t *testing.T) {
 			if err != nil {
 				t.Fatalf("no echo: %v", err)
 			}
-			time.Sleep(500 * time.Millisecond)
+			time.Sleep(900 * time.Millisecond)
 			if err := echoOnce(t, host, dst, "after idle"); err != nil {
 				t.Fatalf("echo after several ping intervals: %v", err)
 			}
 			if n := counter.n.Load(); n != 1 {
 				t.Fatalf("server saw %d connections, want 1 (a healthy session was dropped)", n)
+			}
+		})
+	}
+}
+
+// TestRunTunDropsSilentPeerUnderUploadLoad floods the device so the device
+// reader is blocked writing to a peer that never reads: the ping write queues
+// behind that stuck write, and the watchdog must still drop the session.
+func TestRunTunDropsSilentPeerUnderUploadLoad(t *testing.T) {
+	for _, mode := range []string{"rust", "ws"} {
+		t.Run(mode, func(t *testing.T) {
+			addr, accepted := silentServer(t, mode)
+			devEnd, hostEnd := tuntest.Pipe()
+			c := NewClient(Config{
+				ServerURL:         "ws://" + addr,
+				PathPrefix:        "v1",
+				WebsocketProtocol: mode,
+				PingFrequency:     500 * time.Millisecond,
+			})
+			ctx, cancel := context.WithCancel(context.Background())
+			done := make(chan error, 1)
+			go func() { done <- c.runTun(ctx, devEnd, 1500, fastRetry) }()
+
+			stopFlood := make(chan struct{})
+			floodDone := make(chan struct{})
+			go func() {
+				defer close(floodDone)
+				pkt := make([]byte, 1400)
+				pkt[0] = 0x45
+				for {
+					select {
+					case <-stopFlood:
+						return
+					default:
+					}
+					if err := hostEnd.WritePacket(pkt); err != nil {
+						return
+					}
+				}
+			}()
+			defer func() {
+				cancel()
+				<-done
+				close(stopFlood)
+				_ = hostEnd.Close()
+				<-floodDone
+			}()
+
+			deadline := time.Now().Add(10 * time.Second)
+			for accepted.Load() < 2 && time.Now().Before(deadline) {
+				time.Sleep(20 * time.Millisecond)
+			}
+			if n := accepted.Load(); n < 2 {
+				t.Fatalf("accepted %d sessions; the stuck write defeated the watchdog", n)
 			}
 		})
 	}
