@@ -138,6 +138,9 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 	}
 	var full *fullTunnel
 	if spec.FullTunnel {
+		if spec.Name != "" && deps.ifaceExists != nil && deps.ifaceExists(spec.Name) {
+			return nil, fmt.Errorf("tun device %q already exists, and route=default needs a device this client creates itself, so that it disappears with the process: if the client crashed while a persistent device carried the default route, the host would have no usable route until someone removed it. Delete the device (`ip link del %s`) and let the client create it, or omit the name", spec.Name, spec.Name)
+		}
 		if full, err = c.prepareFullTunnel(spec, serverAddrs, deps); err != nil {
 			return nil, err
 		}

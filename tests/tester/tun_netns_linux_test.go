@@ -517,6 +517,7 @@ var fullCases = []fullCase{
 	{"Go-Go-Tun-Full-Auto-StrictRP", "auto", 1, "basic", "pin"},
 	{"Go-Go-Tun-Full-Auto-LooseRP", "", 2, "basic", "fwmark"},
 	{"Go-Go-Tun-Full-Fwmark-StrictRP-Refused", "fwmark", 1, "refuse", ""},
+	{"Go-Go-Tun-Full-PersistentDevice-Refused", "fwmark", 2, "refuse-persistent", ""},
 	{"Go-Go-Tun-Full-Cleanup-Fwmark", "fwmark", 2, "cleanup", "fwmark"},
 	{"Go-Go-Tun-Full-Cleanup-Pin", "pin", 2, "cleanup", "pin"},
 	{"Go-Go-Tun-Full-Crash-Fwmark", "fwmark", 2, "crash", "fwmark"},
@@ -841,6 +842,31 @@ func TestTunNetnsFullDriver(t *testing.T) {
 	leaks := func() int { return strings.Count(sniff.output(), "LEAK ") - leakBase }
 
 	switch tc.scenario {
+	case "refuse-persistent":
+		// A persistent device would outlive a crashed client and keep the default
+		// route: the client must refuse to use one for a full tunnel.
+		run("ip", "tuntap", "add", "dev", "wst0", "mode", "tun")
+		cli := startClient()
+		select {
+		case <-cli.done:
+		case <-time.After(15 * time.Second):
+			cli.kill()
+			t.Fatalf("the client kept running; it must refuse a pre-existing device:\n%s", cli.output())
+		}
+		out := cli.output()
+		if cli.err == nil {
+			t.Fatalf("the client exited 0; want a refusal:\n%s", out)
+		}
+		if !strings.Contains(out, "already exists") {
+			t.Errorf("refusal message lacks the reason:\n%s", out)
+		}
+		if n := countRules("32760") + countRules("32761"); n != 0 {
+			t.Errorf("%d rules installed before the refusal:\n%s", n, rulesText())
+		}
+		if strings.Contains(try("ip", "route", "get", fullTargetIP), "wst0") {
+			t.Error("traffic is routed into the persistent device")
+		}
+
 	case "refuse":
 		cli := startClient()
 		select {

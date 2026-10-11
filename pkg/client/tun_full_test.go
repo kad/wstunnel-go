@@ -627,3 +627,53 @@ func TestPinnedTargets(t *testing.T) {
 		t.Errorf("another host must resolve normally, got %v", got)
 	}
 }
+
+func TestFullTunnelRefusesAnExistingDevice(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.nl.existingRules = fullTunnelRules(4, 0x7774) // would be purged if the start got that far
+	before := slices.Clone(f.nl.existingRules)
+	f.deps.ifaceExists = func(name string) bool { return name == "wst0" }
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	_, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry)
+	if err == nil {
+		t.Fatal("route=default accepted a device that already exists")
+	}
+	for _, want := range []string{"wst0", "already exists", "disappears with the process"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q lacks %q", err, want)
+		}
+	}
+	if f.opened != 0 || len(f.nl.snapshot()) != 0 || !slices.Equal(f.nl.existingRules, before) {
+		t.Errorf("the host was touched before the refusal: opened=%d calls=%v", f.opened, f.nl.snapshot())
+	}
+	if c.fullTunnelMark.Load() != 0 {
+		t.Error("the mark was armed before the refusal")
+	}
+
+	// Another name, and no name at all, are fine.
+	for _, arg := range []string{"tun://wst1?route=default&routing=fwmark", "tun://?route=default&routing=fwmark"} {
+		c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+		f2 := newFakeHost(t, host)
+		f2.deps.ifaceExists = f.deps.ifaceExists
+		h, err := c.startTun(context.Background(), mustSpec(t, arg), f2.deps, fastRetry)
+		if err != nil {
+			t.Fatalf("%s: %v", arg, err)
+		}
+		_ = h.Close()
+	}
+}
+
+func TestSplitRouteTunStillAttachesToAnExistingDevice(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.deps.ifaceExists = func(string) bool { return true }
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	h, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=10.0.0.0/8"), f.deps, fastRetry)
+	if err != nil {
+		t.Fatalf("a split-route tunnel must keep working with an existing device: %v", err)
+	}
+	_ = h.Close()
+}

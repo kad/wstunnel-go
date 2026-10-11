@@ -18,7 +18,8 @@ are unaffected and still interoperate with Rust.
 - On the client, either `CAP_NET_ADMIN` (usually root), or a persistent TUN device
   that an administrator created for your user (see [Without root](#without-root)).
   The full tunnel (`route=default`) installs rules and routes itself, so it always
-  needs `CAP_NET_ADMIN`; that is the only capability it needs.
+  needs `CAP_NET_ADMIN`; that is the only capability it needs. It also never uses a
+  persistent device: it refuses a device name that already exists.
 - A server started with `--enable-tun`, and a restriction rule that allows it (see
   [Server setup](#server-setup)).
 
@@ -210,6 +211,12 @@ rules at its priorities and refuse to start.
 
 ### Things to know
 
+- `route=default` needs a device the client creates itself, so that the device
+  disappears with the process. If the name you give (`tun://wst0?route=default`)
+  already exists, for example a persistent device made with `ip tuntap add`, the
+  client refuses to start. A persistent device would keep carrying the default
+  route after a crash, with nobody reading its packets, and the host would have no
+  working route until someone removed it. Delete the device or omit the name.
 - `connection_min_idle` cannot be combined with `route=default`: pooled
   connections are opened before the routing exists and would be cut off. The
   client refuses to start.
@@ -242,6 +249,9 @@ wstunnel-go client -L 'tun://wst0?configure=false' wss://tunnel.example.com
 
 With `configure=false` the client reads the device's MTU, sends it to the server,
 and never touches addresses, routes or link state.
+
+This is for split-route tunnels. The full tunnel (`route=default`) refuses an
+existing device and needs `CAP_NET_ADMIN` to create its own.
 
 With `configure=true` against an existing persistent device, the addresses,
 routes and link state the client sets stay after it exits; the client only removes
