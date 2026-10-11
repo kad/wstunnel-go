@@ -372,8 +372,15 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 	up := &tunUplink{pc: pc}
 	current.Store(up)
 	defer current.CompareAndSwap(up, nil)
-	stop := context.AfterFunc(ctx, func() { _ = pc.Close() })
-	defer stop()
+	closed := make(chan struct{})
+	stop := context.AfterFunc(ctx, func() { _ = pc.Close(); close(closed) })
+	defer func() {
+		// If the callback already started, wait for it so it cannot outlive the
+		// session.
+		if !stop() {
+			<-closed
+		}
+	}()
 
 	var lastAlive atomic.Int64
 	lastAlive.Store(time.Now().UnixNano())
@@ -422,8 +429,9 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 // write deadline), and the check must still be able to close the session, which
 // is what unblocks that write.
 //
-// HTTP/2 and WebTransport have no ping mechanism in this client, so they have
-// no watchdog; their dead-peer detection is out of scope for this milestone.
+// HTTP/2 gets the same detection from the transport itself (see
+// connectToHttp2). WebTransport has no client keepalive watchdog in this
+// version.
 func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream, pc tun.PacketConn, lastAlive *atomic.Int64, pinger *sync.WaitGroup) {
 	if ts.ws == nil && ts.gorilla == nil {
 		return
