@@ -20,18 +20,25 @@ import (
 // resolvectl.
 type tunDeps struct {
 	openDevice func(name string) (tunDevice, error)
-	deviceMTU  func(name string) (int, error)
-	nl         netConfigurer
-	lookPath   func(file string) (string, error)
-	runCmd     func(ctx context.Context, name string, args ...string) error
+	// ifaceExists reports whether a network interface with this name exists. Nil
+	// means no.
+	ifaceExists func(name string) bool
+	deviceMTU   func(name string) (int, error)
+	nl          netConfigurer
+	lookPath    func(file string) (string, error)
+	runCmd      func(ctx context.Context, name string, args ...string) error
 }
 
 func defaultTunDeps() tunDeps {
 	return tunDeps{
 		openDevice: openTunDevice,
-		deviceMTU:  deviceMTU,
-		nl:         newNetConfigurer(),
-		lookPath:   exec.LookPath,
+		ifaceExists: func(name string) bool {
+			_, err := net.InterfaceByName(name)
+			return err == nil
+		},
+		deviceMTU: deviceMTU,
+		nl:        newNetConfigurer(),
+		lookPath:  exec.LookPath,
 		runCmd: func(ctx context.Context, name string, args ...string) error {
 			out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
 			if err != nil {
