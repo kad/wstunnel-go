@@ -118,6 +118,7 @@ func normalizePrefix(p netip.Prefix) netip.Prefix {
 // replies to inbound connections included; full-tunnel routing needs more than
 // a route and is not supported yet.
 func checkNotWholeHost(p netip.Prefix) error {
+	p = p.Masked()
 	if p.Bits() > 1 {
 		return nil
 	}

@@ -98,10 +98,47 @@ func TestParseTunArgErrors(t *testing.T) {
 	}
 }
 
+func TestParseTunArgStrictness(t *testing.T) {
+	for arg, wantSubstr := range map[string]string{
+		"tun://wst0?mtu=":                       "empty",
+		"tun://wst0?configure=":                 "empty",
+		"tun://wst0?mtu=1400&mtu=1500":          "more than once",
+		"tun://wst0?configure=true&configure=1": "more than once",
+		"tun://wst0\x01":                        "control character",
+		"tun://ws\x7ft0":                        "control character",
+		"tun://wst\x000":                        "control character",
+		"tun://wst0?addr=::ffff:10.0.0.1/128":   "IPv4-mapped",
+		"tun://wst0?route=::ffff:10.0.0.0/104":  "IPv4-mapped",
+		"tun://wst0?addr=10.0.0.1/0":            "/0",
+		"tun://wst0?addr=::1/0":                 "/0",
+		"tun://wst0?mtu=1400;addr=10.0.0.1/32":  "invalid tun:// options",
+		"tun://wst0?mtu=%zz":                    "invalid tun:// options",
+		"tun://wst0?addr=10.0.0.1%2/32":         "invalid tun:// options",
+	} {
+		_, err := ParseTunArg(arg)
+		if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+			t.Errorf("ParseTunArg(%q) error = %v, want substring %q", arg, err, wantSubstr)
+		}
+	}
+	// A percent-escaped option is still accepted.
+	if _, err := ParseTunArg("tun://wst0?addr=10.0.0.1%2F32"); err != nil {
+		t.Errorf("percent-escaped slash rejected: %v", err)
+	}
+}
+
+func TestIsTunArgIsCaseSensitive(t *testing.T) {
+	// Like the other tunnel schemes, the scheme must be lower case.
+	for _, arg := range []string{"TUN://wst0", "Tun://wst0"} {
+		if IsTunArg(arg) {
+			t.Errorf("IsTunArg(%q) = true; the scheme match is case-sensitive", arg)
+		}
+	}
+}
+
 func TestParseTunnelArgRejectsTun(t *testing.T) {
 	for _, reverse := range []bool{false, true} {
-		if _, err := ParseTunnelArg("tun://wst0", reverse); err == nil || !strings.Contains(err.Error(), "ParseTunArg") {
-			t.Errorf("ParseTunnelArg(tun, reverse=%v) error = %v, want a pointer to ParseTunArg", reverse, err)
+		if _, err := ParseTunnelArg("tun://wst0", reverse); err == nil || !strings.Contains(err.Error(), "-L 'tun://") || strings.Contains(err.Error(), "ParseTunArg") {
+			t.Errorf("ParseTunnelArg(tun, reverse=%v) error = %v, want the user-facing -L 'tun://...' form and no internal function name", reverse, err)
 		}
 	}
 }
