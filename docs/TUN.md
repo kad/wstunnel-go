@@ -18,7 +18,8 @@ are unaffected and still interoperate with Rust.
 - On the client, either `CAP_NET_ADMIN` (usually root), or a persistent TUN device
   that an administrator created for your user (see [Without root](#without-root)).
   The full tunnel (`route=default`) installs rules and routes itself, so it always
-  needs `CAP_NET_ADMIN`; that is the only capability it needs. It also never uses a
+  needs `CAP_NET_ADMIN`; that is the only capability the routing needs (for `dns=` see the
+  notes under [Deployment](#deployment)). It also never uses a
   persistent device: it refuses a device name that already exists.
 - A server started with `--enable-tun`, and a restriction rule that allows it (see
   [Server setup](#server-setup)).
@@ -168,7 +169,12 @@ resolvectl dns <tun> ADDR...
 resolvectl domain <tun> '~.'
 ```
 
-so systemd-resolved sends every name to those servers over the tunnel. Without
+so systemd-resolved sends every name to those servers over the tunnel. The client
+does this after the device is up and before the routing is installed. Each command
+has a 10 second limit, and a failure or timeout is a warning only: the tunnel
+still starts, without the DNS settings. Whether `resolvectl` is permitted for the
+user and capabilities the client runs with depends on systemd-resolved's polkit
+policy (see the systemd notes under [Deployment](#deployment)). Without
 `resolvectl` the client warns and leaves DNS alone. It never edits
 `/etc/resolv.conf`. systemd-resolved forgets the settings when the device goes
 away; the client also runs `resolvectl revert <tun>` on exit, which only matters
@@ -515,13 +521,20 @@ As a service, the same unit as above runs it; only the instance name changes:
 sudo systemctl enable --now wstunnel-go-tun-client@tun-client-full
 ```
 
-The full tunnel needs no capability beyond `CAP_NET_ADMIN`, which the unit
-already grants: the policy rules and routes are installed over netlink (that
-needs `CAP_NET_ADMIN`), and setting the firewall mark on the client's own sockets
-(`SO_MARK`) needs `CAP_NET_ADMIN` as well (newer kernels also accept
-`CAP_NET_RAW`). `dns=` runs `resolvectl`, which asks systemd-resolved over D-Bus;
-that works for a service running as root. With `User=` set to an unprivileged
-user, systemd-resolved's polkit policy decides whether the call is allowed.
+For the routing, the unit grants what the full tunnel needs: the policy rules and
+routes are installed over netlink and the firewall mark is set on the client's own
+sockets (`SO_MARK`), and the namespace tests run those parts with root in a user
+namespace, which shows nothing else is required for them. They do not run under a
+restricted capability bounding set, and they do not run `resolvectl` at all. `dns=`
+runs `resolvectl`, which asks systemd-resolved over D-Bus; whether that call is
+allowed to a service holding only `CAP_NET_ADMIN` depends on the systemd and polkit
+versions and policy on the host and has not been verified here. If it is refused,
+the client logs a warning and carries on without DNS settings (each `resolvectl`
+command gets 10 seconds and is run before the routing is installed, so a stuck
+resolver cannot leave the host captured). To get the DNS settings anyway: add a
+polkit rule that lets the service's user call `resolvectl` on the link, run the
+client as a user systemd-resolved allows, or configure DNS yourself (for example
+`resolvectl dns <tun> ...` from the administrator's side) and leave `dns=` out.
 `Restart=always` brings the tunnel back after a fatal device error, and
 systemd's SIGTERM on stop makes the client remove its rules before it exits.
 
