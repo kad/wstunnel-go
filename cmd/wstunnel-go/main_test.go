@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -190,5 +191,23 @@ func TestApplyServerFlagOverridesTunAllow(t *testing.T) {
 	applyServerFlagOverrides(newTestContext(t, []string{"--tun-allow=192.0.2.0/24", "--tun-allow=203.0.113.9"}), cfg, "")
 	if len(cfg.TunAllow) != 2 || cfg.TunAllow[0] != "192.0.2.0/24" || cfg.TunAllow[1] != "203.0.113.9" {
 		t.Fatalf("TunAllow = %v, want the explicit flag values to replace the config", cfg.TunAllow)
+	}
+}
+
+func TestRunRejectsUnreadableConfigFile(t *testing.T) {
+	bad := filepath.Join(t.TempDir(), "bad.yaml")
+	if err := os.WriteFile(bad, []byte("server: [not, a, mapping\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{bad, filepath.Join(t.TempDir(), "missing.yaml")} {
+		fs := flag.NewFlagSet("test", flag.ContinueOnError)
+		fs.String("config", path, "")
+		ctx := cli.NewContext(&cli.App{}, fs, nil)
+		for name, run := range map[string]func(*cli.Context) error{"server": runServer, "client": runClient} {
+			err := run(ctx)
+			if err == nil || !strings.Contains(err.Error(), "loading config file") {
+				t.Errorf("%s with %s: got %v, want a config load error", name, path, err)
+			}
+		}
 	}
 }
