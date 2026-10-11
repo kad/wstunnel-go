@@ -134,10 +134,202 @@ restrictions:
 
 Put `Tun` in its own `!Tunnel` entry. See [CONFIG.md](CONFIG.md#tun-sessions) for
 the details, including the destinations that are always denied unless a rule names
-them explicitly (loopback, link-local and cloud metadata addresses).
+them explicitly (loopback, link-local, the cloud metadata addresses, and IPv6
+forms that embed them).
+
+To narrow the reachable networks further without writing rules, start the server
+with `--tun-allow 10.0.0.0/8` (repeatable; YAML `tun_allow`; Caddyfile
+`tun_allow`). A flow must then be inside one of the listed networks and also pass
+the rules; the deny list still applies.
+
+Behind Caddy, use the module's `wstunnel` directive with `enable_tun`; see
+[CONFIG.md](CONFIG.md#caddy-module). Caddy serves the WebSocket and HTTP/2
+transports, not WebTransport.
 
 Server limits, all in [CONFIG.md](CONFIG.md): `tun_max_sessions`, `tun_max_flows`
 and `tun_udp_timeout`.
+
+## Deployment
+
+The examples below are also in `packaging/examples` and `packaging/systemd`.
+The server never needs `CAP_NET_ADMIN`: it terminates packets in userspace. Only
+the client creates a device and needs that capability.
+
+`--config` is a global option, so it goes before the subcommand:
+`wstunnel-go --config FILE server`, not `wstunnel-go server --config FILE`.
+
+### Server option 1: standalone wstunnel-go under systemd
+
+Save the rules from [Server setup](#server-setup) as
+`/etc/wstunnel-go/tun-rules.yaml`, and put the server settings in
+`/etc/wstunnel-go/tun-server.yaml`:
+
+```yaml
+mode: server
+log_lvl: INFO
+server:
+  listen_addr: "wss://0.0.0.0:443"
+  tls_certificate: /etc/wstunnel-go/tls/fullchain.pem
+  tls_private_key: /etc/wstunnel-go/tls/privkey.pem
+  restrict_config: /etc/wstunnel-go/tun-rules.yaml
+  enable_tun: true
+  tun_udp_timeout: 30s
+  tun_max_flows: 4096
+  tun_max_sessions: 256
+  tun_allow:
+    - 10.0.0.0/8
+```
+
+The packaged template unit `wstunnel-go-server@.service` runs
+`wstunnel-go --config /etc/wstunnel-go/%i.yaml server` and already grants
+`CAP_NET_BIND_SERVICE` for port 443:
+
+```ini
+[Service]
+ExecStart=/usr/bin/wstunnel-go --config /etc/wstunnel-go/%i.yaml server
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+```
+
+The instance name after `@` selects the file:
+
+```bash
+sudo systemctl enable --now wstunnel-go-server@tun-server
+```
+
+The same server without a config file:
+
+```bash
+wstunnel-go server --enable-tun --restrict-config /etc/wstunnel-go/tun-rules.yaml \
+  --tun-allow 10.0.0.0/8 --tun-udp-timeout 30s --tun-max-flows 4096 --tun-max-sessions 256 \
+  --tls-certificate /etc/wstunnel-go/tls/fullchain.pem \
+  --tls-private-key /etc/wstunnel-go/tls/privkey.pem wss://0.0.0.0:443
+```
+
+### Server option 2: the Caddy module
+
+Build Caddy with the module (see the [README](../README.md#caddy-integration-server))
+and let Caddy get the certificate and terminate TLS. `wstunnel` handles the
+WebSocket and HTTP/2 transports itself:
+
+```caddyfile
+tunnel.example.com {
+    route /v1/* {
+        wstunnel {
+            prefix v1
+            enable_tun
+            restrict_config /etc/wstunnel-go/tun-rules.yaml
+            tun_allow 10.0.0.0/8
+        }
+    }
+}
+```
+
+The client keeps its default prefix `v1`. The rules file is the one from
+[Server setup](#server-setup). Run Caddy as usual, for example with the
+`caddy.service` unit from your distribution; no extra capability is needed.
+
+### Server option 3: Caddy in front of a standalone server
+
+Caddy can also forward to a separate wstunnel-go server and keep the certificate,
+the public listener and any other sites. Run the standalone server on loopback
+without TLS, with the same YAML as option 1 but:
+
+```yaml
+mode: server
+server:
+  listen_addr: "ws://127.0.0.1:8080"
+  restrict_config: /etc/wstunnel-go/tun-rules.yaml
+  enable_tun: true
+  tun_allow:
+    - 10.0.0.0/8
+```
+
+The server tells the transports apart by the request: an HTTP/2 request without
+`Upgrade: websocket` is the HTTP/2 transport, anything else is a WebSocket
+upgrade. Caddy must therefore speak HTTP/2 to the server for clients that came in
+over HTTP/2 (cleartext h2c; the server accepts it on the same port), and
+HTTP/1.1 with the upgrade for WebSocket clients. A single `h2c://` upstream
+fails for WebSocket (the client sees `502 Bad Gateway`), and a plain HTTP/1.1
+upstream gives the server an HTTP/1.1 request that it does not treat as the HTTP/2
+transport, so send each kind to its own upstream:
+
+```caddyfile
+tunnel.example.com {
+    handle /v1/* {
+        @h2 protocol http/2+
+        reverse_proxy @h2 h2c://127.0.0.1:8080 {
+            flush_interval -1
+        }
+        reverse_proxy 127.0.0.1:8080
+    }
+}
+```
+
+`flush_interval -1` makes Caddy send data to the client as it arrives instead of
+buffering it. Because the server sees only Caddy's connection, a `ClientCommonName`
+match in a restriction rule (mTLS) cannot work in this layout; use the module
+(option 2) if you need it. Keep the standalone server bound to
+loopback: in the default `--mode rust` it does not verify tokens, and the rules
+and `tun_allow` are then the only access control.
+
+### Client: one command line
+
+Quote the whole argument, because `&` is special in a shell. Inside the
+argument, `/` in `addr` and `route` can be written as `%2F`:
+
+```bash
+sudo wstunnel-go client \
+  -L 'tun://wst0?addr=198.18.0.1%2F32&route=10.0.0.0%2F8&route=172.16.0.0%2F12&mtu=1400' \
+  wss://tunnel.example.com
+```
+
+### Client: the same tunnel from a config file
+
+Save this as `/etc/wstunnel-go/tun-client.yaml`. The server URL and the tunnel
+are both in the file:
+
+```yaml
+mode: client
+log_lvl: INFO
+client:
+  remote_addr: "wss://tunnel.example.com"
+  local_to_remote:
+    - "tun://wst0?addr=198.18.0.1%2F32&route=10.0.0.0%2F8&route=172.16.0.0%2F12&mtu=1400"
+```
+
+Run it with:
+
+```bash
+sudo wstunnel-go --config /etc/wstunnel-go/tun-client.yaml client
+```
+
+As a service, use `wstunnel-go-tun-client@.service`. It differs from the plain
+client unit only in granting `CAP_NET_ADMIN`, which is what creating the device,
+its addresses and its routes requires:
+
+```ini
+[Service]
+ExecStart=/usr/bin/wstunnel-go --config /etc/wstunnel-go/%i.yaml client
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+```
+
+```bash
+sudo systemctl enable --now wstunnel-go-tun-client@tun-client
+```
+
+To run the client without that capability, create a persistent device as in
+[Without root](#without-root), use `tun://wst0?configure=false` in the file, and
+in a drop-in (`systemctl edit wstunnel-go-tun-client@tun-client`) clear the
+capabilities and name a user that owns the device:
+
+```ini
+[Service]
+User=tunuser
+AmbientCapabilities=
+CapabilityBoundingSet=
+```
 
 ## Behaviour and limits
 

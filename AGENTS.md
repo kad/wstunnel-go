@@ -27,7 +27,8 @@ The `Makefile` provides convenient targets for common development tasks:
 -   `all`: (Default) Builds the application. Equivalent to `make build`.
 -   `build`: Compiles the `wstunnel-go` binary and places it in the `./bin` directory.
 -   `test`: Runs all unit and integration tests with verbose output and race detection (`go test -v -race ./...`).
--   `test-interop`: Runs end-to-end interoperability tests between `wstunnel-go` and the original Rust `wstunnel` implementation.
+-   `test-interop`: Runs end-to-end interoperability tests between `wstunnel-go` and the original Rust `wstunnel` implementation, plus the tun tests in network namespaces. The Caddy cases run too when a Caddy built with the module is at `pkg/caddy/caddy` (or named by `WST_CADDY_BIN`) and are skipped otherwise.
+-   `test-caddy-interop`: Builds Caddy with the module (`build-caddy`) and runs only the tun namespace tests that use it.
 -   `lint`: Executes `golangci-lint` to analyze the codebase for potential issues.
 -   `vet`: Runs `go vet` for static analysis.
 -   `fmt`: Formats all Go source files using `go fmt`.
