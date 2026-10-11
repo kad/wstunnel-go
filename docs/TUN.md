@@ -144,9 +144,11 @@ and `tun_udp_timeout`.
   the client pings every `--websocket-ping-frequency` (30 seconds by default) and
   drops and re-establishes the session if nothing at all arrives from the server
   within three ping intervals, so a connection silently dropped by a NAT or
-  firewall is replaced in about 90 seconds instead of hanging. HTTP/2 and
-  WebTransport do not send keepalives in this version; a dead connection there is
-  noticed only when the transport itself fails.
+  firewall is replaced in about 90 seconds instead of hanging. HTTP/2 does not
+  send keepalives in this version; a dead connection there is noticed only when
+  the transport itself fails. WebTransport sends QUIC keepalives every 15
+  seconds, so an idle session stays up, and it does not need the websocket
+  watchdog because QUIC ends a connection that stops answering.
 - **Transports.** Works over `ws://`, `wss://`, `http://`, `https://`, `wt://`
   and `wts://`, and with `--mode ws`. The automated tests run tun mode end to end
   over the websocket (both modes), HTTP/2 and WebTransport transports without TLS;
