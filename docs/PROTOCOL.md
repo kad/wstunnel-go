@@ -96,7 +96,7 @@ After the handshake the connection carries IP packets:
 
 ### Addressing and lifetime
 
-There is no address assignment and no control message. The server terminates each session in its own userspace stack that accepts any source and destination, so every client may use the same inside address (the client default is `198.18.0.1`). Closing the connection ends the session and all of its flows.
+There is no address assignment and no control message. The server terminates each session in its own userspace stack that accepts any source and destination, so every client may use the same inside address (the client defaults to `198.18.0.1` and can be told otherwise with `addr=`, see [TUN.md](TUN.md)). Closing the connection ends the session and all of its flows.
 
 ### Server-side forwarding
 

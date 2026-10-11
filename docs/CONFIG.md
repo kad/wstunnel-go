@@ -124,11 +124,13 @@ client:
 - `http://127.0.0.1:8080`: local HTTP CONNECT proxy.
 - `http://127.0.0.1:8080?login=proxy&password=secret`: local HTTP CONNECT proxy requiring credentials.
 - `unix:///tmp/wstunnel.sock:/var/run/docker.sock`: local unix socket listener forwarding to a unix socket target.
+- `tun://wst0?addr=198.18.0.1/32&route=10.0.0.0/8`: Linux TUN device that routes `10.0.0.0/8` through the server (Go-only; the server needs `enable_tun`). See [TUN.md](TUN.md) for the options and limits.
 - `tcp://9090:localhost:443` under `remote_to_local`: reverse TCP tunnel. The current Go implementation uses the target host/port as both the server-side listener address and the client-side dial target, so it does not yet support a separate server listener address mapped to a different local target.
 
 ### Current client limitations
 
 - Reverse UDP, reverse SOCKS5, and reverse HTTP proxy are not implemented in this Go version yet. Do not place those tunnel types in `remote_to_local`.
+- `tun://` works only under `local_to_remote`, only once per client, and only on Linux.
 
 ## Server configuration
 
