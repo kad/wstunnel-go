@@ -1,10 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -591,13 +594,31 @@ func startClient(c *cli.Context, config *client.Config) error {
 		return fmt.Errorf("only one tun:// tunnel is supported per client")
 	}
 
+	// A tun tunnel owns a device and routes that must be removed on exit, so it
+	// needs an orderly shutdown. Other clients keep the default signal behaviour.
+	sigCtx := context.Background()
+	if tunTunnels > 0 {
+		var stop context.CancelFunc
+		sigCtx, stop = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+	}
+	var tunHandle *client.TunHandle
+	defer func() {
+		if tunHandle != nil {
+			if err := tunHandle.Close(); err != nil {
+				slog.Warn("Tun cleanup incomplete", "err", err)
+			}
+		}
+	}()
+
 	for _, arg := range config.LocalToRemote {
 		if client.IsTunArg(arg) {
 			spec, err := client.ParseTunArg(arg)
 			if err != nil {
 				return fmt.Errorf("failed to parse local-to-remote tunnel %s: %w", arg, err)
 			}
-			if err := wstClient.StartTun(spec); err != nil {
+			tunHandle, err = wstClient.StartTun(sigCtx, spec)
+			if err != nil {
 				return fmt.Errorf("failed to start tun tunnel %s: %w", arg, err)
 			}
 			hasTunnels = true
@@ -624,7 +645,19 @@ func startClient(c *cli.Context, config *client.Config) error {
 		return fmt.Errorf("no tunnels specified. Use -L or -R or config file")
 	}
 
-	select {}
+	if tunHandle == nil {
+		select {}
+	}
+	select {
+	case <-tunHandle.Done():
+		if err := tunHandle.Err(); err != nil {
+			return fmt.Errorf("tun tunnel stopped: %w", err)
+		}
+		return nil
+	case <-sigCtx.Done():
+		slog.Info("Shutting down")
+		return nil
+	}
 }
 
 func runServer(c *cli.Context) error {

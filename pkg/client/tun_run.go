@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -31,6 +32,44 @@ var defaultTunRetry = tunRetry{min: time.Second, max: 30 * time.Second, stable: 
 // tunResolveTimeout bounds resolving the server name for the loop guard.
 const tunResolveTimeout = 10 * time.Second
 
+// TunHandle is a running tun tunnel: the device, the session loop and anything
+// the client installed around them.
+type TunHandle struct {
+	name      string
+	cancel    context.CancelFunc
+	done      chan struct{}
+	err       error // fatal reason; written before done is closed
+	closeErr  error // cleanup failures; written before done is closed
+	closeOnce sync.Once
+}
+
+// Name is the interface name of the TUN device.
+func (h *TunHandle) Name() string { return h.name }
+
+// Done is closed when the tunnel has stopped, whether because of Close, the
+// context given to StartTun, or a fatal error.
+func (h *TunHandle) Done() <-chan struct{} { return h.done }
+
+// Err is nil until Done is closed. Afterwards it is the fatal reason the tunnel
+// stopped, or nil for a clean stop (Close or a cancelled context).
+func (h *TunHandle) Err() error {
+	select {
+	case <-h.done:
+		return h.err
+	default:
+		return nil
+	}
+}
+
+// Close stops the session loop, closes the device, removes everything the
+// client installed and waits for all of it to finish. It is safe to call more
+// than once and from several goroutines; every call returns the same result.
+func (h *TunHandle) Close() error {
+	h.closeOnce.Do(h.cancel)
+	<-h.done
+	return h.closeErr
+}
+
 // StartTun creates and configures the TUN device described by spec, then
 // carries its packets over a tun session to the server in the background,
 // reconnecting when the session drops. It returns once the device is ready, or
@@ -38,45 +77,65 @@ const tunResolveTimeout = 10 * time.Second
 //
 // The device and its routes outlive a dropped session, so traffic routed to
 // the tunnel is dropped rather than leaking out of the default route while the
-// client reconnects. Closing the process removes a device the client created.
-func (c *Client) StartTun(spec *TunSpec) error {
+// client reconnects. The tunnel runs until the returned handle is closed, ctx
+// ends, or the device fails; the library never terminates the process.
+func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error) {
 	serverAddrs, err := c.resolveServerAddrs()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ops, err := planTunNetConfig(spec, serverAddrs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	dev, err := openTunDevice(spec.Name)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	mtu := spec.MTU
 	if spec.Configure {
 		if err := applyNetOps(dev.Name(), ops, newNetConfigurer()); err != nil {
 			_ = dev.Close()
-			return err
+			return nil, err
 		}
 	} else {
 		current, err := deviceMTU(dev.Name())
 		if err != nil || current < tunMinMTU || current > tunMaxMTU {
 			_ = dev.Close()
-			return tunMTUError(dev.Name(), current, err)
+			return nil, tunMTUError(dev.Name(), current, err)
 		}
 		mtu = uint16(current)
 	}
 
 	slog.Info("Tun device ready", "interface", dev.Name(), "mtu", mtu, "configured", spec.Configure)
+	return c.startTunHandle(ctx, dev, dev.Name(), mtu, defaultTunRetry, nil), nil
+}
+
+// startTunHandle runs the session loop for dev in the background. cleanups run
+// in reverse order after the loop and the device are gone, whatever the reason
+// it stopped.
+func (c *Client) startTunHandle(ctx context.Context, dev tun.PacketConn, name string, mtu uint16, retry tunRetry, cleanups []func() error) *TunHandle {
+	ctx, cancel := context.WithCancel(ctx)
+	h := &TunHandle{name: name, cancel: cancel, done: make(chan struct{})}
 	go func() {
-		if err := c.runTun(context.Background(), dev, mtu, defaultTunRetry); err != nil {
-			slog.Error("Tun device failed; tun tunnel stopped", "interface", dev.Name(), "err", err)
-			os.Exit(1)
+		err := c.runTun(ctx, dev, mtu, retry)
+		if err != nil {
+			slog.Error("Tun device failed; tun tunnel stopped", "interface", name, "err", err)
 		}
+		var cleanupErrs []error
+		for i := len(cleanups) - 1; i >= 0; i-- {
+			if cerr := cleanups[i](); cerr != nil {
+				cleanupErrs = append(cleanupErrs, cerr)
+			}
+		}
+		cancel()
+		h.err = err
+		h.closeErr = errors.Join(cleanupErrs...)
+		close(h.done)
 	}()
-	return nil
+	return h
 }
 
 // lookupNetIP resolves a host name; a variable so tests can simulate a resolver
@@ -133,11 +192,13 @@ type tunUplink struct {
 func (c *Client) runTun(ctx context.Context, dev tun.PacketConn, mtu uint16, retry tunRetry) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	defer func() { _ = dev.Close() }()
 
 	var current atomic.Pointer[tunUplink]
 	devErr := make(chan error, 1)
+	var reader sync.WaitGroup
+	reader.Add(1)
 	go func() {
+		defer reader.Done()
 		for {
 			pkt, err := dev.ReadPacket()
 			if err != nil {
@@ -176,6 +237,11 @@ func (c *Client) runTun(ctx context.Context, dev tun.PacketConn, mtu uint16, ret
 		delay = min(delay*2, retry.max)
 	}
 
+	// Closing the device unblocks the reader; wait for it so nothing outlives
+	// the call.
+	cancel()
+	_ = dev.Close()
+	reader.Wait()
 	select {
 	case err := <-devErr:
 		return err
@@ -188,6 +254,11 @@ func (c *Client) runTun(ctx context.Context, dev tun.PacketConn, mtu uint16, ret
 // session ends. Device-to-server packets are sent by runTun's reader through
 // current.
 func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16, current *atomic.Pointer[tunUplink]) error {
+	// Registered before the deferred ts.Close so that it runs after it: the
+	// keepalive goroutines can be blocked in a write until the connection closes.
+	var keepers sync.WaitGroup
+	defer keepers.Wait()
+
 	ts := c.connectToTransport(protocol.LocalProtocol{Tun: &protocol.TunProtocol{Mtu: mtu}}, "0.0.0.0", 0)
 	if ts.err != nil {
 		return describeTunConnectError(ts)
@@ -220,7 +291,7 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 		}
 		keepCtx, keepCancel := context.WithCancel(ctx)
 		defer keepCancel()
-		go c.tunKeepAlive(keepCtx, ts, pc, &lastAlive)
+		keepers.Go(func() { c.tunKeepAlive(keepCtx, ts, pc, &lastAlive, &keepers) })
 	}
 
 	slog.Info("Tun session established", "mtu", mtu)
@@ -253,11 +324,11 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 //
 // HTTP/2 and WebTransport have no ping mechanism in this client, so they have
 // no watchdog; their dead-peer detection is out of scope for this milestone.
-func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream, pc tun.PacketConn, lastAlive *atomic.Int64) {
+func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream, pc tun.PacketConn, lastAlive *atomic.Int64, pinger *sync.WaitGroup) {
 	if ts.ws == nil && ts.gorilla == nil {
 		return
 	}
-	go func() {
+	pinger.Go(func() {
 		ticker := time.NewTicker(c.Config.PingFrequency)
 		defer ticker.Stop()
 		for {
@@ -279,7 +350,7 @@ func (c *Client) tunKeepAlive(ctx context.Context, ts *tunnelStream, pc tun.Pack
 				return
 			}
 		}
-	}()
+	})
 
 	ticker := time.NewTicker(c.Config.PingFrequency)
 	defer ticker.Stop()
