@@ -10,11 +10,9 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/kad/wstunnel-go/internal/socket"
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/webtransport-go"
@@ -190,16 +188,8 @@ func (w *WebTransportClient) dialMarkedAddr(ctx context.Context, addr string, tl
 			tlsConfig.ServerName = host
 		}
 	}
-	mark := w.client.socketMark()
 	return w.dialAddrs(ctx, addr, func(remoteAddr *net.UDPAddr) (*quic.Conn, error) {
-		var lc net.ListenConfig
-		if mark != 0 {
-			lc.Control = func(network, address string, rc syscall.RawConn) error {
-				return rc.Control(func(fd uintptr) {
-					_ = socket.SetSoMark(fd, mark)
-				})
-			}
-		}
+		lc := net.ListenConfig{Control: w.client.markControl()}
 		packetConn, err := lc.ListenPacket(ctx, "udp", "")
 		if err != nil {
 			return nil, fmt.Errorf("listen for WebTransport client UDP socket: %w", err)

@@ -53,6 +53,9 @@ func newFakeHost(t *testing.T, serverHost string) *fakeHost {
 		host:    tuntest.NewHost(t, hostEnd, 1500),
 	}
 	f.deps = tunDeps{
+		// Without CAP_NET_ADMIN the real SO_MARK fails, which a full tunnel now
+		// treats as fatal for the dial; the fake host pretends it works.
+		setMark:    func(uintptr, uint32) error { return nil },
 		openDevice: func(string) (tunDevice, error) { f.opened++; return fakeDevice{devEnd, "wst0"}, nil },
 		deviceMTU:  func(string) (int, error) { return 1500, nil },
 		nl:         f.nl,
@@ -676,4 +679,86 @@ func TestSplitRouteTunStillAttachesToAnExistingDevice(t *testing.T) {
 		t.Fatalf("a split-route tunnel must keep working with an existing device: %v", err)
 	}
 	_ = h.Close()
+}
+
+// failSoMark makes every SO_MARK attempt of c fail.
+func failSoMark(c *Client) {
+	c.setMark = func(uintptr, uint32) error { return syscall.EPERM }
+}
+
+func listenAccepting(t *testing.T) (addr string, accepted *atomic.Int32) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	accepted = new(atomic.Int32)
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			accepted.Add(1)
+			_ = c.Close()
+		}
+	}()
+	return ln.Addr().String(), accepted
+}
+
+func TestFullTunnelDialFailsWhenTheMarkCannotBeSet(t *testing.T) {
+	addr, accepted := listenAccepting(t)
+
+	c := NewClient(Config{ServerURL: "ws://" + addr})
+	failSoMark(c)
+	c.fullTunnelMark.Store(0x7774)
+	conn, _, _, err := c.dialRawTransport(context.Background(), "tcp", addr)
+	if err == nil {
+		_ = conn.Close()
+		t.Fatal("the dial connected although the full-tunnel mark could not be set")
+	}
+	if !errors.Is(err, syscall.EPERM) || !strings.Contains(err.Error(), "SO_MARK") {
+		t.Errorf("error %q does not say that setting the mark failed", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if n := accepted.Load(); n != 0 {
+		t.Errorf("the server saw %d unmarked connections", n)
+	}
+}
+
+func TestPlainSocketMarkStaysBestEffort(t *testing.T) {
+	addr, _ := listenAccepting(t)
+	c := NewClient(Config{ServerURL: "ws://" + addr, SocketSoMark: 5})
+	failSoMark(c)
+	conn, _, _, err := c.dialRawTransport(context.Background(), "tcp", addr)
+	if err != nil {
+		t.Fatalf("--socket-so-mark outside a full tunnel is best effort, got %v", err)
+	}
+	_ = conn.Close()
+}
+
+func TestFullTunnelWebTransportDialFailsWhenTheMarkCannotBeSet(t *testing.T) {
+	c := NewClient(Config{ServerURL: "wts://127.0.0.1:9"})
+	failSoMark(c)
+	c.fullTunnelMark.Store(0x7774)
+	w := NewWebTransportClient(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_, err := w.dialMarkedAddr(ctx, "127.0.0.1:9", &cryptotls.Config{InsecureSkipVerify: true}, newWebTransportQUICConfig())
+	if err == nil || !strings.Contains(err.Error(), "SO_MARK") {
+		t.Fatalf("err = %v, want a failure to set SO_MARK before any packet is sent", err)
+	}
+}
+
+func TestPlainSocketMarkWebTransportStaysBestEffort(t *testing.T) {
+	c := NewClient(Config{ServerURL: "wts://127.0.0.1:9", SocketSoMark: 5})
+	failSoMark(c)
+	w := NewWebTransportClient(c)
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err := w.dialMarkedAddr(ctx, "127.0.0.1:9", &cryptotls.Config{InsecureSkipVerify: true}, newWebTransportQUICConfig())
+	if err != nil && strings.Contains(err.Error(), "SO_MARK") {
+		t.Fatalf("a failed mark must not fail a non-tun dial: %v", err)
+	}
 }

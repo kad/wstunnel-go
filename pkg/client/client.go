@@ -76,6 +76,8 @@ type Client struct {
 	// is unreachable, while the name still decides TLS SNI/verification, the
 	// HTTP Host and the websocket URL.
 	serverAddrs atomic.Pointer[[]netip.Addr]
+	// setMark replaces socket.SetSoMark (tests); set before the client dials.
+	setMark func(fd uintptr, mark uint32) error
 }
 
 // pinnedTargets returns, for a dial of addr ("host:port"), the "ip:port"
