@@ -80,6 +80,9 @@ func newFakeHost(t *testing.T, serverHost string) *fakeHost {
 			return nil
 		},
 	}
+	origDir := tunLockDir
+	tunLockDir = t.TempDir()
+	t.Cleanup(func() { tunLockDir = origDir })
 	orig := readRPFilter
 	t.Cleanup(func() { readRPFilter = orig })
 	readRPFilter = func(string) (int, error) { return 0, nil }

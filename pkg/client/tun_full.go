@@ -276,6 +276,15 @@ type fullTunnel struct {
 	servers []netip.Addr
 	choice  routingChoice
 	pins    *pinSet // pin mode only
+	unlock  func()  // releases the per-mark lock (fwmark mode only); nil otherwise
+}
+
+// release drops the per-mark lock, if held.
+func (ft *fullTunnel) release() {
+	if ft.unlock != nil {
+		ft.unlock()
+		ft.unlock = nil
+	}
 }
 
 // prepareFullTunnel decides the routing mode, clears leftovers of a crashed
@@ -304,14 +313,21 @@ func (c *Client) prepareFullTunnel(spec *TunSpec, servers []netip.Addr, deps tun
 	if choice.Warning != "" {
 		slog.Warn(choice.Warning)
 	}
+	var unlock func()
 	if choice.Mode == tunRoutingFwmark {
 		// Only the fwmark mode installs rules; pin mode never reads or deletes any.
+		// Rules of a live full tunnel with our mark look just like stale ones, so
+		// first prove nobody holds the lock: a crashed process releases it.
+		if unlock, err = acquireTunLock(mark); err != nil {
+			return nil, err
+		}
 		if err := purgeStaleRules(deps.nl, mark); err != nil {
+			unlock()
 			return nil, fmt.Errorf("clear rules left by an earlier run: %w", err)
 		}
 	}
 
-	ft := &fullTunnel{rc: routingConfig{Mode: choice.Mode, Mark: mark}, servers: servers, choice: choice}
+	ft := &fullTunnel{rc: routingConfig{Mode: choice.Mode, Mark: mark}, servers: servers, choice: choice, unlock: unlock}
 	if choice.Mode == tunRoutingFwmark {
 		// The client's own sockets and DNS lookups must carry the mark, even if
 		// the operator did not ask for --socket-so-mark.
