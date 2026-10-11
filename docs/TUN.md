@@ -186,7 +186,7 @@ tunnel is down. Before every connect a full tunnel resolves the name again (in
 last addresses that passed the loop check are used, and if there never were any the
 client does not connect. Whichever addresses result are what the connection is
 actually made to, on every transport (the Rust-compatible and RFC 6455 websockets,
-HTTP/2 over TCP, and WebTransport over QUIC): the addresses are tried in order and
+HTTP/2 over TCP, and WebTransport over QUIC; see the note on WebTransport below): the addresses are tried in order and
 the first that connects wins (the 10 second dial deadline is shared out, so an address that silently drops packets gets its share, at least 2 seconds, and the next one is still tried), while the host name from the server URL is still what
 TLS sends as SNI and verifies, what the HTTP `Host` and websocket URL carry. So a
 reconnect works while DNS is unreachable. This applies to `route=default` only; a
@@ -194,6 +194,11 @@ partial-route tun tunnel re-resolves for the loop check but dials by name. A ser
 given by IP address avoids the question. If the resolver on the host is a local stub
 (systemd-resolved at `127.0.0.53`) that `~.` now sends through the tunnel, the name
 lookup depends on the tunnel being up and the cached addresses carry the reconnects.
+
+For WebTransport the address selection (the cached addresses are tried in order,
+the name stays the TLS server name) is covered by a unit test, but no in-process
+test makes a real QUIC connection to a pinned address, so that path is less
+verified than the websocket and HTTP/2 ones, which are tested end to end.
 
 ### Cleanup and crash recovery
 
