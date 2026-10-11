@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -15,6 +16,11 @@ const (
 	tunMaxMTU     = 65535
 	// tunMaxNameLen is IFNAMSIZ-1: the longest interface name Linux accepts.
 	tunMaxNameLen = 15
+
+	tunRouteDefault  = "default"
+	tunRoutingAuto   = "auto"
+	tunRoutingFwmark = "fwmark"
+	tunRoutingPin    = "pin"
 )
 
 var (
@@ -37,6 +43,14 @@ type TunSpec struct {
 	DefaultAddrs bool
 	// Routes are installed via the device.
 	Routes []netip.Prefix
+	// FullTunnel is route=default: all IPv4 and IPv6 traffic goes through the
+	// device. Routes is empty then.
+	FullTunnel bool
+	// Routing selects how a full tunnel keeps the tunnel's own traffic out of
+	// the device: "auto", "fwmark" or "pin". Empty unless FullTunnel.
+	Routing string
+	// DNS are resolvers to configure for the device (full tunnel only).
+	DNS []netip.Addr
 	// Configure is false when attaching to an existing persistent device whose
 	// addresses, MTU and routes are managed elsewhere.
 	Configure bool
@@ -62,12 +76,12 @@ func ParseTunArg(arg string) (*TunSpec, error) {
 	}
 	for key := range values {
 		switch key {
-		case "mtu", "addr", "route", "configure":
+		case "mtu", "addr", "route", "configure", "routing", "dns":
 		default:
-			return nil, fmt.Errorf("unknown tun:// option %q (supported: mtu, addr, route, configure)", key)
+			return nil, fmt.Errorf("unknown tun:// option %q (supported: mtu, addr, route, configure, routing, dns)", key)
 		}
 	}
-	for _, key := range []string{"mtu", "configure"} {
+	for _, key := range []string{"mtu", "configure", "routing"} {
 		if len(values[key]) > 1 {
 			return nil, fmt.Errorf("tun:// option %q given more than once", key)
 		}
@@ -109,6 +123,10 @@ func ParseTunArg(arg string) (*TunSpec, error) {
 		spec.Addrs = append(spec.Addrs, p)
 	}
 	for _, v := range values["route"] {
+		if v == tunRouteDefault {
+			spec.FullTunnel = true
+			continue
+		}
 		p, err := netip.ParsePrefix(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid tun:// route %q: %w", v, err)
@@ -117,6 +135,44 @@ func ParseTunArg(arg string) (*TunSpec, error) {
 			return nil, err
 		}
 		spec.Routes = append(spec.Routes, p.Masked())
+	}
+
+	if spec.FullTunnel {
+		if len(spec.Routes) > 0 || len(values["route"]) > 1 {
+			return nil, fmt.Errorf("tun:// route=default cannot be combined with other route= values")
+		}
+		if !spec.Configure {
+			return nil, fmt.Errorf("tun:// route=default is not valid with configure=false: the client has to install the rules and routes itself")
+		}
+		spec.Routing = tunRoutingAuto
+	}
+	if v := values.Get("routing"); v != "" {
+		if !spec.FullTunnel {
+			return nil, fmt.Errorf("tun:// routing=%s is only valid with route=default", v)
+		}
+		switch v {
+		case tunRoutingAuto, tunRoutingFwmark, tunRoutingPin:
+			spec.Routing = v
+		default:
+			return nil, fmt.Errorf("invalid tun:// routing %q: want auto, fwmark or pin", v)
+		}
+	}
+	if values.Has("dns") {
+		if !spec.Configure {
+			return nil, fmt.Errorf("tun:// dns has no effect with configure=false; configure the device yourself")
+		}
+		if !spec.FullTunnel {
+			return nil, fmt.Errorf("tun:// dns is only valid with route=default (it makes the tunnel the default resolver path)")
+		}
+		for _, v := range values["dns"] {
+			a, err := parseTunDNS(v)
+			if err != nil {
+				return nil, err
+			}
+			if !slices.Contains(spec.DNS, a) {
+				spec.DNS = append(spec.DNS, a)
+			}
+		}
 	}
 
 	if !spec.Configure {
@@ -142,6 +198,20 @@ func checkNotMapped(kind, raw string, p netip.Prefix) error {
 		return fmt.Errorf("invalid tun:// %s %q: IPv4-mapped IPv6 prefixes are not supported; write the IPv4 prefix instead", kind, raw)
 	}
 	return nil
+}
+
+func parseTunDNS(v string) (netip.Addr, error) {
+	a, err := netip.ParseAddr(v)
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("invalid tun:// dns %q: want an IP address", v)
+	}
+	switch {
+	case a.Zone() != "":
+		return netip.Addr{}, fmt.Errorf("invalid tun:// dns %q: an address with a zone is not supported", v)
+	case a.Is4In6(), a.IsUnspecified(), a.IsMulticast():
+		return netip.Addr{}, fmt.Errorf("invalid tun:// dns %q: want a unicast IPv4 or IPv6 address", v)
+	}
+	return a, nil
 }
 
 func validateTunName(name string) error {

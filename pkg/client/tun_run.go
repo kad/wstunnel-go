@@ -124,6 +124,9 @@ func (h *TunHandle) Close() error {
 // client reconnects. The tunnel runs until the returned handle is closed, ctx
 // ends, or the device fails; the library never terminates the process.
 func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error) {
+	if spec.FullTunnel {
+		return nil, errors.New("tun:// route=default is parsed but not implemented yet")
+	}
 	serverAddrs, err := c.resolveServerAddrs()
 	if err != nil {
 		return nil, err
