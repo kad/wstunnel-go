@@ -283,10 +283,12 @@ func chooseRouting(requested string, servers []netip.Addr, rpFilterFor func(ip n
 }
 
 // isGoneError reports whether err means the thing an undo step removes is
-// already gone.
+// already gone. EAFNOSUPPORT is the kernel's answer for an IPv6 rule or route
+// on a host without IPv6: there is nothing to remove.
 func isGoneError(err error) bool {
 	return errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.ENOENT) ||
-		errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.EADDRNOTAVAIL)
+		errors.Is(err, syscall.ENODEV) || errors.Is(err, syscall.EADDRNOTAVAIL) ||
+		errors.Is(err, syscall.EAFNOSUPPORT)
 }
 
 // runUndo applies undo ops, ignoring steps whose target is already gone, and

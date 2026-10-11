@@ -599,7 +599,7 @@ func startClient(c *cli.Context, config *client.Config) error {
 	sigCtx := context.Background()
 	if tunTunnels > 0 {
 		var stop context.CancelFunc
-		sigCtx, stop = signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		sigCtx, stop = notifyShutdown(context.Background())
 		defer stop()
 	}
 	var tunHandle *client.TunHandle
@@ -658,6 +658,29 @@ func startClient(c *cli.Context, config *client.Config) error {
 		slog.Info("Shutting down")
 		return nil
 	}
+}
+
+// notifyShutdown returns a context that ends on the first SIGINT, SIGTERM or
+// SIGHUP (a closed terminal or a service reload is treated as a stop request;
+// there is no live reload). The signal handlers are released as soon as that
+// first signal arrives, so a second signal terminates the process the normal
+// way even when the orderly shutdown hangs.
+func notifyShutdown(parent context.Context) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithCancel(parent)
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	go func() {
+		defer signal.Stop(sigs)
+		select {
+		case <-sigs:
+			// Release the handlers before announcing the shutdown, so a signal
+			// sent after seeing it can no longer be swallowed.
+			signal.Stop(sigs)
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
 }
 
 func runServer(c *cli.Context) error {

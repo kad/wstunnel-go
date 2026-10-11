@@ -127,7 +127,15 @@ func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error
 	return c.startTun(ctx, spec, defaultTunDeps(), defaultTunRetry)
 }
 
-func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retry tunRetry) (*TunHandle, error) {
+func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retry tunRetry) (h *TunHandle, err error) {
+	defer func() {
+		if err != nil && spec.FullTunnel {
+			// A failed start must not leave the client's sockets marked or its
+			// lookups on the marked resolver: it may still be used for other
+			// tunnels.
+			c.resetFullTunnel()
+		}
+	}()
 	serverAddrs, err := c.resolveServerAddrs()
 	if err != nil {
 		return nil, err

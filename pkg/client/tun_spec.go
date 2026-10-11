@@ -223,6 +223,11 @@ func validateTunName(name string) error {
 			return fmt.Errorf("invalid tun:// device name %q: control character %U", name, r)
 		}
 	}
+	if strings.HasPrefix(name, "-") {
+		// Would be read as an option by the tools the name is handed to
+		// (resolvectl, ip), and the kernel does not give such names a meaning.
+		return fmt.Errorf("invalid tun:// device name %q: must not start with '-'", name)
+	}
 	if name == "." || name == ".." || strings.ContainsAny(name, "/ ") {
 		return fmt.Errorf("invalid tun:// device name %q", name)
 	}

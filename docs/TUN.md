@@ -197,7 +197,7 @@ lookup depends on the tunnel being up and the cached addresses carry the reconne
 
 ### Cleanup and crash recovery
 
-On SIGINT, SIGTERM or a fatal device error the client removes the rules, the
+On SIGINT, SIGTERM, SIGHUP or a fatal device error the client removes the rules, the
 table 30580 routes and the pinned host routes it installed, then exits (the TUN
 device and its `/1` and default routes disappear with the device). A forced kill
 (SIGKILL, power loss) cannot clean up. What it leaves is harmless: with the device
@@ -223,6 +223,19 @@ rules at its priorities and refuse to start.
   client refuses to start. A persistent device would keep carrying the default
   route after a crash, with nobody reading its packets, and the host would have no
   working route until someone removed it. Delete the device or omit the name.
+- **Remote administration over the same path.** Only the client's own sockets are
+  marked. Replies from any other local socket, such as sshd answering an
+  administrator who connects to the host, follow the full tunnel's routing: if the
+  administrator's address is reachable only through the default route, the replies
+  go into the tunnel and that session is cut, and new ones fail. What keeps a peer
+  connected, checked in the namespace tests for both modes: a peer on a directly
+  connected network, and a peer behind a more specific route in the main table (for
+  example `ip route add 198.51.100.0/24 via <gateway>`, tested by adding it
+  while the tunnel runs). In `fwmark` mode the `suppress_prefixlength 0` rule makes
+  every main-table route except the default one win; in `pin` mode a route longer
+  than `/1` wins by longest prefix over the two `/1` halves. Add such a route for
+  your management network before relying on `route=default` on a machine you only
+  reach remotely.
 - In a full tunnel (fwmark mode) a socket that cannot be marked fails the
   connection attempt with an error naming `SO_MARK`; the client never connects
   unmarked, because the tunnel's own packets would loop into the tunnel. Outside a
@@ -573,9 +586,11 @@ CapabilityBoundingSet=
   seconds, so an idle session stays up, and it does not need the websocket
   watchdog because QUIC ends a connection that stops answering.
   `--websocket-ping-frequency 0` turns the websocket and HTTP/2 detection off.
-- **Exit and signals.** On SIGINT or SIGTERM the client closes the tunnel, removes
+- **Exit and signals.** On SIGINT, SIGTERM or SIGHUP (a closed terminal counts as
+  a stop request; there is no reload) the client closes the tunnel, removes
   everything it installed (see [Cleanup](#cleanup-and-crash-recovery)) and exits
-  0. If the TUN device fails (for example it is deleted under the client), the
+  0. After the first signal the handlers are released, so a second signal ends the
+  process at once the normal way, without cleanup, if the orderly shutdown hangs. If the TUN device fails (for example it is deleted under the client), the
   client logs the error, cleans up and exits non-zero, so a service manager
   restarts it. Programs that embed the client call `StartTun`, which returns a
   handle with `Done`, `Err` and `Close` and never exits the process.

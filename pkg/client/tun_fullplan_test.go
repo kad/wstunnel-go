@@ -220,6 +220,21 @@ func TestRunUndoIgnoresGoneAndKeepsGoing(t *testing.T) {
 	}
 }
 
+// On a host without IPv6 the kernel answers EAFNOSUPPORT when asked to remove
+// an IPv6 rule or route; undo must not report that as a failure.
+func TestRunUndoIgnoresAddressFamilyNotSupported(t *testing.T) {
+	_, undo, _ := planFullTunnel(routingConfig{Mode: "fwmark", Mark: 7000, Tun: "wst0"}, nil, nil)
+	for _, e := range []error{syscall.EAFNOSUPPORT, fmt.Errorf("delete: %w", syscall.EAFNOSUPPORT)} {
+		rec := &recordingConfigurer{failOn: "rule del " + undo[0].Rule.String(), failErr: e}
+		if err := runUndo(undo, rec); err != nil {
+			t.Fatalf("EAFNOSUPPORT reported as a failure: %v", err)
+		}
+	}
+	if !isGoneError(syscall.EAFNOSUPPORT) {
+		t.Error("isGoneError(EAFNOSUPPORT) = false")
+	}
+}
+
 func TestChooseRouting(t *testing.T) {
 	servers := []netip.Addr{srv4}
 	rp := func(v int, err error) func(netip.Addr) (int, error) {
