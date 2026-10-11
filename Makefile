@@ -1,12 +1,12 @@
 # Makefile for wstunnel-go
 
 # Variables
-GO_VERSION ?= 1.27.1
+GO_VERSION ?= 1.27.2
 APP_NAME ?= wstunnel-go
 BIN_DIR ?= ./bin
 GO_BUILD_LDFLAGS ?= -ldflags="-s -w"
 # Keep in sync with .github/workflows/{ci,release}.yml so local lint matches CI.
-GOLANGCI_LINT_VERSION ?= v2.13.2
+GOLANGCI_LINT_VERSION ?= v2.14.0
 
 .PHONY: all
 all: build ## Build the application (default)

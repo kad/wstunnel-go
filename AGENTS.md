@@ -4,7 +4,7 @@ This document outlines the established rules, conventions, and processes for the
 
 ## 1. Go Version
 
-The project targets **Go version 1.27.1** or above (required by the gVisor netstack used for tun mode). This is specified in the `go.mod` file and enforced in the GitHub Workflows.
+The project targets **Go version 1.27.2** or above (required by the gVisor netstack used for tun mode). This is specified in the `go.mod` file and enforced in the GitHub Workflows.
 
 ## 2. Project Structure
 

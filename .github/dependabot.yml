@@ -19,19 +19,12 @@ updates:
     commit-message:
       prefix: "build(deps)"
     ignore:
-      # cel-go must track whatever github.com/caddyserver/caddy/v2 requires.
-      # Bumping it independently breaks the build: v0.29.0 changed
-      # interpreter.NewCall to take []InterpretableV2, which Caddy 2.11.4's
-      # modules/caddyhttp/celmatcher.go does not compile against. Verified that
-      # both v0.29.0 and v0.30.0 still fail; only a Caddy release that adopts
-      # the new API can move this forward.
-      #
-      # Cost of holding: v0.28.1 carries GO-2026-6094 (JSON private fields
-      # exposed via NativeTypes/ParseStructTag), fixed in v0.30.0. govulncheck
-      # reports it as not called - this module never uses CEL, it is Caddy's
-      # own expression matcher - and a stock Caddy 2.11.4 build has the exact
-      # same exposure. Re-check this when bumping Caddy.
-      - dependency-name: "github.com/google/cel-go"
+      # cel-go is an indirect dependency that Caddy's celmatcher compiles
+      # against directly, so it must track the Caddy release. Bumping it ahead
+      # of Caddy has broken the build before (cel-go v0.29 changed
+      # interpreter.NewCall, which Caddy 2.11.4 did not compile against).
+      # Caddy now imports it as cel.dev/cel-go; let a Caddy upgrade move it.
+      - dependency-name: "cel.dev/cel-go"
 
   - package-ecosystem: "github-actions"
     directory: "/"
