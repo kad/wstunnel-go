@@ -55,6 +55,8 @@ nfpms:
         dst: /usr/lib/systemd/system/wstunnel-go-client@.service
       - src: ./packaging/systemd/wstunnel-go-server@.service
         dst: /usr/lib/systemd/system/wstunnel-go-server@.service
+      - src: ./packaging/systemd/wstunnel-go-tun-client@.service
+        dst: /usr/lib/systemd/system/wstunnel-go-tun-client@.service
 
 checksum:
   name_template: 'checksums.txt'

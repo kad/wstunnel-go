@@ -1,0 +1,6 @@
+mode: client
+log_lvl: INFO
+client:
+  remote_addr: "wss://tunnel.example.com"
+  local_to_remote:
+    - "tun://wst0?addr=198.18.0.1%2F32&route=10.0.0.0%2F8&mtu=1400"

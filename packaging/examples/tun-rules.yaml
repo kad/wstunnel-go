@@ -1,0 +1,10 @@
+restrictions:
+  - name: office-network
+    match:
+      - Any
+    allow:
+      - !Tunnel
+        protocol: [Tun]
+      - !Tunnel
+        protocol: [Tcp, Udp]
+        cidr: [10.0.0.0/8]
