@@ -27,9 +27,9 @@ type linuxTun struct {
 	rbuf []byte
 }
 
-// openTunDevice creates the TUN device name, or attaches to an existing
+// openTunDevice creates the TUN device name, or (unless exclusive) attaches to an existing
 // persistent one. An empty name lets the kernel pick tunN.
-func openTunDevice(name string) (tunDevice, error) {
+func openTunDevice(name string, exclusive bool) (tunDevice, error) {
 	fd, err := unix.Open(tunClonePath, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", tunClonePath, err)
@@ -39,10 +39,16 @@ func openTunDevice(name string) (tunDevice, error) {
 		_ = unix.Close(fd)
 		return nil, fmt.Errorf("tun device name %q: %w", name, err)
 	}
-	ifr.SetUint16(unix.IFF_TUN | unix.IFF_NO_PI)
+	flags := uint16(unix.IFF_TUN | unix.IFF_NO_PI)
+	if exclusive {
+		// Fail if the device already exists (EBUSY) instead of attaching to it:
+		// closes the window between the caller's existence check and this open.
+		flags |= unix.IFF_TUN_EXCL
+	}
+	ifr.SetUint16(flags)
 	if err := unix.IoctlIfreq(fd, unix.TUNSETIFF, ifr); err != nil {
 		_ = unix.Close(fd)
-		return nil, describeTunOpenError(name, err)
+		return nil, describeTunOpenError(name, err, exclusive)
 	}
 	if err := unix.SetNonblock(fd, true); err != nil {
 		_ = unix.Close(fd)
@@ -56,8 +62,10 @@ func openTunDevice(name string) (tunDevice, error) {
 }
 
 // describeTunOpenError explains a failed TUNSETIFF in terms of what to do.
-func describeTunOpenError(name string, err error) error {
+func describeTunOpenError(name string, err error, exclusive bool) error {
 	switch {
+	case exclusive && errors.Is(err, unix.EBUSY):
+		return fmt.Errorf("tun device %q already exists, and route=default needs a device this client creates itself so that it disappears with the process: %w (delete it with `ip link del %s` or omit the name)", name, err, name)
 	case errors.Is(err, unix.EBUSY):
 		return fmt.Errorf("tun device %q is already attached by another process: %w (a persistent device can be used by one process at a time; stop the other one or use another device)", name, err)
 	case errors.Is(err, unix.EPERM), errors.Is(err, unix.EACCES):

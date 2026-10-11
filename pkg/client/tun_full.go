@@ -18,7 +18,8 @@ import (
 // tests substitute a recording configurer, an in-memory device and a fake
 // resolvectl.
 type tunDeps struct {
-	openDevice func(name string) (tunDevice, error)
+	// openDevice creates the device; exclusive makes it fail if the name exists.
+	openDevice func(name string, exclusive bool) (tunDevice, error)
 	// ifaceExists reports whether a network interface with this name exists. Nil
 	// means no.
 	ifaceExists func(name string) bool

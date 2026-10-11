@@ -230,7 +230,8 @@ inherited by child processes. Pin mode installs no rules and takes no lock.
   already exists, for example a persistent device made with `ip tuntap add`, the
   client refuses to start. A persistent device would keep carrying the default
   route after a crash, with nobody reading its packets, and the host would have no
-  working route until someone removed it. Delete the device or omit the name.
+  working route until someone removed it. Delete the device or omit the name. The check is atomic: the device
+  is opened with `IFF_TUN_EXCL`, so one created between the check and the open is refused too.
 - **Remote administration over the same path.** Only the client's own sockets are
   marked. Replies from any other local socket, such as sshd answering an
   administrator who connects to the host, follow the full tunnel's routing: if the
