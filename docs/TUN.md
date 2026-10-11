@@ -23,8 +23,11 @@ are unaffected and still interoperate with Rust.
 Server (the rules file is shown below):
 
 ```bash
-wstunnel-go server --enable-tun --restrict-config rules.yaml wss://0.0.0.0:443
+wstunnel-go server --enable-tun --restrict-config rules.yaml \
+  --tls-certificate cert.pem --tls-private-key key.pem wss://0.0.0.0:443
 ```
+
+The server turns on TLS only when it is given a certificate and key; the `wss://` scheme alone does not enable it. The certificate must be valid for the host name the clients use. The rules file is the one shown under [Server setup](#server-setup), saved as `rules.yaml`.
 
 Client, as root. Everything addressed to `10.0.0.0/8` now goes through the tunnel:
 
@@ -137,8 +140,17 @@ and `tun_udp_timeout`.
   seconds between attempts. While it is down, traffic for the routed networks is
   dropped; it does not leak out of your normal route. Connections that were open
   when the session dropped are reset, and new ones work after the reconnect.
-- **Dead peers.** Over the websocket transports (`ws://`, `wss://`, and `--mode ws`) the client pings every `--websocket-ping-frequency` (30 seconds by default) and drops and re-establishes the session if nothing at all arrives from the server within three ping intervals, so a connection silently dropped by a NAT or firewall is replaced in about 90 seconds instead of hanging. HTTP/2 and WebTransport do not send keepalives in this version; a dead connection there is noticed only when the transport itself fails.
-- **Transports.** Works over `ws://`, `wss://`, `http://`, `https://`, `wt://` and `wts://`, and with `--mode ws`. The automated tests run tun mode end to end over the websocket (both modes), HTTP/2 and WebTransport transports without TLS; the TLS variants use the same code paths but have no tun-specific test.
+- **Dead peers.** Over the websocket transports (`ws://`, `wss://`, and `--mode ws`)
+  the client pings every `--websocket-ping-frequency` (30 seconds by default) and
+  drops and re-establishes the session if nothing at all arrives from the server
+  within three ping intervals, so a connection silently dropped by a NAT or
+  firewall is replaced in about 90 seconds instead of hanging. HTTP/2 and
+  WebTransport do not send keepalives in this version; a dead connection there is
+  noticed only when the transport itself fails.
+- **Transports.** Works over `ws://`, `wss://`, `http://`, `https://`, `wt://`
+  and `wts://`, and with `--mode ws`. The automated tests run tun mode end to end
+  over the websocket (both modes), HTTP/2 and WebTransport transports without TLS;
+  the TLS variants use the same code paths but have no tun-specific test.
 - **Not yet supported.** Routing the whole host's traffic (a default route) through
   the tunnel is not supported yet. Only the networks you list as `route` are
   routed.
@@ -152,7 +164,9 @@ tunnel token, for compatibility with Rust. Anyone who can reach a server started
 with `--enable-tun` can open tun sessions, limited only by the restriction rules.
 Treat the rules as the access control: allow only the networks that should be
 reachable, use `--mode ws` with a `jwt_secret` where you can, and use TLS (and
-mTLS, with a rule that matches `ClientCommonName`) on the listener.
+mTLS, with a rule that matches `ClientCommonName`) on the listener. A `wss://` or
+`https://` listener address does not by itself enable TLS; the server needs
+`--tls-certificate` and `--tls-private-key`.
 
 ## Troubleshooting
 
