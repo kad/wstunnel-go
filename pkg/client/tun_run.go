@@ -157,7 +157,7 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 		}
 	}
 
-	dev, err := deps.openDevice(spec.Name)
+	dev, err := deps.openDevice(spec.Name, spec.FullTunnel)
 	if err != nil {
 		return nil, err
 	}

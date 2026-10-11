@@ -37,6 +37,8 @@ type fakeHost struct {
 	host    *tuntest.Host
 	devPeer tun.PacketConn
 	opened  int
+	// exclusive records the exclusive flag of every openDevice call.
+	exclusive []bool
 
 	mu         sync.Mutex
 	resolvectl [][]string
@@ -58,10 +60,14 @@ func newFakeHost(t *testing.T, serverHost string) *fakeHost {
 	f.deps = tunDeps{
 		// Without CAP_NET_ADMIN the real SO_MARK fails, which a full tunnel now
 		// treats as fatal for the dial; the fake host pretends it works.
-		setMark:    func(uintptr, uint32) error { return nil },
-		openDevice: func(string) (tunDevice, error) { f.opened++; return fakeDevice{devEnd, "wst0"}, nil },
-		deviceMTU:  func(string) (int, error) { return 1500, nil },
-		nl:         f.nl,
+		setMark: func(uintptr, uint32) error { return nil },
+		openDevice: func(_ string, exclusive bool) (tunDevice, error) {
+			f.opened++
+			f.exclusive = append(f.exclusive, exclusive)
+			return fakeDevice{devEnd, "wst0"}, nil
+		},
+		deviceMTU: func(string) (int, error) { return 1500, nil },
+		nl:        f.nl,
 		lookPath: func(file string) (string, error) {
 			if f.noResolve {
 				return "", errors.New("not found")
@@ -974,5 +980,28 @@ func TestFullTunnelFallsBackFromABlackHoleAddress(t *testing.T) {
 				"tun://wst0?route=default&routing=pin")
 			waitEcho(t, f.host, "after the black hole")
 		})
+	}
+}
+
+// The existence check races with a persistent device created before the open;
+// the open itself must therefore be exclusive for a full tunnel.
+func TestFullTunnelOpensTheDeviceExclusively(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	for arg, want := range map[string]bool{
+		"tun://wst0?route=default&routing=fwmark": true,
+		"tun://?route=default&routing=fwmark":     true,
+		"tun://wst0?route=10.0.0.0/8":             false,
+	} {
+		f := newFakeHost(t, host)
+		c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+		h, err := c.startTun(context.Background(), mustSpec(t, arg), f.deps, fastRetry)
+		if err != nil {
+			t.Fatalf("%s: %v", arg, err)
+		}
+		_ = h.Close()
+		if len(f.exclusive) != 1 || f.exclusive[0] != want {
+			t.Errorf("%s: exclusive flags = %v, want [%v]", arg, f.exclusive, want)
+		}
 	}
 }

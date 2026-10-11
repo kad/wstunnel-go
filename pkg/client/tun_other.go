@@ -9,7 +9,7 @@ import (
 
 var errTunUnsupported = errors.New("tun mode is only supported on Linux")
 
-func openTunDevice(string) (tunDevice, error) { return nil, errTunUnsupported }
+func openTunDevice(string, bool) (tunDevice, error) { return nil, errTunUnsupported }
 
 func deviceMTU(string) (int, error) { return 0, errTunUnsupported }
 
