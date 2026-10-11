@@ -4,7 +4,9 @@ Tun mode carries IP packets instead of single TCP or UDP streams. The client
 creates a TUN device and routes whole subnets into it; the server terminates the
 packets in a userspace TCP/IP stack and opens an ordinary outbound connection for
 each TCP connection and UDP association it sees. Any program on the client host
-can then reach those networks without being configured to use a proxy.
+can then reach those networks without being configured to use a proxy. With
+`route=default` the whole host's IPv4 and IPv6 traffic goes through the tunnel
+(see [Full tunnel](#full-tunnel-routedefault)).
 
 Tun mode is a **Go-only extension**. The Rust `wstunnel` does not implement it
 and rejects the `Tun` claim, so both ends must be `wstunnel-go`. Ordinary tunnels
@@ -15,6 +17,8 @@ are unaffected and still interoperate with Rust.
 - A Linux client. Other platforms report `tun mode is only supported on Linux`.
 - On the client, either `CAP_NET_ADMIN` (usually root), or a persistent TUN device
   that an administrator created for your user (see [Without root](#without-root)).
+  The full tunnel (`route=default`) installs rules and routes itself, so it always
+  needs `CAP_NET_ADMIN`; that is the only capability it needs.
 - A server started with `--enable-tun`, and a restriction rule that allows it (see
   [Server setup](#server-setup)).
 
@@ -47,16 +51,18 @@ ip route show 10.0.0.0/8         # 10.0.0.0/8 dev wst0 scope link
 ## The `tun://` argument
 
 ```
-tun://[NAME]?addr=PREFIX&route=PREFIX&mtu=N&configure=BOOL
+tun://[NAME]?addr=PREFIX&route=PREFIX|default&routing=auto|fwmark|pin&dns=ADDR&mtu=N&configure=BOOL
 ```
 
 | Option | Default | Meaning |
 |---|---|---|
 | `NAME` | kernel picks `tunN` | Interface name, at most 15 characters. Required with `configure=false`. |
 | `addr` | `198.18.0.1/32` and `fd77:7473::1/128` | Address assigned to the device. Repeatable, IPv4 or IPv6. |
-| `route` | none | Network routed into the device. Repeatable, IPv4 or IPv6. |
+| `route` | none | Network routed into the device. Repeatable, IPv4 or IPv6. `default` routes all IPv4 and IPv6 traffic and must be the only `route` (see [Full tunnel](#full-tunnel-routedefault)). |
+| `routing` | `auto` | Only with `route=default`: how the tunnel's own traffic avoids the tunnel. `auto`, `fwmark` or `pin`. |
+| `dns` | none | Only with `route=default`: DNS server (an IP address, repeatable) set on the device through `resolvectl`. Needs `configure=true`. |
 | `mtu` | `1500` | Device MTU, `1280` to `65535`. Sent to the server, which uses the same value. |
-| `configure` | `true` | `false` attaches to an existing device and changes nothing. |
+| `configure` | `true` | `false` attaches to an existing device and changes nothing. Not allowed with `route=default` or `dns`. |
 
 Notes:
 
@@ -66,6 +72,11 @@ Notes:
   If the host has IPv6 disabled, the default IPv6 address is skipped with a
   warning; an IPv6 address you ask for explicitly is required.
 - Quote the argument in a shell, because `&` is special.
+- The parser is strict: an empty `mtu=`, `configure=` or `routing=`, a repeated
+  `mtu`, `configure` or `routing`, a device name with control characters, an
+  IPv4-mapped IPv6 prefix such as `::ffff:10.0.0.0/104`, an `addr` of `/0` and a
+  `;` separator are all errors. The `tun://` scheme must be lower case. Option
+  names and values (`routing=pin`, not `PIN`) are case-sensitive.
 - Only one `tun://` tunnel is allowed per client process, and it works with `-L`
   only. In a YAML config file, list it under `local_to_remote`:
 
@@ -79,9 +90,122 @@ Notes:
 - A route that contains the tunnel server's own address is refused at startup:
   the packets that carry the tunnel would be routed back into it and never leave
   the host. Route the networks you want through the tunnel, not the server itself.
+  The server name is resolved again before every reconnect and the check is
+  repeated, so a DNS answer that moves the server into a routed network stops the
+  reconnect (traffic stays dropped) instead of looping. If the name cannot be
+  resolved at that moment the last addresses that passed the check are used.
 - An `addr` shorter than a host prefix (for example `198.18.0.1/24`) also makes
   the kernel route that whole network into the device, so the same check applies
   to it. The defaults, `/32` and `/128`, are right for almost everyone.
+
+## Full tunnel (`route=default`)
+
+`route=default` sends all of the host's IPv4 and IPv6 traffic through the tunnel.
+Routes that are more specific than the default (your LAN, a VPN, the loopback
+network) keep working as before. It needs `configure=true` and `CAP_NET_ADMIN`,
+and `route=default` cannot be combined with other `route=` values.
+
+The server rule must admit the destinations you want, for example `cidr:
+[0.0.0.0/0, ::/0]`; the built-in deny list (loopback, link-local, metadata
+addresses) still applies. See [Server setup](#server-setup).
+
+The hard part is the tunnel's own connection to the server: if the default route
+points at the TUN, that connection would be routed into the tunnel too. There are
+two ways around it, chosen by `routing=`.
+
+| `routing` | How the tunnel's own traffic bypasses the TUN |
+|---|---|
+| `fwmark` | The client marks its own sockets (and its own DNS lookups of the server name) with a firewall mark. The mark is `--socket-so-mark` if you set it, otherwise `0x7774` (30580). The same number is the routing table id. Table 30580 holds `default dev <tun>` for IPv4 and IPv6. Two rules per family: priority 32764 `lookup main suppress_prefixlength 0` (so more specific main-table routes still win) and priority 32765 `not fwmark <mark> lookup <mark>`. |
+| `pin` | A host route (`/32` or `/128`) to every address of the server through the real gateway and device, found with a route lookup that ignores the tunnel's own routes, plus the four halves `0.0.0.0/1`, `128.0.0.0/1`, `::/1` and `8000::/1` through the TUN, which override the default route without removing it. The pins are deleted and looked up again before every reconnect, so a changed gateway or a changed DNS answer is followed. |
+| `auto` (default) | `fwmark`, unless the reverse-path filter would break it, then `pin`. |
+
+### Why there are two modes: rp_filter
+
+Measured with three network namespaces (client and app, a gateway holding the
+server that does not forward, a target reachable only through the server), with
+the server reached through the client's default route, which is the normal case:
+
+| Mode | `rp_filter` off or loose (0, 2) | `rp_filter` strict (1) |
+|---|---|---|
+| `fwmark` (rules above, own sockets marked) | works | **fails**: the server's replies are dropped, the session never comes up |
+| `pin` | works | works |
+
+Under strict filtering the kernel checks that a packet's source would be routed
+back out of the interface it arrived on. That check ignores the socket mark, so
+for the server's reply it consults the rule that sends unmarked traffic to the
+TUN, finds the TUN, and drops the reply. A host route to the server hides the
+problem (the check then finds that route), which is why `pin` is immune.
+
+`auto` therefore reads the effective setting for the route to the server, which
+is the larger of `net.ipv4.conf.all.rp_filter` and the egress interface's own
+setting (the kernel takes the maximum), and picks `pin` when it is `1`. IPv6 has
+no such sysctl. If the setting cannot be read, `auto` assumes it is strict and
+picks `pin`, because `pin` works either way.
+
+An explicit `routing=fwmark` with strict filtering is refused at startup, before
+anything is changed:
+
+```
+routing=fwmark cannot work here: strict reverse-path filtering (rp_filter=1) is
+active for the route to the tunnel server 192.0.2.10, and it would drop the
+server's replies; use routing=pin or routing=auto, or relax it with:
+sysctl -w net.ipv4.conf.all.rp_filter=2 (and the same for the egress interface,
+whichever is higher counts)
+```
+
+If the setting cannot be read, an explicit `fwmark` starts with a warning, since
+it cannot be shown to fail.
+
+No sysctl is changed by the client.
+
+### DNS
+
+`dns=ADDR` (repeatable, IP addresses without a zone) makes the client run
+
+```
+resolvectl dns <tun> ADDR...
+resolvectl domain <tun> '~.'
+```
+
+so systemd-resolved sends every name to those servers over the tunnel. Without
+`resolvectl` the client warns and leaves DNS alone. It never edits
+`/etc/resolv.conf`. systemd-resolved forgets the settings when the device goes
+away; the client also runs `resolvectl revert <tun>` on exit, which only matters
+for a device that outlives it.
+
+Resolving the tunnel server's own name is a chicken-and-egg problem while the
+tunnel is down. In `fwmark` mode the client resolves it through a resolver whose
+sockets carry the mark, and in every mode it falls back to the last addresses it
+knew when the lookup fails, so a reconnect works without DNS. A server given by
+IP address avoids the question. If the resolver on the host is a local stub
+(systemd-resolved at `127.0.0.53`) that `~.` now sends through the tunnel, the
+name lookup depends on the tunnel being up; prefer an IP address or accept the
+fallback.
+
+### Cleanup and crash recovery
+
+On SIGINT, SIGTERM or a fatal device error the client removes the rules, the
+table 30580 routes and the pinned host routes it installed, then exits (the TUN
+device and its `/1` and default routes disappear with the device). A forced kill
+(SIGKILL, power loss) cannot clean up. What it leaves is harmless: with the device
+gone, table 30580 is empty, so lookups fall through to the main table and the host
+keeps its normal routing; a stale pin is a correct route to the server. The next
+start deletes the leftover rules at priorities 32764 and 32765 before installing
+its own (it logs `Removed a stale rule`). Nothing is stored on disk.
+
+### Things to know
+
+- `connection_min_idle` cannot be combined with `route=default`: pooled
+  connections are opened before the routing exists and would be cut off. The
+  client refuses to start.
+- The mark is also the routing table id, so `--socket-so-mark` must not be `0`,
+  `253`, `254` or `255` with `fwmark` (the client refuses). Any other tunnels the
+  same client process runs carry the same mark.
+- `pin` needs a route lookup per server address before each connect. It finds the
+  route in the main routing table; setups that steer the server's traffic with
+  other policy rules are not followed.
+- While the server is unreachable, traffic is dropped, not sent out of the
+  default route; the namespace tests assert this with a packet sniffer.
 
 ## Without root
 
@@ -320,7 +444,60 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 sudo systemctl enable --now wstunnel-go-tun-client@tun-client
 ```
 
-To run the client without that capability, create a persistent device as in
+### Client: full tunnel from one command line
+
+Every option spelled out; `/` in a prefix is written as `%2F`, and the whole
+argument is quoted:
+
+```bash
+sudo wstunnel-go client \
+  -L 'tun://wst0?addr=198.18.0.1%2F32&addr=fd77:7473::1%2F128&mtu=1400&route=default&routing=auto&dns=1.1.1.1&dns=2606:4700:4700::1111&configure=true' \
+  --http-upgrade-path-prefix v1 \
+  wss://tunnel.example.com
+```
+
+The short form with the defaults is `-L 'tun://wst0?route=default'`, and
+`-L 'tun://wst0?route=default&routing=auto&dns=1.1.1.1'` adds a DNS server. The
+server needs a rule that admits the destinations, for example `cidr: [0.0.0.0/0,
+::/0]` next to the `Tun` entry.
+
+### Client: the same full tunnel from a config file
+
+Save this as `/etc/wstunnel-go/tun-client-full.yaml` (also in
+`packaging/examples/tun-client-full.yaml`):
+
+```yaml
+mode: client
+log_lvl: INFO
+client:
+  remote_addr: "wss://tunnel.example.com"
+  http_upgrade_path_prefix: v1
+  local_to_remote:
+    - "tun://wst0?addr=198.18.0.1%2F32&addr=fd77:7473::1%2F128&mtu=1400&route=default&routing=auto&dns=1.1.1.1&dns=2606:4700:4700::1111&configure=true"
+```
+
+```bash
+sudo wstunnel-go --config /etc/wstunnel-go/tun-client-full.yaml client
+```
+
+As a service, the same unit as above runs it; only the instance name changes:
+
+```bash
+sudo systemctl enable --now wstunnel-go-tun-client@tun-client-full
+```
+
+The full tunnel needs no capability beyond `CAP_NET_ADMIN`, which the unit
+already grants: the policy rules and routes are installed over netlink (that
+needs `CAP_NET_ADMIN`), and setting the firewall mark on the client's own sockets
+(`SO_MARK`) needs `CAP_NET_ADMIN` as well (newer kernels also accept
+`CAP_NET_RAW`). `dns=` runs `resolvectl`, which asks systemd-resolved over D-Bus;
+that works for a service running as root. With `User=` set to an unprivileged
+user, systemd-resolved's polkit policy decides whether the call is allowed.
+`Restart=always` brings the tunnel back after a fatal device error, and
+systemd's SIGTERM on stop makes the client remove its rules before it exits.
+
+To run a split-route client (not the full tunnel, which always needs it)
+without `CAP_NET_ADMIN`, create a persistent device as in
 [Without root](#without-root), use `tun://wst0?configure=false` in the file, and
 in a drop-in (`systemctl edit wstunnel-go-tun-client@tun-client`) clear the
 capabilities and name a user that owns the device:
@@ -345,20 +522,30 @@ CapabilityBoundingSet=
   the client pings every `--websocket-ping-frequency` (30 seconds by default) and
   drops and re-establishes the session if nothing at all arrives from the server
   within three ping intervals, so a connection silently dropped by a NAT or
-  firewall is replaced in about 90 seconds instead of hanging. HTTP/2 does not
-  send keepalives in this version; a dead connection there is noticed only when
-  the transport itself fails. WebTransport sends QUIC keepalives every 15
+  firewall is replaced in about 90 seconds instead of hanging. Over HTTP/2
+  (`http://`, `https://`) the transport does the same with the same interval: it
+  sends an HTTP/2 PING after one interval without any frame and closes the
+  connection if the PING is not answered within two more, and the session is then
+  re-established. Other HTTP/2 tunnels (`-L tcp://...`) are not changed.
+  WebTransport sends QUIC keepalives every 15
   seconds, so an idle session stays up, and it does not need the websocket
   watchdog because QUIC ends a connection that stops answering.
-  `--websocket-ping-frequency 0` turns the websocket watchdog off.
+  `--websocket-ping-frequency 0` turns the websocket and HTTP/2 detection off.
+- **Exit and signals.** On SIGINT or SIGTERM the client closes the tunnel, removes
+  everything it installed (see [Cleanup](#cleanup-and-crash-recovery)) and exits
+  0. If the TUN device fails (for example it is deleted under the client), the
+  client logs the error, cleans up and exits non-zero, so a service manager
+  restarts it. Programs that embed the client call `StartTun`, which returns a
+  handle with `Done`, `Err` and `Close` and never exits the process.
 - **Transports.** Works over `ws://`, `wss://`, `http://`, `https://`, `wt://`
   and `wts://`, and with `--mode ws`. The automated tests run tun mode end to end
-  over the websocket (both modes), HTTP/2 and WebTransport transports without TLS;
-  the TLS variants use the same code paths but have no tun-specific test.
-- **Not yet supported.** Routing the whole host's traffic (a default route) through
-  the tunnel is not supported yet. Only the networks you list as `route` are
-  routed. A `/0` route and the two `/1` halves (`0.0.0.0/1` with `128.0.0.0/1`,
-  `::/1` with `8000::/1`) are rejected at startup until full-tunnel support exists.
+  over the websocket (both modes), HTTP/2 and WebTransport transports without TLS
+  in network namespaces, and over `wss://` and `https://` with a self-signed
+  certificate and over an IPv6 server address in process. WebTransport with TLS
+  has no tun-specific test.
+- **Whole-host routes.** A `/0` route and the two `/1` halves (`0.0.0.0/1` with
+  `128.0.0.0/1`, `::/1` with `8000::/1`) given as `route=` values are rejected
+  at startup; write `route=default` instead.
 - **Performance.** Packets are read and written one at a time, without kernel
   offloads, so very high throughput is not a goal of this version.
 
@@ -379,6 +566,13 @@ mTLS, with a rule that matches `ClientCommonName`) on the listener. A `wss://` o
 |---|---|
 | `403 Forbidden (is the server started with --enable-tun, ...)` | The server lacks `--enable-tun`, or no rule allows protocol `Tun` for your path or client certificate. |
 | `route ... contains the tunnel server ...` | A `route` covers the server's address. Narrow the route. |
+| `route ... would capture all IPv4 traffic` | A `/0` or `/1` route. Use `route=default`. |
+| `routing=fwmark cannot work here: strict reverse-path filtering` | Use `routing=pin` or `routing=auto`, or relax `rp_filter`. |
+| With `route=default` the session never comes up, `routing=fwmark`, rp_filter unreadable | Strict `rp_filter` may be dropping the server's replies. Use `routing=pin`. |
+| `route=default cannot be combined with connection_min_idle` | Remove `connection_min_idle` from the config. |
+| `--socket-so-mark N cannot be used for a full tunnel` | `N` is `0`, `253`, `254` or `255`, which are not usable as a routing table id. |
+| `tunnel server address never resolved` (repeated, full tunnel) | The name could not be resolved and there is no earlier address to fall back on; use an IP address. |
+| Rules at priority 32764 or 32765 after a crash | Harmless; the next start removes them. To remove them by hand: `ip rule del pref 32764; ip rule del pref 32765` (and `ip -6 ...`). |
 | `cannot create or attach tun device ... CAP_NET_ADMIN` | Run as root, or attach to a persistent device with `configure=false`. |
 | `tun device ... is already attached by another process` | A persistent device can be used by one process at a time. Stop the other client or use another device. |
 | `configure wst0: set mtu ...: operation not permitted` | You asked the client to configure the device without `CAP_NET_ADMIN`. Use `configure=false`. |

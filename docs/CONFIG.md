@@ -125,12 +125,15 @@ client:
 - `http://127.0.0.1:8080?login=proxy&password=secret`: local HTTP CONNECT proxy requiring credentials.
 - `unix:///tmp/wstunnel.sock:/var/run/docker.sock`: local unix socket listener forwarding to a unix socket target.
 - `tun://wst0?addr=198.18.0.1/32&route=10.0.0.0/8`: Linux TUN device that routes `10.0.0.0/8` through the server (Go-only; the server needs `enable_tun`). See [TUN.md](TUN.md) for the options and limits.
+- `tun://wst0?route=default&routing=auto&dns=1.1.1.1`: full tunnel, all IPv4 and IPv6 traffic through the server. `route=default` must be the only `route`; `routing=auto|fwmark|pin` (default `auto`) chooses how the tunnel's own connection avoids the TUN, and `dns=ADDR` (repeatable) sets the resolver through `resolvectl`. Both are valid only with `route=default`. `configure=false` is not allowed with them, and `connection_min_idle` cannot be combined with `route=default`. See [Full tunnel in TUN.md](TUN.md#full-tunnel-routedefault).
 - `tcp://9090:localhost:443` under `remote_to_local`: reverse TCP tunnel. The current Go implementation uses the target host/port as both the server-side listener address and the client-side dial target, so it does not yet support a separate server listener address mapped to a different local target.
 
 ### Current client limitations
 
 - Reverse UDP, reverse SOCKS5, and reverse HTTP proxy are not implemented in this Go version yet. Do not place those tunnel types in `remote_to_local`.
 - `tun://` works only under `local_to_remote`, only once per client, and only on Linux.
+- With `route=default`, `socket_so_mark` (if set) is the firewall mark and routing table id of the tunnel's own traffic in `fwmark` mode; without it the client uses `0x7774`. It must not be `0`, `253`, `254` or `255`.
+- `websocket_ping_frequency` also drives dead-peer detection for HTTP/2 tun sessions (`0` disables it).
 
 ## Server configuration
 

@@ -82,7 +82,8 @@ type netConfigurer interface {
 //
 // Loop guard: if a route contains the tunnel server's address, the packets that
 // carry the tunnel would themselves be routed into the TUN and never leave the
-// host. Full-tunnel routing (a later milestone) handles that case properly.
+// host. route=default (planFullTunnel) handles that case with fwmark or pin
+// routing instead of this guard.
 func planTunNetConfig(spec *TunSpec, serverAddrs []netip.Addr) ([]netOp, error) {
 	if !spec.Configure {
 		return nil, nil

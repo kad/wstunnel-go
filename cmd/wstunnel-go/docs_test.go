@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
@@ -297,5 +298,111 @@ func TestPackagedExamplesLoad(t *testing.T) {
 			continue
 		}
 		checkDocumentedConfig(t, f, data)
+	}
+}
+
+// tunArgOf returns the single tun:// argument of a client config.
+func tunArgOf(t *testing.T, where string, cfg *FullConfig) string {
+	t.Helper()
+	if cfg.Client == nil || len(cfg.Client.LocalToRemote) != 1 || !client.IsTunArg(cfg.Client.LocalToRemote[0]) {
+		t.Fatalf("%s: want a client with exactly one tun:// tunnel, got %+v", where, cfg.Client)
+	}
+	return cfg.Client.LocalToRemote[0]
+}
+
+// The full-tunnel deployment examples describe one tunnel three ways: every
+// option on the command line, the same in a config file, and the packaged
+// example. They must really be the same tunnel, and a full one.
+func TestFullTunnelDeploymentExamplesAreTheSameTunnel(t *testing.T) {
+	// 1. The command line: the bash block of TUN.md that uses route=default
+	// together with --http-upgrade-path-prefix (the all-options example).
+	var cmdArg, cmdPrefix string
+	for _, block := range docBlocks(t, "../../docs/TUN.md", "bash") {
+		for _, line := range commandLines(block) {
+			if !strings.Contains(line, "route=default") || !strings.Contains(line, "--http-upgrade-path-prefix") {
+				continue
+			}
+			words := shellWords(line)
+			for i, w := range words {
+				switch w {
+				case "-L":
+					cmdArg = words[i+1]
+				case "--http-upgrade-path-prefix":
+					cmdPrefix = words[i+1]
+				}
+			}
+		}
+	}
+	if cmdArg == "" || cmdPrefix == "" {
+		t.Fatal("docs/TUN.md has no all-options full-tunnel command line")
+	}
+
+	// 2. The YAML block of TUN.md and 3. the packaged example.
+	var docCfg *FullConfig
+	for _, block := range docBlocks(t, "../../docs/TUN.md", "yaml") {
+		if strings.HasPrefix(block, "mode: client") && strings.Contains(block, "route=default") && strings.Contains(block, "dns=") {
+			cfg, err := strictConfig([]byte(block))
+			if err != nil {
+				t.Fatalf("docs/TUN.md full-tunnel yaml: %v", err)
+			}
+			docCfg = cfg
+		}
+	}
+	if docCfg == nil {
+		t.Fatal("docs/TUN.md has no full-tunnel yaml example")
+	}
+	raw, err := os.ReadFile("../../packaging/examples/tun-client-full.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pkgCfg, err := strictConfig(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	want, err := client.ParseTunArg(cmdArg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The example must exercise every option, not only the defaults.
+	if !want.FullTunnel || want.Routing != "auto" || len(want.DNS) != 2 || len(want.Addrs) != 2 || want.DefaultAddrs ||
+		want.MTU != 1400 || !want.Configure || want.Name != "wst0" {
+		t.Fatalf("the command-line example is %+v; it should set name, both addresses, mtu, route=default, routing, two dns servers and configure", want)
+	}
+	for where, cfg := range map[string]*FullConfig{"docs/TUN.md yaml": docCfg, "packaging/examples/tun-client-full.yaml": pkgCfg} {
+		got, err := client.ParseTunArg(tunArgOf(t, where, cfg))
+		if err != nil {
+			t.Fatalf("%s: %v", where, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("%s describes a different tunnel than the command line:\n got %+v\nwant %+v", where, got, want)
+		}
+		if cfg.Client.PathPrefix != cmdPrefix {
+			t.Errorf("%s: http_upgrade_path_prefix = %q, the command line uses %q", where, cfg.Client.PathPrefix, cmdPrefix)
+		}
+		if cfg.Client.ServerURL != docCfg.Client.ServerURL {
+			t.Errorf("%s: remote_addr = %q, want %q", where, cfg.Client.ServerURL, docCfg.Client.ServerURL)
+		}
+	}
+}
+
+// The unit that runs the full tunnel must grant exactly the capability the docs
+// say is enough, and the docs must say so.
+func TestTunClientUnitGrantsOnlyNetAdmin(t *testing.T) {
+	raw, err := os.ReadFile("../../packaging/systemd/wstunnel-go-tun-client@.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, line := range []string{"AmbientCapabilities=CAP_NET_ADMIN", "CapabilityBoundingSet=CAP_NET_ADMIN"} {
+		if !strings.Contains(string(raw), "\n"+line+"\n") {
+			t.Errorf("the tun client unit lacks the exact line %q", line)
+		}
+	}
+	doc, err := os.ReadFile("../../docs/TUN.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(doc), "needs no capability beyond `CAP_NET_ADMIN`") {
+		t.Error("docs/TUN.md no longer says the full tunnel needs only CAP_NET_ADMIN")
 	}
 }
