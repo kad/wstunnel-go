@@ -96,8 +96,9 @@ For a tun (packet tunnel) client or server, including a systemd unit that grants
 `CAP_NET_ADMIN` to the client and the Caddy variants, see
 [Deployment in docs/TUN.md](docs/TUN.md#deployment). That section also has the
 full-tunnel variants (`route=default`): one command line, the same tunnel from a
-YAML file, and the systemd unit; the full tunnel needs no capability beyond
-`CAP_NET_ADMIN`.
+YAML file, and the systemd unit. The routing and the socket mark need
+`CAP_NET_ADMIN` and nothing else; `dns=` runs `resolvectl`, whose permission under
+that capability alone depends on your systemd/polkit setup (see the TUN.md notes).
 
 ### Windows Task Scheduler Integration
 

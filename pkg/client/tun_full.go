@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // tunDeps are the host interactions of StartTun. Production uses the kernel;
@@ -27,7 +28,12 @@ type tunDeps struct {
 	nl        netConfigurer
 	lookPath  func(file string) (string, error)
 	runCmd    func(ctx context.Context, name string, args ...string) error
+	// dnsTimeout bounds each resolvectl command; 0 means defaultDNSTimeout.
+	dnsTimeout time.Duration
 }
+
+// defaultDNSTimeout is the deadline of one resolvectl command.
+const defaultDNSTimeout = 10 * time.Second
 
 func defaultTunDeps() tunDeps {
 	return tunDeps{
@@ -36,11 +42,15 @@ func defaultTunDeps() tunDeps {
 			_, err := net.InterfaceByName(name)
 			return err == nil
 		},
-		deviceMTU: deviceMTU,
-		nl:        newNetConfigurer(),
-		lookPath:  exec.LookPath,
+		deviceMTU:  deviceMTU,
+		nl:         newNetConfigurer(),
+		lookPath:   exec.LookPath,
+		dnsTimeout: defaultDNSTimeout,
 		runCmd: func(ctx context.Context, name string, args ...string) error {
-			out, err := exec.CommandContext(ctx, name, args...).CombinedOutput()
+			cmd := exec.CommandContext(ctx, name, args...)
+			// Kill on the deadline, and do not wait for pipes a stuck child holds.
+			cmd.WaitDelay = 2 * time.Second
+			out, err := cmd.CombinedOutput()
 			if err != nil {
 				return fmt.Errorf("%w: %s", err, out)
 			}
@@ -215,6 +225,12 @@ func (p *pinSet) clear() error {
 // configureDNS points the device's resolver at the given servers through
 // systemd-resolved, and routes every domain there. /etc/resolv.conf is never
 // edited. Without resolvectl it only warns.
+//
+// Every resolvectl command has a deadline (deps.dnsTimeout), and a failure or
+// timeout is only a warning: DNS is a convenience, a resolver that hangs must
+// not stop the tunnel. The caller runs this before the routing captures the
+// host, so the wait never happens while traffic is already routed into the
+// tunnel.
 func configureDNS(ctx context.Context, deps tunDeps, ifname string, servers []netip.Addr) (revert func() error) {
 	if len(servers) == 0 {
 		return func() error { return nil }
@@ -224,21 +240,30 @@ func configureDNS(ctx context.Context, deps tunDeps, ifname string, servers []ne
 		slog.Warn("dns= was requested but resolvectl is not installed; DNS settings were not changed. Point your resolver at the servers yourself", "dns", servers)
 		return func() error { return nil }
 	}
+	timeout := deps.dnsTimeout
+	if timeout <= 0 {
+		timeout = defaultDNSTimeout
+	}
+	run := func(ctx context.Context, args ...string) error {
+		ctx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		return deps.runCmd(ctx, path, args...)
+	}
 	args := []string{"dns", ifname}
 	for _, s := range servers {
 		args = append(args, s.String())
 	}
-	if err := deps.runCmd(ctx, path, args...); err != nil {
-		slog.Warn("resolvectl dns failed; DNS settings were not changed", "err", err)
+	if err := run(ctx, args...); err != nil {
+		slog.Warn("resolvectl dns failed or timed out; DNS settings were not changed. Set the DNS servers yourself, or run the client as a user systemd-resolved allows (polkit), or omit dns=", "err", err)
 		return func() error { return nil }
 	}
-	if err := deps.runCmd(ctx, path, "domain", ifname, "~."); err != nil {
-		slog.Warn("resolvectl domain failed; the DNS servers are set but not used for all names", "err", err)
+	if err := run(ctx, "domain", ifname, "~."); err != nil {
+		slog.Warn("resolvectl domain failed or timed out; the DNS servers are set but not used for all names", "err", err)
 	}
 	return func() error {
 		// systemd-resolved forgets the settings when the link goes away; revert
 		// explicitly for the case where it did not (a device that outlives us).
-		if err := deps.runCmd(context.WithoutCancel(ctx), path, "revert", ifname); err != nil {
+		if err := run(context.WithoutCancel(ctx), "revert", ifname); err != nil {
 			slog.Debug("resolvectl revert failed (the link is probably gone already)", "err", err)
 		}
 		return nil

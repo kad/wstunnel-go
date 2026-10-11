@@ -40,6 +40,8 @@ type fakeHost struct {
 	mu         sync.Mutex
 	resolvectl [][]string
 	noResolve  bool
+	// resolvectlHook, when set, decides the result of each resolvectl call.
+	resolvectlHook func(ctx context.Context, args []string) error
 }
 
 func newFakeHost(t *testing.T, serverHost string) *fakeHost {
@@ -65,10 +67,15 @@ func newFakeHost(t *testing.T, serverHost string) *fakeHost {
 			}
 			return "/usr/bin/" + file, nil
 		},
-		runCmd: func(_ context.Context, name string, args ...string) error {
+		runCmd: func(ctx context.Context, name string, args ...string) error {
 			f.mu.Lock()
-			defer f.mu.Unlock()
 			f.resolvectl = append(f.resolvectl, append([]string{name}, args...))
+			hook := f.resolvectlHook
+			f.mu.Unlock()
+			_ = f.nl.record("resolvectl " + args[0])
+			if hook != nil {
+				return hook(ctx, args)
+			}
 			return nil
 		},
 	}
@@ -760,5 +767,105 @@ func TestPlainSocketMarkWebTransportStaysBestEffort(t *testing.T) {
 	_, err := w.dialMarkedAddr(ctx, "127.0.0.1:9", &cryptotls.Config{InsecureSkipVerify: true}, newWebTransportQUICConfig())
 	if err != nil && strings.Contains(err.Error(), "SO_MARK") {
 		t.Fatalf("a failed mark must not fail a non-tun dial: %v", err)
+	}
+}
+
+func TestFullTunnelConfiguresDNSBeforeCapturingTheHost(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"},
+		"tun://wst0?route=default&routing=fwmark&dns=1.1.1.1")
+	calls := f.nl.snapshot()
+	up, dns, domain, route, rule := indexOf(calls, "up wst0"), indexOf(calls, "resolvectl dns"), indexOf(calls, "resolvectl domain"),
+		indexOf(calls, "tableroute"), indexOf(calls, "rule add")
+	if up < 0 || dns < 0 || domain < 0 || route < 0 || rule < 0 {
+		t.Fatalf("missing steps in:\n%s", strings.Join(calls, "\n"))
+	}
+	if up >= dns || dns >= domain || domain >= route || route >= rule {
+		t.Fatalf("DNS must be configured after the link is up and before any route or rule captures the host:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestFullTunnelHungResolvectlIsBoundedAndNotFatal(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.deps.dnsTimeout = 100 * time.Millisecond
+	f.resolvectlHook = func(ctx context.Context, _ []string) error {
+		<-ctx.Done() // a resolver that never answers
+		return ctx.Err()
+	}
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	begin := time.Now()
+	_, h := startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"},
+		"tun://wst0?route=default&routing=fwmark&dns=1.1.1.1")
+	if d := time.Since(begin); d > 3*time.Second {
+		t.Errorf("startup took %v with a hung resolvectl", d)
+	}
+	waitEcho(t, f.host, "dns hung")
+	begin = time.Now()
+	if err := h.Close(); err != nil {
+		t.Fatalf("a hung resolvectl must not make Close fail: %v", err)
+	}
+	if d := time.Since(begin); d > 3*time.Second {
+		t.Errorf("Close took %v with a hung resolvectl", d)
+	}
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "resolvectl") {
+		t.Errorf("no warning about resolvectl in %q", buf.String())
+	}
+	f.nl.mu.Lock()
+	defer f.nl.mu.Unlock()
+	if len(f.nl.existingRules) != 0 {
+		t.Errorf("rules left after Close: %v", f.nl.existingRules)
+	}
+}
+
+func TestFullTunnelRevertsDNSWhenTheRoutingCannotBeInstalled(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.nl.failOn = "rule add ipv4 pref 32761 not fwmark 0x7774 table 30580"
+	f.nl.failErr = syscall.EPERM
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	if _, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark&dns=1.1.1.1"), f.deps, fastRetry); err == nil {
+		t.Fatal("startTun succeeded although a rule could not be installed")
+	}
+	got := f.resolvectlCalls()
+	if len(got) == 0 || !slices.Equal(got[len(got)-1], []string{"/usr/bin/resolvectl", "revert", "wst0"}) {
+		t.Fatalf("resolvectl calls = %v, want a final revert", got)
+	}
+}
+
+func TestConfigureDNSEachCommandHasADeadline(t *testing.T) {
+	if got := defaultTunDeps().dnsTimeout; got != 10*time.Second {
+		t.Errorf("default resolvectl timeout = %v, want 10s", got)
+	}
+	var deadlines []time.Duration
+	deps := tunDeps{
+		lookPath: func(string) (string, error) { return "/bin/resolvectl", nil },
+		runCmd: func(ctx context.Context, _ string, _ ...string) error {
+			dl, ok := ctx.Deadline()
+			if !ok {
+				t.Error("resolvectl ran without a deadline")
+			}
+			deadlines = append(deadlines, time.Until(dl))
+			return nil
+		},
+		dnsTimeout: 2 * time.Second,
+	}
+	revert := configureDNS(context.Background(), deps, "wst0", []netip.Addr{netip.MustParseAddr("1.1.1.1")})
+	_ = revert()
+	if len(deadlines) != 3 {
+		t.Fatalf("%d commands, want dns, domain and revert", len(deadlines))
+	}
+	for _, d := range deadlines {
+		if d <= 0 || d > 2*time.Second {
+			t.Errorf("deadline in %v, want within 2s", d)
+		}
 	}
 }

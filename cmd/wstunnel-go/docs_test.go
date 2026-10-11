@@ -402,7 +402,18 @@ func TestTunClientUnitGrantsOnlyNetAdmin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(doc), "needs no capability beyond `CAP_NET_ADMIN`") {
-		t.Error("docs/TUN.md no longer says the full tunnel needs only CAP_NET_ADMIN")
+	// The routing and the socket mark need only CAP_NET_ADMIN (the namespace
+	// tests show that); resolvectl under that capability alone is not verified
+	// and the docs must say so and say what to do.
+	for _, want := range []string{"has not been verified here", "polkit rule", "leave `dns=` out"} {
+		if !strings.Contains(string(doc), want) {
+			t.Errorf("docs/TUN.md lacks %q in its note on dns= under CAP_NET_ADMIN", want)
+		}
+	}
+	if strings.Contains(string(doc), "needs no capability beyond `CAP_NET_ADMIN`") {
+		t.Error("docs/TUN.md claims the whole full tunnel, resolvectl included, needs no more than CAP_NET_ADMIN")
+	}
+	if !strings.Contains(string(raw), "not verified") {
+		t.Error("the unit comment does not say that resolvectl under CAP_NET_ADMIN is unverified")
 	}
 }

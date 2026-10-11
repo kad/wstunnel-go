@@ -159,12 +159,19 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 			return nil, err
 		}
 		if full != nil {
+			// DNS first: the link is up now, and resolvectl may be slow or hung
+			// (it is bounded and never fatal); doing it before the routing
+			// captures the host means the wait cannot happen while the host's
+			// traffic is already routed into a tunnel that is not running yet.
+			revertDNS := configureDNS(ctx, deps, dev.Name(), spec.DNS)
 			cleanup, err := full.install(dev.Name(), deps.nl)
 			if err != nil {
+				_ = revertDNS()
 				_ = dev.Close()
 				return nil, err
 			}
-			cleanups = append(cleanups, cleanup, configureDNS(ctx, deps, dev.Name(), spec.DNS))
+			// Cleanups run in reverse: the routing goes first, DNS last.
+			cleanups = append(cleanups, revertDNS, cleanup)
 		}
 	} else {
 		current, err := deps.deviceMTU(dev.Name())
