@@ -3,13 +3,16 @@ package client
 import (
 	"bytes"
 	"context"
+	cryptotls "crypto/tls"
 	"errors"
 	"log/slog"
 	"net"
+	"net/http/httptest"
 	"net/netip"
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -553,5 +556,74 @@ func TestResolverFallsBackToLastKnownAddresses(t *testing.T) {
 	servers = c.newTunServers(mustSpec(t, "tun://wst0?route=default"), nil)
 	if _, err := servers.refresh(context.Background()); err == nil {
 		t.Fatal("no known address and no DNS must fail closed")
+	}
+}
+
+// TestFullTunnelDialsCachedAddressesWhenDNSIsDown starts a full tunnel against
+// a server named by a host name that does not resolve for the dial (only the
+// first lookup, made at start, succeeds). Every later connect must use the
+// cached address, and the name must still be what TLS sends as SNI.
+func TestFullTunnelDialsCachedAddressesWhenDNSIsDown(t *testing.T) {
+	const name = "tun-server.invalid"
+	for _, tc := range []struct{ name, mode, scheme string }{
+		{"rust websocket cleartext", "rust", "ws"},
+		{"rust websocket tls", "rust", "wss"},
+		{"rfc6455 websocket cleartext", "ws", "ws"},
+		{"rfc6455 websocket tls", "ws", "wss"},
+		{"http2 cleartext", "rust", "http"},
+		{"http2 tls", "rust", "https"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tls := tc.scheme == "wss" || tc.scheme == "https"
+			var sni atomic.Value
+			srv := newTestTunServerTLS(t, tc.mode, "", tls, func(s *httptest.Server) {
+				s.TLS = &cryptotls.Config{GetConfigForClient: func(h *cryptotls.ClientHelloInfo) (*cryptotls.Config, error) {
+					sni.Store(h.ServerName)
+					return nil, nil
+				}}
+			})
+			_, port, _ := net.SplitHostPort(srv.addr)
+
+			orig := lookupNetIP
+			t.Cleanup(func() { lookupNetIP = orig })
+			var lookups atomic.Int32
+			lookupNetIP = func(context.Context, string) ([]netip.Addr, error) {
+				if lookups.Add(1) == 1 {
+					return []netip.Addr{netip.MustParseAddr("127.0.0.1")}, nil
+				}
+				return nil, errors.New("dns down")
+			}
+
+			f := newFakeHost(t, "127.0.0.1")
+			startFullTunnel(t, f, Config{ServerURL: tc.scheme + "://" + net.JoinHostPort(name, port), PathPrefix: "v1", WebsocketProtocol: tc.mode},
+				"tun://wst0?route=default&routing=pin")
+			waitEcho(t, f.host, "first")
+			// Drop the session: the reconnect runs with the resolver down.
+			srv.ln.closeAll()
+			waitEcho(t, f.host, "after reconnect")
+			if n := lookups.Load(); n < 3 {
+				t.Errorf("only %d lookups; the reconnect did not go through the failing resolver", n)
+			}
+			if tls {
+				if got, _ := sni.Load().(string); got != name {
+					t.Errorf("TLS SNI = %q, want the server name %q", got, name)
+				}
+			}
+		})
+	}
+}
+
+func TestPinnedTargets(t *testing.T) {
+	c := NewClient(Config{ServerURL: "wss://tun.example.test:8443"})
+	if got := c.pinnedTargets("tun.example.test:8443"); got != nil {
+		t.Fatalf("targets before any address is cached = %v", got)
+	}
+	c.serverAddrs.Store(&[]netip.Addr{netip.MustParseAddr("203.0.113.5"), netip.MustParseAddr("2001:db8::1")})
+	want := []string{"203.0.113.5:8443", "[2001:db8::1]:8443"}
+	if got := c.pinnedTargets("TUN.example.test:8443"); !slices.Equal(got, want) {
+		t.Errorf("targets = %v, want %v, in order", got, want)
+	}
+	if got := c.pinnedTargets("other.example.test:8443"); got != nil {
+		t.Errorf("another host must resolve normally, got %v", got)
 	}
 }

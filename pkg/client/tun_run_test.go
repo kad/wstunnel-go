@@ -78,7 +78,7 @@ func newTestTunServer(t *testing.T, mode, addr string) *testTunServer {
 
 // newTestTunServerTLS is newTestTunServer, optionally serving TLS (HTTP/1.1 and
 // HTTP/2 over ALPN) with httptest's self-signed certificate.
-func newTestTunServerTLS(t *testing.T, mode, addr string, useTLS bool) *testTunServer {
+func newTestTunServerTLS(t *testing.T, mode, addr string, useTLS bool, tweak ...func(*httptest.Server)) *testTunServer {
 	t.Helper()
 	rulesPath := filepath.Join(t.TempDir(), "rules.yaml")
 	if err := os.WriteFile(rulesPath, []byte(allowLoopbackRules), 0o600); err != nil {
@@ -105,6 +105,9 @@ func newTestTunServerTLS(t *testing.T, mode, addr string, useTLS bool) *testTunS
 	tracked := &trackingListener{Listener: ln}
 	srv := httptest.NewUnstartedServer(s)
 	srv.Listener = tracked
+	for _, f := range tweak {
+		f(srv)
+	}
 	if useTLS {
 		srv.EnableHTTP2 = true
 		srv.StartTLS()

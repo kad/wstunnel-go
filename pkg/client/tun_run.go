@@ -174,6 +174,7 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 
 	slog.Info("Tun device ready", "interface", dev.Name(), "mtu", mtu, "configured", spec.Configure)
 	servers := c.newTunServers(spec, serverAddrs)
+	servers.publish = full != nil
 	preConnect := servers.guard
 	if full != nil && full.pins != nil {
 		preConnect = func(ctx context.Context) error {
@@ -262,6 +263,9 @@ type tunServers struct {
 	spec *TunSpec
 	mu   sync.Mutex
 	last []netip.Addr
+	// publish makes the dial use the addresses that passed the guard (full
+	// tunnel).
+	publish bool
 }
 
 func (c *Client) newTunServers(spec *TunSpec, initial []netip.Addr) *tunServers {
@@ -289,6 +293,10 @@ func (s *tunServers) refresh(ctx context.Context) ([]netip.Addr, error) {
 		return nil, err
 	}
 	s.last = slices.Clone(servers)
+	if s.publish {
+		pinned := slices.Clone(servers)
+		s.c.serverAddrs.Store(&pinned)
+	}
 	return slices.Clone(servers), nil
 }
 

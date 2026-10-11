@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -86,7 +87,8 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 			TLSClientConfig: tlsConfig,
 			QUICConfig:      newWebTransportQUICConfig(),
 		}
-		if w.client.socketMark() != 0 {
+		if w.client.socketMark() != 0 || w.client.pinnedTargets(u.Host) != nil {
+			// Own dial: marks the socket and/or dials the cached server addresses.
 			tr.DialAddr = w.dialMarkedAddr
 		}
 
@@ -152,32 +154,65 @@ func sessionDead(s interface{ Context() context.Context }) bool {
 	return s.Context().Err() != nil
 }
 
+// dialAddrs calls dial for each address addr can be reached at, in order, and
+// returns the first connection that succeeds. These are the pinned server
+// addresses when a full tunnel cached them (the resolver is not consulted), else
+// the one address addr resolves to.
+func (w *WebTransportClient) dialAddrs(ctx context.Context, addr string, dial func(*net.UDPAddr) (*quic.Conn, error)) (*quic.Conn, error) {
+	targets := w.client.pinnedTargets(addr)
+	if targets == nil {
+		targets = []string{addr}
+	}
+	var errs []error
+	for _, t := range targets {
+		remoteAddr, err := w.client.resolveUDPAddr(ctx, t)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolve WebTransport address: %w", err))
+			continue
+		}
+		conn, err := dial(remoteAddr)
+		if err == nil {
+			return conn, nil
+		}
+		errs = append(errs, err)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, errors.Join(errs...)
+}
+
 func (w *WebTransportClient) dialMarkedAddr(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
-	remoteAddr, err := w.client.resolveUDPAddr(ctx, addr)
-	if err != nil {
-		return nil, fmt.Errorf("resolve WebTransport address: %w", err)
+	if tlsConfig.ServerName == "" {
+		// The name in addr decides SNI and verification, never the pinned IP.
+		tlsConfig = tlsConfig.Clone()
+		if host, _, err := net.SplitHostPort(addr); err == nil {
+			tlsConfig.ServerName = host
+		}
 	}
 	mark := w.client.socketMark()
-
-	var lc net.ListenConfig
-	lc.Control = func(network, address string, rc syscall.RawConn) error {
-		return rc.Control(func(fd uintptr) {
-			_ = socket.SetSoMark(fd, mark)
+	return w.dialAddrs(ctx, addr, func(remoteAddr *net.UDPAddr) (*quic.Conn, error) {
+		var lc net.ListenConfig
+		if mark != 0 {
+			lc.Control = func(network, address string, rc syscall.RawConn) error {
+				return rc.Control(func(fd uintptr) {
+					_ = socket.SetSoMark(fd, mark)
+				})
+			}
+		}
+		packetConn, err := lc.ListenPacket(ctx, "udp", "")
+		if err != nil {
+			return nil, fmt.Errorf("listen for WebTransport client UDP socket: %w", err)
+		}
+		transport := &quic.Transport{Conn: packetConn}
+		conn, err := transport.DialEarly(ctx, remoteAddr, tlsConfig, quicConfig)
+		if err != nil {
+			_ = transport.Close()
+			return nil, err
+		}
+		context.AfterFunc(conn.Context(), func() {
+			_ = transport.Close()
 		})
-	}
-	packetConn, err := lc.ListenPacket(ctx, "udp", "")
-	if err != nil {
-		return nil, fmt.Errorf("listen for WebTransport client UDP socket: %w", err)
-	}
-
-	transport := &quic.Transport{Conn: packetConn}
-	conn, err := transport.DialEarly(ctx, remoteAddr, tlsConfig, quicConfig)
-	if err != nil {
-		_ = transport.Close()
-		return nil, err
-	}
-	context.AfterFunc(conn.Context(), func() {
-		_ = transport.Close()
+		return conn, nil
 	})
-	return conn, nil
 }

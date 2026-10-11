@@ -6,11 +6,13 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -68,6 +70,56 @@ type Client struct {
 	// resolver, when set, resolves the server name instead of the system
 	// resolver (full tunnel, fwmark mode: its sockets carry the mark).
 	resolver atomic.Pointer[net.Resolver]
+	// serverAddrs, when set (full tunnel), are the addresses the tunnel server
+	// name resolved to when the loop guard last passed. Every transport dials
+	// these instead of resolving the name again, so a reconnect works while DNS
+	// is unreachable, while the name still decides TLS SNI/verification, the
+	// HTTP Host and the websocket URL.
+	serverAddrs atomic.Pointer[[]netip.Addr]
+}
+
+// pinnedTargets returns, for a dial of addr ("host:port"), the "ip:port"
+// targets to try in order when addr names the tunnel server and its addresses
+// are pinned, and nil when the normal resolution applies.
+func (c *Client) pinnedTargets(addr string) []string {
+	ips := c.serverAddrs.Load()
+	if ips == nil || len(*ips) == 0 {
+		return nil
+	}
+	u, err := url.Parse(c.Config.ServerURL)
+	if err != nil {
+		return nil
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil || !strings.EqualFold(host, u.Hostname()) {
+		return nil
+	}
+	targets := make([]string, 0, len(*ips))
+	for _, ip := range *ips {
+		targets = append(targets, net.JoinHostPort(ip.String(), port))
+	}
+	return targets
+}
+
+// dialPinned dials addr with d, trying the pinned server addresses in order
+// when there are any; the first connection that succeeds wins.
+func (c *Client) dialPinned(ctx context.Context, d *net.Dialer, network, addr string) (net.Conn, error) {
+	targets := c.pinnedTargets(addr)
+	if targets == nil {
+		return d.DialContext(ctx, network, addr)
+	}
+	var errs []error
+	for _, t := range targets {
+		conn, err := d.DialContext(ctx, network, t)
+		if err == nil {
+			return conn, nil
+		}
+		errs = append(errs, err)
+		if ctx.Err() != nil {
+			break
+		}
+	}
+	return nil, errors.Join(errs...)
 }
 
 // socketMark is the SO_MARK for the client's own sockets, 0 for none.

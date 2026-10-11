@@ -2,7 +2,13 @@ package client
 
 import (
 	"context"
+	"errors"
+	"net"
+	"net/netip"
+	"slices"
 	"testing"
+
+	"github.com/quic-go/quic-go"
 )
 
 func TestWebTransportQUICConfigKeepsIdleSessionsAlive(t *testing.T) {
@@ -35,5 +41,38 @@ func TestSessionDead(t *testing.T) {
 	cancel()
 	if !sessionDead(fakeSession{ctx}) {
 		t.Fatal("an ended session was not reported dead")
+	}
+}
+
+func TestWebTransportDialsPinnedAddressesInOrder(t *testing.T) {
+	c := NewClient(Config{ServerURL: "wts://tun-server.invalid:4433"})
+	// A resolver that always fails: the pinned addresses must not need it.
+	c.resolver.Store(&net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("dns down")
+	}})
+	c.serverAddrs.Store(&[]netip.Addr{netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")})
+	w := NewWebTransportClient(c)
+
+	var tried []string
+	conn, err := w.dialAddrs(context.Background(), "tun-server.invalid:4433", func(a *net.UDPAddr) (*quic.Conn, error) {
+		tried = append(tried, a.String())
+		if a.IP.String() == "192.0.2.1" {
+			return nil, errors.New("unreachable")
+		}
+		return &quic.Conn{}, nil
+	})
+	if err != nil || conn == nil {
+		t.Fatalf("dialAddrs = %v, %v", conn, err)
+	}
+	if want := []string{"192.0.2.1:4433", "192.0.2.2:4433"}; !slices.Equal(tried, want) {
+		t.Fatalf("tried %v, want %v (first success wins)", tried, want)
+	}
+
+	// All failing: the error carries every attempt.
+	_, err = w.dialAddrs(context.Background(), "tun-server.invalid:4433", func(*net.UDPAddr) (*quic.Conn, error) {
+		return nil, errors.New("unreachable")
+	})
+	if err == nil {
+		t.Fatal("no error although every address failed")
 	}
 }
