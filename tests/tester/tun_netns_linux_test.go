@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -467,4 +468,592 @@ func echoUDP(addr, msg string) error {
 		}
 	}
 	return fmt.Errorf("no UDP echo after 5 attempts")
+}
+
+// ---------------------------------------------------------------------------
+// Full tunnel (route=default)
+//
+// Three namespaces, so the server is reached the way a real one is: through
+// the default route, which the full tunnel then replaces.
+//
+//	A (client, app)               B (gateway, server)            C (target)
+//	  vAB 10.200.0.1/24  <------>   vBA 10.200.0.2/24
+//	  default via 10.200.0.2        lo 192.0.2.10/32 (server)    lo 203.0.113.50/32
+//	  wst0 (the TUN)                vBC 10.201.0.1/24  <------>  vCB 10.201.0.2/24
+//	                                route 203.0.113.50/32 via C  default via B
+//
+// B does not forward, so A cannot reach 203.0.113.50 except through the
+// tunnel. There is deliberately no explicit route to the server in A: reaching
+// it through the default route is what makes strict rp_filter break the fwmark
+// mode (the server's replies fail the reverse-path check), and what a host
+// route "hides" if one is added.
+//
+// A packet sniffer in B watches vBA for anything addressed to the target: a
+// packet seen there left A's default route instead of the tunnel.
+// ---------------------------------------------------------------------------
+const (
+	fullDriverEnv = "WST_TUN_NETNS_FULL"  // case name; set only for the full-tunnel driver
+	fullSniffEnv  = "WST_TUN_NETNS_SNIFF" // interface to sniff; set only for the sniffer helper
+
+	fullServerIP   = "192.0.2.10"
+	fullTargetIP   = "203.0.113.50"
+	fullTargetNet  = "203.0.113.0/24"
+	fullDefaultMrk = "0x7774"
+)
+
+type fullCase struct {
+	name     string
+	routing  string // routing= value; "" omits it
+	rpFilter int    // rp_filter set on all interfaces of A before the client starts
+	scenario string
+	wantMode string // routing mode the client must log
+}
+
+var fullCases = []fullCase{
+	{"Go-Go-Tun-Full-Fwmark", "fwmark", 2, "basic", "fwmark"},
+	{"Go-Go-Tun-Full-Fwmark-RPOff", "fwmark", 0, "basic", "fwmark"},
+	{"Go-Go-Tun-Full-Pin", "pin", 2, "basic", "pin"},
+	{"Go-Go-Tun-Full-Pin-StrictRP", "pin", 1, "basic", "pin"},
+	{"Go-Go-Tun-Full-Auto-StrictRP", "auto", 1, "basic", "pin"},
+	{"Go-Go-Tun-Full-Auto-LooseRP", "", 2, "basic", "fwmark"},
+	{"Go-Go-Tun-Full-Fwmark-StrictRP-Refused", "fwmark", 1, "refuse", ""},
+	{"Go-Go-Tun-Full-Cleanup-Fwmark", "fwmark", 2, "cleanup", "fwmark"},
+	{"Go-Go-Tun-Full-Cleanup-Pin", "pin", 2, "cleanup", "pin"},
+	{"Go-Go-Tun-Full-Crash-Fwmark", "fwmark", 2, "crash", "fwmark"},
+	{"Go-Go-Tun-Full-Reconnect-Fwmark", "fwmark", 2, "reconnect", "fwmark"},
+	{"Go-Go-Tun-Full-Reconnect-Pin", "pin", 2, "reconnect", "pin"},
+}
+
+func TestTunNetnsFull(t *testing.T) {
+	for _, tool := range []string{"unshare", "nsenter", "ip"} {
+		if _, err := exec.LookPath(tool); err != nil {
+			t.Skipf("%s not found in PATH", tool)
+		}
+	}
+	if err := exec.Command("unshare", "-rn", "--pid", "--fork", "--mount-proc", "true").Run(); err != nil {
+		t.Skipf("user and network namespaces are unavailable: %v", err)
+	}
+	if _, err := os.Stat("/dev/net/tun"); err != nil {
+		t.Skipf("/dev/net/tun is unavailable: %v", err)
+	}
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bin, err := filepath.Abs(goBinary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("Go binary not found at %s. Run 'make build' first.", bin)
+	}
+	for _, tc := range fullCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 170*time.Second)
+			defer cancel()
+			args := append(append([]string{}, tunUnshareArgs...), exe, "-test.run=^TestTunNetnsFullDriver$", "-test.v", "-test.timeout=150s")
+			cmd := exec.CommandContext(ctx, "unshare", args...)
+			cmd.Env = append(os.Environ(), fullDriverEnv+"="+tc.name, tunBinEnv+"="+bin)
+			out, err := cmd.CombinedOutput()
+			if err != nil || !strings.Contains(string(out), tunNetnsOK) {
+				t.Fatalf("namespace driver failed (err=%v):\n%s", err, out)
+			}
+		})
+	}
+}
+
+// capturedProc is a child process whose output is kept for assertions.
+type capturedProc struct {
+	cmd  *exec.Cmd
+	mu   sync.Mutex
+	out  strings.Builder
+	done chan struct{}
+	err  error
+}
+
+func startCaptured(name string, env []string, binary string, args ...string) (*capturedProc, error) {
+	cmd := exec.Command(binary, args...)
+	cmd.Env = env
+	p := &capturedProc{cmd: cmd, done: make(chan struct{})}
+	w := &lockedWriter{p: p, prefix: "[" + name + "] "}
+	cmd.Stdout, cmd.Stderr = w, w
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	go func() {
+		p.err = cmd.Wait()
+		close(p.done)
+	}()
+	return p, nil
+}
+
+type lockedWriter struct {
+	p      *capturedProc
+	prefix string
+}
+
+func (w *lockedWriter) Write(b []byte) (int, error) {
+	w.p.mu.Lock()
+	w.p.out.Write(b)
+	w.p.mu.Unlock()
+	_, _ = os.Stdout.WriteString(w.prefix + string(b))
+	return len(b), nil
+}
+
+func (p *capturedProc) output() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.out.String()
+}
+
+// terminate sends sig and waits for the process to exit.
+func (p *capturedProc) terminate(sig os.Signal, within time.Duration) error {
+	_ = p.cmd.Process.Signal(sig)
+	select {
+	case <-p.done:
+		return p.err
+	case <-time.After(within):
+		_ = p.cmd.Process.Kill()
+		<-p.done
+		return fmt.Errorf("did not exit within %v after %v", within, sig)
+	}
+}
+
+func (p *capturedProc) kill() {
+	_ = p.cmd.Process.Kill()
+	<-p.done
+}
+
+func (p *capturedProc) exited() bool {
+	select {
+	case <-p.done:
+		return true
+	default:
+		return false
+	}
+}
+
+func TestTunNetnsFullDriver(t *testing.T) {
+	name := os.Getenv(fullDriverEnv)
+	if name == "" {
+		t.Skip("runs only inside the full-tunnel namespace driver process")
+	}
+	bin := os.Getenv(tunBinEnv)
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tc fullCase
+	for _, c := range fullCases {
+		if c.name == name {
+			tc = c
+		}
+	}
+	if tc.name == "" {
+		t.Fatalf("unknown case %q", name)
+	}
+
+	run := func(args ...string) string {
+		t.Helper()
+		out, err := exec.Command(args[0], args[1:]...).CombinedOutput()
+		if err != nil {
+			t.Fatalf("%s: %v\n%s", strings.Join(args, " "), err, out)
+		}
+		return string(out)
+	}
+	try := func(args ...string) string {
+		out, _ := exec.Command(args[0], args[1:]...).CombinedOutput()
+		return string(out)
+	}
+
+	run("ip", "link", "set", "lo", "up")
+
+	// Namespaces B and C are held open by sleeping processes.
+	hold := func(label string) string {
+		h := exec.Command("unshare", "-n", "sleep", "300")
+		if err := h.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = h.Process.Kill(); _ = h.Wait() })
+		pid := strconv.Itoa(h.Process.Pid)
+		mine, _ := os.Readlink("/proc/self/ns/net")
+		if err := waitUntil(5*time.Second, func() bool {
+			theirs, err := os.Readlink("/proc/" + pid + "/ns/net")
+			return err == nil && theirs != mine
+		}); err != nil {
+			t.Fatalf("namespace %s did not appear: %v", label, err)
+		}
+		return pid
+	}
+	pidB, pidC := hold("B"), hold("C")
+	inB := func(args ...string) []string { return append([]string{"nsenter", "-t", pidB, "-n", "--"}, args...) }
+	inC := func(args ...string) []string { return append([]string{"nsenter", "-t", pidC, "-n", "--"}, args...) }
+
+	// A <-> B
+	run("ip", "link", "add", "vAB", "type", "veth", "peer", "name", "vBA")
+	run("ip", "link", "set", "vBA", "netns", pidB)
+	run("ip", "addr", "add", "10.200.0.1/24", "dev", "vAB")
+	run("ip", "link", "set", "vAB", "up")
+	run(inB("ip", "link", "set", "lo", "up")...)
+	run(inB("ip", "addr", "add", "10.200.0.2/24", "dev", "vBA")...)
+	run(inB("ip", "link", "set", "vBA", "up")...)
+	run(inB("ip", "addr", "add", fullServerIP+"/32", "dev", "lo")...)
+	// B <-> C
+	run(inB("ip", "link", "add", "vBC", "type", "veth", "peer", "name", "vCB")...)
+	run(inB("ip", "link", "set", "vCB", "netns", pidC)...)
+	run(inB("ip", "addr", "add", "10.201.0.1/24", "dev", "vBC")...)
+	run(inB("ip", "link", "set", "vBC", "up")...)
+	run(inB("ip", "route", "add", fullTargetIP+"/32", "via", "10.201.0.2")...)
+	run(inC("ip", "link", "set", "lo", "up")...)
+	run(inC("ip", "addr", "add", "10.201.0.2/24", "dev", "vCB")...)
+	run(inC("ip", "link", "set", "vCB", "up")...)
+	run(inC("ip", "addr", "add", fullTargetIP+"/32", "dev", "lo")...)
+	run(inC("ip", "route", "add", "default", "via", "10.201.0.1")...)
+	// A reaches the server address through B, as it would reach a server on the
+	// internet. No host route to the server.
+	run("ip", "route", "add", "default", "via", "10.200.0.2")
+
+	for _, scope := range []string{"all", "default", "vAB"} {
+		if err := os.WriteFile("/proc/sys/net/ipv4/conf/"+scope+"/rp_filter", []byte(strconv.Itoa(tc.rpFilter)), 0o644); err != nil {
+			t.Fatalf("set rp_filter on %s: %v", scope, err)
+		}
+	}
+
+	rules := filepath.Join(t.TempDir(), "rules.yaml")
+	if err := os.WriteFile(rules, []byte(fmt.Sprintf(`restrictions:
+  - name: tun-netns-full
+    match:
+      - Any
+    allow:
+      - !Tunnel
+        protocol: [Tun]
+      - !Tunnel
+        protocol: [Tcp, Udp]
+        cidr: [%s]
+`, fullTargetNet)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	serverURL := fmt.Sprintf("ws://%s:%d", fullServerIP, tunServerPort)
+	startServer := func() *capturedProc {
+		t.Helper()
+		p, err := startCaptured("server", nil, "nsenter", inB(bin, "--log-lvl", "INFO", "server", "--http-upgrade-path-prefix", "v1",
+			"--enable-tun", "--restrict-config", rules, serverURL)[1:]...)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Ask B itself: with the full tunnel up, A's own dials go into the tunnel.
+		if err := waitUntil(10*time.Second, func() bool {
+			return strings.Contains(try(inB("ss", "-ltn", "sport", "=", ":"+strconv.Itoa(tunServerPort))...), fullServerIP+":"+strconv.Itoa(tunServerPort))
+		}); err != nil {
+			p.kill()
+			t.Fatalf("server in namespace B did not start: %v\n%s", err, p.output())
+		}
+		return p
+	}
+
+	echo, err := startProcess("Echo-"+name, "nsenter", inC(exe, "-test.run=^TestTunNetnsHelperEcho$")[1:],
+		append(os.Environ(), tunEchoEnv+fmt.Sprintf("=%s:%d", fullTargetIP, tunTargetPort)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer echo.Stop()
+
+	// The sniffer in B reports anything addressed to the target on the A-B link.
+	sniff, err := startCaptured("sniffer", append(os.Environ(), fullSniffEnv+"=1"), "nsenter", inB(exe, "-test.run=^TestTunNetnsHelperSniff$", "-test.v")[1:]...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sniff.kill()
+	if err := waitUntil(10*time.Second, func() bool { return strings.Contains(sniff.output(), "SNIFFER-READY") }); err != nil {
+		t.Fatalf("the sniffer in namespace B did not start:\n%s", sniff.output())
+	}
+
+	srv := startServer()
+	defer func() { srv.kill() }()
+
+	target := net.JoinHostPort(fullTargetIP, strconv.Itoa(tunTargetPort))
+
+	// Sanity: B does not forward, so without the tunnel the target is unreachable.
+	if conn, err := net.DialTimeout("tcp", target, 2*time.Second); err == nil {
+		_ = conn.Close()
+		t.Fatal("the target is reachable without the tunnel; the topology is wrong")
+	}
+	// ...and the sniffer must see those packets, or "no leak" below means nothing.
+	if err := waitUntil(3*time.Second, func() bool { return strings.Contains(sniff.output(), "LEAK ") }); err != nil {
+		t.Fatalf("the sniffer in B did not see packets sent out of A's default route:\n%s", sniff.output())
+	}
+	// The sanity dial deliberately sent packets out of the default route (and
+	// its SYN retransmits trail in); only packets after this point are leaks.
+	time.Sleep(time.Second)
+	leakBase := strings.Count(sniff.output(), "LEAK ")
+	resetLeaks := func() {
+		time.Sleep(500 * time.Millisecond)
+		leakBase = strings.Count(sniff.output(), "LEAK ")
+	}
+
+	tunArg := "tun://wst0?route=default"
+	if tc.routing != "" {
+		tunArg += "&routing=" + tc.routing
+	}
+	startClient := func() *capturedProc {
+		t.Helper()
+		p, err := startCaptured("client", nil, bin, "--log-lvl", "INFO", "client", "--http-upgrade-path-prefix", "v1", "-L", tunArg, serverURL)
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Until the routing is installed the app's packets take the normal
+		// default route, as they did before the client started; that is not a
+		// leak. Wait for the tunnel to own the route, then start counting.
+		if err := waitUntil(10*time.Second, func() bool {
+			return p.exited() || strings.Contains(try("ip", "route", "get", fullTargetIP), "wst0")
+		}); err != nil || p.exited() {
+			if !strings.Contains(tc.scenario, "refuse") {
+				t.Fatalf("the full tunnel was not installed (err=%v):\n%s", err, p.output())
+			}
+		}
+		resetLeaks()
+		return p
+	}
+	waitEchoOK := func(label string, within time.Duration) {
+		t.Helper()
+		var last error
+		if err := waitUntil(within, func() bool {
+			last = echoTCP(target, label)
+			return last == nil
+		}); err != nil {
+			t.Fatalf("%s: no TCP echo through the full tunnel: %v", label, last)
+		}
+	}
+	rulesText := func() string {
+		return try("ip", "rule", "show") + try("ip", "-6", "rule", "show")
+	}
+	countRules := func(sub string) int { return strings.Count(rulesText(), sub) }
+	// A table with no routes does not exist; the kernel's complaint means empty.
+	table := func() string {
+		var keep []string
+		for _, line := range strings.Split(try("ip", "route", "show", "table", "30580")+try("ip", "-6", "route", "show", "table", "30580"), "\n") {
+			if l := strings.TrimSpace(line); l != "" && !strings.HasPrefix(l, "Error:") && l != "Dump terminated" {
+				keep = append(keep, l)
+			}
+		}
+		return strings.Join(keep, "\n")
+	}
+	leaks := func() int { return strings.Count(sniff.output(), "LEAK ") - leakBase }
+
+	switch tc.scenario {
+	case "refuse":
+		cli := startClient()
+		select {
+		case <-cli.done:
+		case <-time.After(15 * time.Second):
+			cli.kill()
+			t.Fatalf("the client kept running; it must refuse to start:\n%s", cli.output())
+		}
+		out := cli.output()
+		if cli.err == nil {
+			t.Fatalf("the client exited 0; want a refusal:\n%s", out)
+		}
+		for _, want := range []string{"rp_filter=1", "routing=pin"} {
+			if !strings.Contains(out, want) {
+				t.Errorf("refusal message lacks %q:\n%s", want, out)
+			}
+		}
+		if got := try("ip", "link", "show", "wst0"); strings.Contains(got, "wst0:") {
+			t.Errorf("a device was created before the refusal:\n%s", got)
+		}
+		if n := countRules("32764") + countRules("32765"); n != 0 {
+			t.Errorf("%d rules installed before the refusal:\n%s", n, rulesText())
+		}
+
+	case "basic":
+		cli := startClient()
+		defer cli.kill()
+		waitEchoOK("full tunnel "+name, 20*time.Second)
+		if err := echoUDP(target, "udp full tunnel"); err != nil {
+			t.Errorf("UDP through the full tunnel: %v", err)
+		}
+		if !strings.Contains(cli.output(), "mode="+tc.wantMode) {
+			t.Errorf("the client did not log routing mode %s:\n%s", tc.wantMode, cli.output())
+		}
+		// The default route carries the app's traffic into the device.
+		if got := try("ip", "route", "get", fullTargetIP); !strings.Contains(got, "wst0") {
+			t.Errorf("ip route get %s = %q, want it through wst0", fullTargetIP, got)
+		}
+		// The session itself must keep working after it has been idle.
+		time.Sleep(3 * time.Second)
+		waitEchoOK("after idle "+name, 10*time.Second)
+		checkInstalled(t, tc.wantMode, rulesText(), table(), try("ip", "route", "show"))
+
+	case "cleanup":
+		cli := startClient()
+		defer cli.kill()
+		waitEchoOK("before SIGTERM", 20*time.Second)
+		checkInstalled(t, tc.wantMode, rulesText(), table(), try("ip", "route", "show"))
+		if n := leaks(); n != 0 {
+			t.Fatalf("%d packets leaked while the tunnel was up:\n%s", n, sniff.output())
+		}
+		if err := cli.terminate(syscall.SIGTERM, 10*time.Second); err != nil {
+			t.Fatalf("client after SIGTERM: %v\n%s", err, cli.output())
+		}
+		checkClean(t, rulesText(), table(), try("ip", "route", "show"), try("ip", "-6", "route", "show"))
+		// The host is back to its normal routing: the target is unreachable again
+		// and the server address still reachable directly.
+		if err := echoTCP(target, "x"); err == nil {
+			t.Error("the target is reachable after the client exited")
+		}
+		if err := waitForPort(fullServerIP, tunServerPort, 3*time.Second); err != nil {
+			t.Errorf("the server is unreachable after cleanup: %v", err)
+		}
+
+	case "crash":
+		cli := startClient()
+		waitEchoOK("before SIGKILL", 20*time.Second)
+		cli.kill()
+		// The device is gone with the process, the rules are not.
+		if n := countRules("32765"); n == 0 {
+			t.Fatalf("expected stale rules after SIGKILL, found none:\n%s", rulesText())
+		}
+		if got := try("ip", "link", "show", "wst0"); strings.Contains(got, "wst0:") {
+			t.Fatalf("wst0 survived SIGKILL:\n%s", got)
+		}
+		// A stale rule must not black-hole the host: its table is empty, so lookups
+		// fall through to main and the server stays reachable.
+		if err := waitForPort(fullServerIP, tunServerPort, 3*time.Second); err != nil {
+			t.Fatalf("stale rules cut the host off from the server: %v", err)
+		}
+		cli = startClient()
+		defer cli.kill()
+		waitEchoOK("after restart", 20*time.Second)
+		for _, sub := range []string{"32764:", "32765:"} {
+			// one rule per priority and family, not an accumulation
+			if n := countRules(sub); n != 2 {
+				t.Errorf("%d rules at priority %s after the restart, want 2 (IPv4 and IPv6):\n%s", n, sub, rulesText())
+			}
+		}
+		if !strings.Contains(cli.output(), "stale rule") {
+			t.Errorf("the client did not report removing the stale rules:\n%s", cli.output())
+		}
+		if err := cli.terminate(syscall.SIGTERM, 10*time.Second); err != nil {
+			t.Fatalf("client after SIGTERM: %v", err)
+		}
+		checkClean(t, rulesText(), table(), try("ip", "route", "show"), try("ip", "-6", "route", "show"))
+
+	case "reconnect":
+		cli := startClient()
+		defer cli.kill()
+		waitEchoOK("before outage", 20*time.Second)
+
+		srv.kill()
+		// While the server is down the routed traffic must be dropped, not sent
+		// out of the default route.
+		for i := 0; i < 3; i++ {
+			if err := echoTCP(target, "during outage"); err == nil {
+				t.Fatal("traffic flowed while the server was down")
+			}
+		}
+		if n := leaks(); n != 0 {
+			t.Fatalf("%d packets for %s left A through its default route during the outage:\n%s", n, fullTargetIP, sniff.output())
+		}
+		if cli.exited() {
+			t.Fatalf("the client exited during the outage:\n%s", cli.output())
+		}
+
+		srv = startServer()
+		waitEchoOK("after the server came back", 45*time.Second)
+		if n := leaks(); n != 0 {
+			t.Fatalf("%d packets leaked during the test:\n%s", n, sniff.output())
+		}
+		checkInstalled(t, tc.wantMode, rulesText(), table(), try("ip", "route", "show"))
+	}
+
+	if tc.scenario == "basic" || tc.scenario == "reconnect" {
+		if n := leaks(); n != 0 {
+			t.Fatalf("%d packets for %s left A through its default route:\n%s", n, fullTargetIP, sniff.output())
+		}
+	}
+	fmt.Println(tunNetnsOK)
+}
+
+// checkInstalled asserts the routing state of a running full tunnel.
+func checkInstalled(t *testing.T, mode, rules, table, routes string) {
+	t.Helper()
+	switch mode {
+	case "fwmark":
+		for _, want := range []string{"32764:", "32765:", "not from all fwmark " + fullDefaultMrk} {
+			if !strings.Contains(rules, want) {
+				t.Errorf("fwmark mode: rules lack %q:\n%s", want, rules)
+			}
+		}
+		if !strings.Contains(table, "default dev wst0") {
+			t.Errorf("fwmark mode: table 30580 = %q, want a default route via wst0", table)
+		}
+	case "pin":
+		for _, want := range []string{"0.0.0.0/1 dev wst0", "128.0.0.0/1 dev wst0", fullServerIP + " via 10.200.0.2 dev vAB"} {
+			if !strings.Contains(routes, want) {
+				t.Errorf("pin mode: routes lack %q:\n%s", want, routes)
+			}
+		}
+		if strings.Contains(rules, "32765:") {
+			t.Errorf("pin mode installed policy rules:\n%s", rules)
+		}
+	}
+}
+
+// checkClean asserts a stopped full tunnel left nothing behind.
+func checkClean(t *testing.T, rules, table, routes, routes6 string) {
+	t.Helper()
+	for _, bad := range []string{"32764:", "32765:", "fwmark"} {
+		if strings.Contains(rules, bad) {
+			t.Errorf("rules left behind (%q):\n%s", bad, rules)
+		}
+	}
+	if strings.TrimSpace(table) != "" {
+		t.Errorf("table 30580 not empty:\n%s", table)
+	}
+	for _, bad := range []string{"wst0", "0.0.0.0/1", "128.0.0.0/1", fullServerIP} {
+		if strings.Contains(routes, bad) {
+			t.Errorf("route left behind (%q):\n%s", bad, routes)
+		}
+	}
+	for _, bad := range []string{"wst0", "::/1", "8000::/1"} {
+		if strings.Contains(routes6, bad) {
+			t.Errorf("IPv6 route left behind (%q):\n%s", bad, routes6)
+		}
+	}
+}
+
+// TestTunNetnsHelperSniff runs in namespace B and prints a line for every IPv4
+// packet addressed to the target that arrives on the A-B link.
+func TestTunNetnsHelperSniff(t *testing.T) {
+	if os.Getenv(fullSniffEnv) == "" {
+		t.Skip("runs only as the namespace sniffer helper")
+	}
+	ifi, err := net.InterfaceByName("vBA")
+	if err != nil {
+		t.Fatal(err)
+	}
+	proto := uint16(syscall.ETH_P_IP)
+	be := (proto << 8) | (proto >> 8) // htons
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(be))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Bind(fd, &syscall.SockaddrLinklayer{Protocol: be, Ifindex: ifi.Index}); err != nil {
+		t.Fatal(err)
+	}
+	target := net.ParseIP(fullTargetIP).To4()
+	fmt.Println("SNIFFER-READY")
+	buf := make([]byte, 65536)
+	for {
+		n, from, err := syscall.Recvfrom(fd, buf, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if sll, ok := from.(*syscall.SockaddrLinklayer); ok && sll.Pkttype == syscall.PACKET_OUTGOING {
+			continue
+		}
+		if n >= 14+20 && net.IP(buf[14+16:14+20]).Equal(target) {
+			fmt.Printf("LEAK dst=%s len=%d\n", target, n)
+		}
+	}
 }
