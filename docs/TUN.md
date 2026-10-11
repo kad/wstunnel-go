@@ -158,7 +158,8 @@ and `tun_udp_timeout`.
   the TLS variants use the same code paths but have no tun-specific test.
 - **Not yet supported.** Routing the whole host's traffic (a default route) through
   the tunnel is not supported yet. Only the networks you list as `route` are
-  routed.
+  routed. A `/0` route and the two `/1` halves (`0.0.0.0/1` with `128.0.0.0/1`,
+  `::/1` with `8000::/1`) are rejected at startup until full-tunnel support exists.
 - **Performance.** Packets are read and written one at a time, without kernel
   offloads, so very high throughput is not a goal of this version.
 
