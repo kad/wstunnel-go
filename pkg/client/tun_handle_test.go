@@ -171,11 +171,3 @@ func TestTunHandleCleanupErrorsSurfaceFromClose(t *testing.T) {
 		t.Fatalf("Close = %v, want the cleanup error", err)
 	}
 }
-
-func TestStartTunRefusesFullTunnelUntilImplemented(t *testing.T) {
-	c := NewClient(Config{ServerURL: "ws://127.0.0.1:1"})
-	if h, err := c.StartTun(context.Background(), mustSpec(t, "tun://wst0?route=default")); err == nil {
-		_ = h.Close()
-		t.Fatal("StartTun accepted route=default before the full tunnel exists")
-	}
-}

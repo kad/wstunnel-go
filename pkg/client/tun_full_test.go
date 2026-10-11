@@ -1,0 +1,482 @@
+package client
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"log/slog"
+	"net"
+	"net/netip"
+	"slices"
+	"strings"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/kad/wstunnel-go/pkg/tun"
+	"github.com/kad/wstunnel-go/pkg/tun/tuntest"
+)
+
+type fakeDevice struct {
+	tun.PacketConn
+	name string
+}
+
+func (d fakeDevice) Name() string { return d.name }
+
+// fakeHost wires startTun to a recording configurer, an in-memory device and a
+// fake resolvectl, so the whole full-tunnel sequence runs without root.
+type fakeHost struct {
+	nl      *recordingConfigurer
+	deps    tunDeps
+	host    *tuntest.Host
+	devPeer tun.PacketConn
+	opened  int
+
+	mu         sync.Mutex
+	resolvectl [][]string
+	noResolve  bool
+}
+
+func newFakeHost(t *testing.T, serverHost string) *fakeHost {
+	t.Helper()
+	devEnd, hostEnd := tuntest.Pipe()
+	f := &fakeHost{
+		nl: &recordingConfigurer{routes: routes(map[string]routeInfo{
+			serverHost: {Gateway: netip.MustParseAddr("10.200.0.2"), Link: "eth0"},
+		})},
+		devPeer: hostEnd,
+		host:    tuntest.NewHost(t, hostEnd, 1500),
+	}
+	f.deps = tunDeps{
+		openDevice: func(string) (tunDevice, error) { f.opened++; return fakeDevice{devEnd, "wst0"}, nil },
+		deviceMTU:  func(string) (int, error) { return 1500, nil },
+		nl:         f.nl,
+		lookPath: func(file string) (string, error) {
+			if f.noResolve {
+				return "", errors.New("not found")
+			}
+			return "/usr/bin/" + file, nil
+		},
+		runCmd: func(_ context.Context, name string, args ...string) error {
+			f.mu.Lock()
+			defer f.mu.Unlock()
+			f.resolvectl = append(f.resolvectl, append([]string{name}, args...))
+			return nil
+		},
+	}
+	orig := readRPFilter
+	t.Cleanup(func() { readRPFilter = orig })
+	readRPFilter = func(string) (int, error) { return 0, nil }
+	return f
+}
+
+func (f *fakeHost) resolvectlCalls() [][]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.resolvectl)
+}
+
+func startFullTunnel(t *testing.T, f *fakeHost, cfg Config, arg string) (*Client, *TunHandle) {
+	t.Helper()
+	c := NewClient(cfg)
+	h, err := c.startTun(context.Background(), mustSpec(t, arg), f.deps, fastRetry)
+	if err != nil {
+		t.Fatalf("startTun: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return c, h
+}
+
+func indexOf(calls []string, prefix string) int {
+	return slices.IndexFunc(calls, func(c string) bool { return strings.HasPrefix(c, prefix) })
+}
+
+func TestFullTunnelFwmarkRuntime(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	c, h := startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"},
+		"tun://wst0?route=default&routing=fwmark&dns=1.1.1.1&dns=9.9.9.9")
+
+	if c.socketMark() != 0x7774 {
+		t.Errorf("socket mark = %#x; the client's sockets must carry the mark even without --socket-so-mark", c.socketMark())
+	}
+	if c.resolver.Load() == nil {
+		t.Error("no marked resolver in fwmark mode")
+	}
+	calls := f.nl.snapshot()
+	order := []string{"routeget " + host, "listrules 4", "listrules 6", "mtu wst0", "up wst0", "tableroute wst0 0.0.0.0/0 table 30580", "rule add ipv4 pref 32764", "rule add ipv4 pref 32765"}
+	prev := -1
+	for _, want := range order {
+		i := indexOf(calls, want)
+		if i < 0 || i < prev {
+			t.Fatalf("calls out of order or missing %q:\n%s", want, strings.Join(calls, "\n"))
+		}
+		prev = i
+	}
+	wantCmds := [][]string{
+		{"/usr/bin/resolvectl", "dns", "wst0", "1.1.1.1", "9.9.9.9"},
+		{"/usr/bin/resolvectl", "domain", "wst0", "~."},
+	}
+	if got := f.resolvectlCalls(); !slices.EqualFunc(got, wantCmds, slices.Equal) {
+		t.Fatalf("resolvectl calls = %v, want %v", got, wantCmds)
+	}
+
+	// The tunnel actually carries traffic.
+	waitEcho(t, f.host, "full tunnel")
+
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after := f.nl.snapshot()[len(calls):]
+	for _, want := range []string{"rule del ipv6 pref 32765", "rule del ipv6 pref 32764", "rule del ipv4 pref 32765", "rule del ipv4 pref 32764", "deltableroute wst0 ::/0", "deltableroute wst0 0.0.0.0/0"} {
+		if indexOf(after, want) < 0 {
+			t.Errorf("Close did not run %q; calls after start:\n%s", want, strings.Join(after, "\n"))
+		}
+	}
+	f.nl.mu.Lock()
+	left := len(f.nl.existingRules)
+	f.nl.mu.Unlock()
+	if left != 0 {
+		t.Errorf("%d rules left installed after Close", left)
+	}
+	got := f.resolvectlCalls()
+	if last := got[len(got)-1]; !slices.Equal(last, []string{"/usr/bin/resolvectl", "revert", "wst0"}) {
+		t.Errorf("last resolvectl call = %v, want revert", last)
+	}
+}
+
+func TestFullTunnelCleansUpWhenTheDeviceFails(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	_, h := startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"}, "tun://wst0?route=default&routing=fwmark")
+
+	_ = f.devPeer.Close() // the device disappears
+	select {
+	case <-h.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("Done did not fire")
+	}
+	if h.Err() == nil {
+		t.Fatal("device failure must be a fatal error")
+	}
+	f.nl.mu.Lock()
+	defer f.nl.mu.Unlock()
+	if len(f.nl.existingRules) != 0 {
+		t.Fatalf("rules left after a fatal device error: %v", f.nl.existingRules)
+	}
+}
+
+func TestFullTunnelPinInstallsAndRefreshesEveryAttempt(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	c, h := startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"}, "tun://wst0?route=default&routing=pin")
+	if c.resolver.Load() != nil || c.socketMark() != 0 {
+		t.Error("pin mode must not need marked sockets or a marked resolver")
+	}
+	pin := "hostroute " + host + "/32 via 10.200.0.2 dev eth0"
+	calls := f.nl.snapshot()
+	if i, j := indexOf(calls, pin), indexOf(calls, "route wst0 0.0.0.0/1"); i < 0 || j < 0 || i > j {
+		t.Fatalf("the pin must be installed before the /1 halves:\n%s", strings.Join(calls, "\n"))
+	}
+
+	// Drop the connection repeatedly: every attempt must delete the old pin,
+	// look the real route up avoiding the tunnel, and add the pin again.
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopDropping := func() { stopOnce.Do(func() { close(stop) }) }
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(15 * time.Millisecond):
+				srv.ln.closeAll()
+			}
+		}
+	}()
+	t.Cleanup(stopDropping)
+	deadline := time.Now().Add(10 * time.Second)
+	count := func() int {
+		n := 0
+		for _, c := range f.nl.snapshot() {
+			if c == "routeget "+host+" avoid wst0" {
+				n++
+			}
+		}
+		return n
+	}
+	for count() < 4 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if count() < 4 {
+		t.Fatalf("only %d re-pins after reconnects", count())
+	}
+	all := f.nl.snapshot()
+	// Each refresh is the triple delete, routeget, add.
+	for i, c := range all {
+		if i >= len(calls) && c == "routeget "+host+" avoid wst0" {
+			if !strings.HasPrefix(all[i-1], "delhostroute "+host+"/32") || !strings.HasPrefix(all[i+1], "hostroute "+host+"/32") {
+				t.Fatalf("refresh around call %d is not delete, routeget, add:\n%s", i, strings.Join(all[max(0, i-2):min(len(all), i+3)], "\n"))
+			}
+		}
+	}
+
+	stopDropping()
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	final := f.nl.snapshot()
+	tail := final[len(final)-8:]
+	for _, want := range []string{"delroute wst0 8000::/1", "delroute wst0 0.0.0.0/1", "delhostroute " + host + "/32"} {
+		if indexOf(final, want) < 0 {
+			t.Errorf("cleanup missing %q; tail:\n%s", want, strings.Join(tail, "\n"))
+		}
+	}
+	if last := final[len(final)-1]; !strings.HasPrefix(last, "delhostroute") {
+		t.Errorf("the pins must be removed last (after the /1 halves); last call %q", last)
+	}
+}
+
+func TestFullTunnelRefusesExplicitFwmarkWithStrictRPFilter(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	readRPFilter = func(string) (int, error) { return 1, nil }
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	_, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry)
+	if err == nil || !strings.Contains(err.Error(), "rp_filter=1") || !strings.Contains(err.Error(), "routing=pin") {
+		t.Fatalf("err = %v, want the actionable rp_filter refusal", err)
+	}
+	if f.opened != 0 {
+		t.Error("a device was created before the refusal")
+	}
+	for _, c := range f.nl.snapshot() {
+		if !strings.HasPrefix(c, "routeget") {
+			t.Errorf("host was modified before the refusal: %q", c)
+		}
+	}
+	if c.socketMark() != 0 {
+		t.Error("the mark was armed although startup was refused")
+	}
+}
+
+func TestFullTunnelAutoPicksPinUnderStrictRPFilter(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	readRPFilter = func(iface string) (int, error) {
+		if iface != "eth0" {
+			t.Errorf("rp_filter read for %q, want the egress interface eth0", iface)
+		}
+		return 1, nil
+	}
+	_, _ = startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"}, "tun://wst0?route=default")
+	calls := f.nl.snapshot()
+	if indexOf(calls, "hostroute "+host) < 0 || indexOf(calls, "rule add") >= 0 {
+		t.Fatalf("auto under strict rp_filter must pin, not install rules:\n%s", strings.Join(calls, "\n"))
+	}
+}
+
+func TestFullTunnelUsesGivenSocketMarkAsTable(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	c, _ := startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust", SocketSoMark: 4242}, "tun://wst0?route=default&routing=fwmark")
+	if c.socketMark() != 4242 || indexOf(f.nl.snapshot(), "tableroute wst0 0.0.0.0/0 table 4242") < 0 {
+		t.Fatalf("mark = %d, calls:\n%s", c.socketMark(), strings.Join(f.nl.snapshot(), "\n"))
+	}
+}
+
+func TestFullTunnelRefusesConnectionPool(t *testing.T) {
+	f := newFakeHost(t, "127.0.0.1")
+	c := NewClient(Config{ServerURL: "ws://127.0.0.1:1", PathPrefix: "v1", ConnectionMinIdle: 1})
+	t.Cleanup(func() { c.pool.cancel() })
+	if _, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default"), f.deps, fastRetry); err == nil || !strings.Contains(err.Error(), "connection_min_idle") {
+		t.Fatalf("err = %v, want a refusal naming connection_min_idle", err)
+	}
+}
+
+func TestFullTunnelSetupFailureRollsBack(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.nl.failOn = "rule add ipv4 pref 32765 not fwmark 0x7774 table 30580"
+	f.nl.failErr = syscall.EPERM
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	if _, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry); err == nil {
+		t.Fatal("startTun succeeded although a rule could not be installed")
+	}
+	f.nl.mu.Lock()
+	defer f.nl.mu.Unlock()
+	if len(f.nl.existingRules) != 0 {
+		t.Fatalf("rules left after a failed setup: %v", f.nl.existingRules)
+	}
+	if indexOf(f.nl.calls, "deltableroute wst0 0.0.0.0/0") < 0 {
+		t.Errorf("table route not removed after a failed setup:\n%s", strings.Join(f.nl.calls, "\n"))
+	}
+}
+
+func TestPurgeStaleRules(t *testing.T) {
+	ours := fullTunnelRules(4, 0x7774)
+	ours6 := fullTunnelRules(6, 0x7774)
+	foreign := []ruleSpec{
+		{Family: 4, Priority: 0, Table: 255, Suppress: -1},
+		{Family: 4, Priority: 32766, Table: 254, Suppress: -1},
+		{Family: 4, Priority: rulePrioMark, Table: 99, Mark: 99, NotMark: true, Suppress: -1}, // another mark's table
+		{Family: 4, Priority: 100, Table: 5, Suppress: -1},
+	}
+	stale := slices.Concat(foreign, ours, ours6, []ruleSpec{ours[0]}) // one duplicated
+	nl := &recordingConfigurer{existingRules: stale}
+	if err := purgeStaleRules(nl, 0x7774); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(nl.existingRules, foreign) {
+		t.Fatalf("rules after purge = %v, want only the foreign ones %v", nl.existingRules, foreign)
+	}
+}
+
+func TestStaleRulesMatchesOnlyOurPrioritiesAndTable(t *testing.T) {
+	r := func(prio, table int, mark uint32, not bool, suppress int) ruleSpec {
+		return ruleSpec{Family: 4, Priority: prio, Table: table, Mark: mark, NotMark: not, Suppress: suppress}
+	}
+	existing := []ruleSpec{
+		r(32764, 254, 0, false, 0),     // ours
+		r(32764, 254, 0, false, -1),    // not a suppress rule
+		r(32764, 100, 0, false, 0),     // another table
+		r(32765, 7000, 7000, true, -1), // ours for mark 7000
+		r(32765, 7001, 7001, true, -1),
+		r(32765, 7000, 0, false, -1), // no fwmark
+	}
+	got := staleRules(existing, 7000)
+	want := []ruleSpec{existing[0], existing[3]}
+	if !slices.Equal(got, want) {
+		t.Fatalf("staleRules = %v, want %v", got, want)
+	}
+}
+
+func TestPurgeSkipsIPv6WhenUnsupported(t *testing.T) {
+	nl := &unsupportedV6Lister{}
+	if err := purgeStaleRules(nl, 1); err != nil {
+		t.Fatalf("an IPv6-less kernel must not fail the purge: %v", err)
+	}
+}
+
+type unsupportedV6Lister struct{ recordingConfigurer }
+
+func (u *unsupportedV6Lister) ListRules(family int) ([]ruleSpec, error) {
+	if family == 6 {
+		return nil, syscall.EAFNOSUPPORT
+	}
+	return nil, nil
+}
+
+func TestConfigureDNS(t *testing.T) {
+	var calls [][]string
+	deps := tunDeps{
+		lookPath: func(string) (string, error) { return "/bin/resolvectl", nil },
+		runCmd: func(_ context.Context, name string, args ...string) error {
+			calls = append(calls, append([]string{name}, args...))
+			return nil
+		},
+	}
+	revert := configureDNS(context.Background(), deps, "wst0", []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("2606:4700:4700::1111")})
+	want := [][]string{
+		{"/bin/resolvectl", "dns", "wst0", "1.1.1.1", "2606:4700:4700::1111"},
+		{"/bin/resolvectl", "domain", "wst0", "~."},
+	}
+	if !slices.EqualFunc(calls, want, slices.Equal) {
+		t.Fatalf("calls = %v, want %v", calls, want)
+	}
+	_ = revert()
+	if last := calls[len(calls)-1]; !slices.Equal(last, []string{"/bin/resolvectl", "revert", "wst0"}) {
+		t.Fatalf("revert call = %v", last)
+	}
+
+	calls = nil
+	configureDNS(context.Background(), deps, "wst0", nil)
+	if len(calls) != 0 {
+		t.Fatalf("no dns= must not run resolvectl: %v", calls)
+	}
+}
+
+func TestConfigureDNSWithoutResolvectlWarns(t *testing.T) {
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	ran := false
+	deps := tunDeps{
+		lookPath: func(string) (string, error) { return "", errors.New("not found") },
+		runCmd:   func(context.Context, string, ...string) error { ran = true; return nil },
+	}
+	revert := configureDNS(context.Background(), deps, "wst0", []netip.Addr{netip.MustParseAddr("1.1.1.1")})
+	if ran {
+		t.Error("ran a command although resolvectl is absent")
+	}
+	if !strings.Contains(buf.String(), "level=WARN") || !strings.Contains(buf.String(), "resolvectl") {
+		t.Errorf("log = %q, want a warning mentioning resolvectl", buf.String())
+	}
+	if err := revert(); err != nil {
+		t.Errorf("revert = %v", err)
+	}
+}
+
+func TestMarkedDialerAppliesTheMark(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = pc.Close() })
+	var gotMark uint32
+	var calls int
+	dial := markedDialer(0xbeef, func(fd uintptr, mark uint32) error {
+		calls++
+		gotMark = mark
+		if fd == 0 {
+			t.Error("setMark called without a socket")
+		}
+		return nil
+	})
+	conn, err := dial(context.Background(), "udp", pc.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = conn.Close()
+	if calls != 1 || gotMark != 0xbeef {
+		t.Fatalf("setMark calls = %d mark = %#x, want one call with 0xbeef", calls, gotMark)
+	}
+
+	// A failing setsockopt must fail the dial: an unmarked DNS query would go
+	// into the tunnel.
+	dial = markedDialer(1, func(uintptr, uint32) error { return syscall.EPERM })
+	if conn, err := dial(context.Background(), "udp", pc.LocalAddr().String()); err == nil {
+		_ = conn.Close()
+		t.Fatal("dial succeeded although the mark could not be set")
+	}
+}
+
+func TestResolverFallsBackToLastKnownAddresses(t *testing.T) {
+	// The marked resolver cannot reach any DNS server (the tunnel is down and so
+	// is the path): the guard must carry on with the addresses it knew.
+	c := NewClient(Config{ServerURL: "wss://tun.example.test"})
+	c.resolver.Store(&net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("dns unreachable")
+	}})
+	known := []netip.Addr{netip.MustParseAddr("203.0.113.5")}
+	servers := c.newTunServers(mustSpec(t, "tun://wst0?route=default"), known)
+	got, err := servers.refresh(context.Background())
+	if err != nil || !slices.Equal(got, known) {
+		t.Fatalf("refresh = %v, %v; want the last known %v", got, err, known)
+	}
+	// And with nothing known it fails closed.
+	servers = c.newTunServers(mustSpec(t, "tun://wst0?route=default"), nil)
+	if _, err := servers.refresh(context.Background()); err == nil {
+		t.Fatal("no known address and no DNS must fail closed")
+	}
+}

@@ -57,13 +57,14 @@ func (c *Client) dialRawTransport(ctx context.Context, network, addr string) (ne
 	var d net.Dialer
 	d.Timeout = 10 * time.Second
 
-	if c.Config.SocketSoMark != 0 {
+	if mark := c.socketMark(); mark != 0 {
 		d.Control = func(network, address string, rc syscall.RawConn) error {
 			return rc.Control(func(fd uintptr) {
-				_ = socket.SetSoMark(fd, c.Config.SocketSoMark)
+				_ = socket.SetSoMark(fd, mark)
 			})
 		}
 	}
+	d.Resolver = c.resolver.Load()
 
 	conn, err := d.DialContext(ctx, network, addr)
 	if err != nil {

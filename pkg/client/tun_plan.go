@@ -67,6 +67,8 @@ type netConfigurer interface {
 	DelHostRoute(dst netip.Prefix, gw netip.Addr, link string) error
 	AddRule(r ruleSpec) error
 	DelRule(r ruleSpec) error
+	// ListRules returns the policy rules of one address family (4 or 6).
+	ListRules(family int) ([]ruleSpec, error)
 
 	// RouteGet reports how the host reaches ip over the main table, ignoring
 	// routes through avoidLink (the tunnel device): the answer must be the real

@@ -86,7 +86,7 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 			TLSClientConfig: tlsConfig,
 			QUICConfig:      newWebTransportQUICConfig(),
 		}
-		if w.client.Config.SocketSoMark != 0 {
+		if w.client.socketMark() != 0 {
 			tr.DialAddr = w.dialMarkedAddr
 		}
 
@@ -153,15 +153,16 @@ func sessionDead(s interface{ Context() context.Context }) bool {
 }
 
 func (w *WebTransportClient) dialMarkedAddr(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
-	remoteAddr, err := net.ResolveUDPAddr("udp", addr)
+	remoteAddr, err := w.client.resolveUDPAddr(ctx, addr)
 	if err != nil {
 		return nil, fmt.Errorf("resolve WebTransport address: %w", err)
 	}
+	mark := w.client.socketMark()
 
 	var lc net.ListenConfig
 	lc.Control = func(network, address string, rc syscall.RawConn) error {
 		return rc.Control(func(fd uintptr) {
-			_ = socket.SetSoMark(fd, w.client.Config.SocketSoMark)
+			_ = socket.SetSoMark(fd, mark)
 		})
 	}
 	packetConn, err := lc.ListenPacket(ctx, "udp", "")

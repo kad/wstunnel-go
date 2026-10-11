@@ -34,8 +34,9 @@ func (unsupportedConfigurer) AddHostRoute(netip.Prefix, netip.Addr, string) erro
 func (unsupportedConfigurer) DelHostRoute(netip.Prefix, netip.Addr, string) error {
 	return errTunUnsupported
 }
-func (unsupportedConfigurer) AddRule(ruleSpec) error { return errTunUnsupported }
-func (unsupportedConfigurer) DelRule(ruleSpec) error { return errTunUnsupported }
+func (unsupportedConfigurer) AddRule(ruleSpec) error            { return errTunUnsupported }
+func (unsupportedConfigurer) DelRule(ruleSpec) error            { return errTunUnsupported }
+func (unsupportedConfigurer) ListRules(int) ([]ruleSpec, error) { return nil, errTunUnsupported }
 func (unsupportedConfigurer) RouteGet(netip.Addr, string) (routeInfo, error) {
 	return routeInfo{}, errTunUnsupported
 }
