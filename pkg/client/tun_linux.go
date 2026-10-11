@@ -310,10 +310,14 @@ func (netlinkConfigurer) RouteGet(ip netip.Addr, avoidLink string) (routeInfo, e
 			if !ok {
 				continue
 			}
-			ones, _ := r.Dst.Mask.Size()
+			ones, total := r.Dst.Mask.Size()
 			if base.Is4In6() {
+				// netlink hands out IPv4 destinations in 16-byte form with a
+				// 32-bit mask; a 128-bit mask would count the 96 mapped bits too.
 				base = base.Unmap()
-				ones -= 96
+				if total == 128 {
+					ones -= 96
+				}
 			}
 			if ones < 0 || !netip.PrefixFrom(base, ones).Contains(ip) {
 				continue
