@@ -92,6 +92,11 @@ build-caddy: ## Build Caddy with wstunnel-go module
 check-caddy: build-caddy ## Check if Caddy module is correctly registered
 	./pkg/caddy/caddy list-modules | grep wstunnel
 
+.PHONY: test-caddy-interop
+test-caddy-interop: build build-caddy ## Run the tun namespace tests against a real Caddy build
+	@echo "Running tun tests against Caddy..."
+	WST_CADDY_BIN=$(CURDIR)/pkg/caddy/caddy go test -count=1 -v -run 'TestTunNetns/Go-Caddy' ./tests/tester/
+
 .PHONY: tag
 tag: ## Create annotated tags (e.g., make tag VERSION=0.0.1)
 	@if [ -z "$(VERSION)" ]; then echo "Error: VERSION is required (e.g., make tag VERSION=0.0.1)"; exit 1; fi

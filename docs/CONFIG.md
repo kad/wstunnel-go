@@ -201,6 +201,7 @@ server:
 - `enable_tun`: accept packet-level tun sessions (Go-only extension). Default `false`. Required even when restrictions allow every protocol, because an empty `protocol:` list admits all of them.
 - `tun_udp_timeout`: close a tun UDP flow after this long without traffic in either direction. Default `30s`.
 - `tun_max_flows`: budget of concurrent outbound flows (TCP connections plus UDP associations) shared by ALL tun sessions on the server. Default `4096`. A session is additionally capped at 4096 flows of its own. Flows over the budget are refused (TCP gets a reset). Worst-case memory is roughly 128 KiB per live UDP flow (two 64 KiB relay buffers), so it is bounded by `tun_max_flows` server-wide, plus a gVisor stack and NIC queue (up to 32 MiB at MTU 65535) per session.
+- `tun_allow`: list of networks (CIDR, or a single address) that tun flows may reach, applied in addition to any restriction rule. Empty means no extra limit. It only narrows: it does not lift the built-in deny list, and it does not affect other tunnel types. An entry that does not parse makes the command line and the Caddy module refuse to start, and a server built in code from such a value refuses every tun flow. On the command line it is `--tun-allow` and can be repeated.
 - `tun_max_sessions`: maximum concurrent tun sessions. Default `256`. The check runs after the connection is upgraded, so a client over the limit sees the connection closed immediately (not an HTTP 503). On WebTransport every stream is a session.
 
 ## Restriction config example
@@ -267,8 +268,34 @@ restrictions:
 ```
 
 - Put `Tun` in its own `!Tunnel` entry. The session claim carries the placeholder destination `0.0.0.0:0`, so `port` or `cidr` filters on the same entry would reject the session itself.
-- Loopback, link-local (including `169.254.169.254`), unspecified, multicast, broadcast and `fd00:ec2::254` are denied even when a rule matches. A rule lifts this only with a CIDR that lies entirely inside a denied prefix containing the destination, for example `127.0.0.1/32` or `127.0.0.0/8` for loopback. Broad CIDRs never lift it: `0.0.0.0/0`, `::/0`, `::/1` and the routing pair `0.0.0.0/1` + `128.0.0.0/1` lift nothing, and neither does a CIDR that merely straddles a denied prefix (`126.0.0.0/7` for `127.0.0.0/8`).
+- Loopback, link-local (including `169.254.169.254`), unspecified, multicast, broadcast, `fd00:ec2::254` and the Alibaba (`100.100.100.200`) and Azure (`168.63.129.16`) metadata addresses are denied even when a rule matches. An IPv6 address that embeds a denied IPv4 address (NAT64 `64:ff9b::/96`, 6to4 `2002::/16`, the deprecated IPv4-compatible `::/96`) is denied too, and no rule can lift that. A rule lifts this only with a CIDR that lies entirely inside a denied prefix containing the destination, for example `127.0.0.1/32` or `127.0.0.0/8` for loopback. Broad CIDRs never lift it: `0.0.0.0/0`, `::/0`, `::/1` and the routing pair `0.0.0.0/1` + `128.0.0.0/1` lift nothing, and neither does a CIDR that merely straddles a denied prefix (`126.0.0.0/7` for `127.0.0.0/8`).
 - The server ignores the `r` and `rp` a client puts in a tun claim: it evaluates restrictions against the fixed placeholder `0.0.0.0:0`, so a forged destination changes nothing.
 - Rules built from `--restrict-to host:port` (and `restrict_to`) also admit tun sessions, still subject to `enable_tun`. Each flow is then checked against the same `host`/`port` entries, and a flow only has an IP, so only flows whose destination IP matches a `host` that was written as an IP literal, on that port, are allowed. Use IP literals in `restrict_to` if you want tun access.
 - A `!Tunnel {}` entry with no `protocol` list allows everything, including tun sessions and every flow outside the deny list.
 - Without any restrictions, `enable_tun` alone admits sessions, and every flow outside the deny list is allowed.
+
+## Caddy module
+
+The Caddy module (`http.handlers.wstunnel`, built with `xcaddy build --with github.com/kad/wstunnel-go/pkg/caddy`) registers a `wstunnel` Caddyfile directive that runs before `reverse_proxy`. It serves the WebSocket and HTTP/2 transports; WebTransport is not served through Caddy.
+
+```caddyfile
+wstunnel {
+    mode rust                      # or ws
+    prefix wstunnel                # path prefix, without the leading slash
+    restrict_config /etc/wstunnel/rules.yaml
+    restrict_to 10.0.0.5:22        # repeatable
+    ping_interval 30s
+    idle_timeout 3m
+    mask_frame
+    enable_tun
+    tun_udp_timeout 30s
+    tun_max_flows 4096
+    tun_max_sessions 256
+    tun_allow 10.0.0.0/8 192.0.2.9   # one or more per line, repeatable
+}
+```
+
+- Values are validated when the configuration loads: an unknown `mode` or a `tun_allow` entry that does not parse fails the load instead of starting a handler that does something else.
+- On a configuration reload Caddy discards the old handler. Its tun sessions and reverse-tunnel listeners are closed, so clients reconnect and are subject to the new rules.
+- The module's JSON form (`caddy adapt` output) uses the Go field names of the server configuration under `config` (for example `EnableTun`, `TunAllow`), with durations in nanoseconds. Prefer the Caddyfile. The inline `restrictions` field cannot express host patterns or CIDRs in JSON; use `restrict_config` for rules.
+- A tun session over Caddy needs a restriction rule that allows `Tun` (see [Tun sessions](#tun-sessions)), exactly as with the standalone server.

@@ -51,6 +51,8 @@ const (
 	tunBinEnv    = "WST_TUN_NETNS_BIN"    // absolute path of the wstunnel-go binary
 	tunEchoEnv   = "WST_TUN_NETNS_ECHO"   // listen address; set only for the echo helper
 
+	tunCaddyEnv = "WST_CADDY_BIN" // a Caddy built with this module (make build-caddy)
+
 	tunNetnsOK = "TUN_NETNS_OK"
 
 	tunServerHost = "10.200.0.2"
@@ -74,12 +76,61 @@ var tunNetnsCases = []struct {
 	scheme string
 	flags  []string // passed to both server and client
 	attach bool     // pre-create wst0, use configure=false, and run the client without CAP_NET_ADMIN
+	caddy  bool     // serve with a Caddy binary that has the wstunnel module instead of wstunnel-go
 }{
-	{"Go-Go-Tun-WS", "ws", nil, false},
-	{"Go-Go-Tun-RFC", "ws", []string{"--mode", "ws"}, false},
-	{"Go-Go-Tun-H2", "http", nil, false},
-	{"Go-Go-Tun-WT", "wt", nil, false},
-	{"Go-Go-Tun-Attach", "ws", nil, true},
+	{"Go-Go-Tun-WS", "ws", nil, false, false},
+	{"Go-Go-Tun-RFC", "ws", []string{"--mode", "ws"}, false, false},
+	{"Go-Go-Tun-H2", "http", nil, false, false},
+	{"Go-Go-Tun-WT", "wt", nil, false, false},
+	{"Go-Go-Tun-Attach", "ws", nil, true, false},
+	{"Go-Caddy-Tun-WS", "ws", nil, false, true},
+	{"Go-Caddy-Tun-RFC", "ws", []string{"--mode", "ws"}, false, true},
+	{"Go-Caddy-Tun-H2", "http", nil, false, true},
+}
+
+// caddyBinary finds a Caddy built with the wstunnel module, or returns "".
+func caddyBinary() string {
+	if p := os.Getenv(tunCaddyEnv); p != "" {
+		return p
+	}
+	if p, err := filepath.Abs("../../pkg/caddy/caddy"); err == nil {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+	}
+	return ""
+}
+
+// caddyfile is the site config for a Caddy server that answers tun sessions on
+// the server address, with the same restrictions as the wstunnel-go server and
+// tun_allow narrowed to the one network the test may reach.
+func caddyfile(rules string, flags []string) string {
+	mode := "rust"
+	for i, f := range flags {
+		if f == "--mode" && i+1 < len(flags) {
+			mode = flags[i+1]
+		}
+	}
+	return fmt.Sprintf(`{
+	admin off
+	auto_https off
+	servers {
+		protocols h1 h2 h2c
+	}
+}
+
+http://%s:%d {
+	route /v1/* {
+		wstunnel {
+			prefix v1
+			mode %s
+			enable_tun
+			restrict_config %s
+			tun_allow %s
+		}
+	}
+}
+`, tunServerHost, tunServerPort, mode, rules, tunTargetNet)
 }
 
 func TestTunNetns(t *testing.T) {
@@ -113,11 +164,14 @@ func TestTunNetns(t *testing.T) {
 					t.Skip("setpriv not found in PATH; it is needed to run the client without CAP_NET_ADMIN")
 				}
 			}
+			if tc.caddy && caddyBinary() == "" {
+				t.Skip("no Caddy with the wstunnel module: run 'make build-caddy' or set " + tunCaddyEnv)
+			}
 			ctx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
 			defer cancel()
 			args := append(append([]string{}, tunUnshareArgs...), exe, "-test.run=^TestTunNetnsDriver$", "-test.v", "-test.timeout=120s")
 			cmd := exec.CommandContext(ctx, "unshare", args...)
-			cmd.Env = append(os.Environ(), tunDriverEnv+"="+tc.name, tunBinEnv+"="+bin)
+			cmd.Env = append(os.Environ(), tunDriverEnv+"="+tc.name, tunBinEnv+"="+bin, tunCaddyEnv+"="+caddyBinary())
 			out, err := cmd.CombinedOutput()
 			if err != nil || !strings.Contains(string(out), tunNetnsOK) {
 				t.Fatalf("namespace driver failed (err=%v):\n%s", err, out)
@@ -140,10 +194,10 @@ func TestTunNetnsDriver(t *testing.T) {
 	}
 	var scheme string
 	var flags []string
-	var attach bool
+	var attach, viaCaddy bool
 	for _, tc := range tunNetnsCases {
 		if tc.name == name {
-			scheme, flags, attach = tc.scheme, tc.flags, tc.attach
+			scheme, flags, attach, viaCaddy = tc.scheme, tc.flags, tc.attach, tc.caddy
 		}
 	}
 	if scheme == "" {
@@ -210,10 +264,23 @@ func TestTunNetnsDriver(t *testing.T) {
 	}
 
 	serverURL := fmt.Sprintf("%s://%s:%d", scheme, tunServerHost, tunServerPort)
-	serverArgs := append([]string{"nsenter", "-t", pid, "-n", "--", bin, "--log-lvl", "DEBUG",
-		"server", "--http-upgrade-path-prefix", "v1", "--enable-tun", "--restrict-config", rules}, flags...)
-	serverArgs = append(serverArgs, serverURL)
-	srv, err := startProcess("Server-"+name, serverArgs[0], serverArgs[1:], nil)
+	var serverArgs []string
+	var serverEnv []string
+	if viaCaddy {
+		cfgDir := t.TempDir()
+		cfgPath := filepath.Join(cfgDir, "Caddyfile")
+		if err := os.WriteFile(cfgPath, []byte(caddyfile(rules, flags)), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		serverArgs = []string{"nsenter", "-t", pid, "-n", "--", os.Getenv(tunCaddyEnv), "run", "--config", cfgPath, "--adapter", "caddyfile"}
+		// Keep Caddy's storage out of the real home directory.
+		serverEnv = append(os.Environ(), "HOME="+cfgDir, "XDG_DATA_HOME="+cfgDir+"/data", "XDG_CONFIG_HOME="+cfgDir+"/config")
+	} else {
+		serverArgs = append([]string{"nsenter", "-t", pid, "-n", "--", bin, "--log-lvl", "DEBUG",
+			"server", "--http-upgrade-path-prefix", "v1", "--enable-tun", "--restrict-config", rules}, flags...)
+		serverArgs = append(serverArgs, serverURL)
+	}
+	srv, err := startProcess("Server-"+name, serverArgs[0], serverArgs[1:], serverEnv)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -92,6 +92,10 @@ For the server:
     sudo systemctl enable --now wstunnel-go-server@main
     ```
 
+For a tun (packet tunnel) client or server, including a systemd unit that grants
+`CAP_NET_ADMIN` to the client and the Caddy variants, see
+[Deployment in docs/TUN.md](docs/TUN.md#deployment).
+
 ### Windows Task Scheduler Integration
 
 Use the provided PowerShell scripts in the `packaging/windows` directory to register `wstunnel-go` as a background task.
@@ -106,31 +110,49 @@ Use the provided PowerShell scripts in the `packaging/windows` directory to regi
 
 ### Caddy Integration (Server)
 
-`wstunnel-go` can be built into Caddy server as an HTTP handler.
+`wstunnel-go` can be built into Caddy as an HTTP handler. It serves the WebSocket
+(`mode rust` and `mode ws`) and HTTP/2 transports, including tun sessions;
+WebTransport is not served through Caddy.
 
-1.  Build Caddy with `wstunnel-go` module:
+1.  Build Caddy with the `wstunnel-go` module:
     ```bash
     xcaddy build --with github.com/kad/wstunnel-go/pkg/caddy
     ```
 
-2.  Configure in `Caddyfile`:
+2.  Configure it in the `Caddyfile`:
     ```caddyfile
-    {
-        order wstunnel before reverse_proxy
-    }
-
     example.com {
         route /wstunnel/* {
             wstunnel {
-                prefix /wstunnel
+                prefix wstunnel
                 mode rust
                 # restrict_config /etc/wstunnel/rules.yaml
             }
         }
     }
     ```
+    The directive runs before `reverse_proxy` by default, so a site can proxy
+    everything else. An explicit `order wstunnel before reverse_proxy` in the
+    global options is accepted but not needed. Clients must use the same prefix
+    (`--http-upgrade-path-prefix wstunnel`).
+
+3.  To accept tun sessions (Go-only, see [docs/TUN.md](docs/TUN.md)), add
+    `enable_tun`, a restriction rule that allows `Tun`, and a limit on where
+    flows may go:
+    ```caddyfile
+    wstunnel {
+        prefix wstunnel
+        enable_tun
+        restrict_config /etc/wstunnel/rules.yaml
+        tun_allow 10.0.0.0/8 192.0.2.0/24
+    }
+    ```
+    See [docs/CONFIG.md](docs/CONFIG.md#caddy-module) for every subdirective.
 
 `wstunnel-go` in Caddy automatically leverages Caddy's TLS termination, including mTLS.
+When Caddy reloads its configuration the old handler is cleaned up: its tun sessions
+and reverse-tunnel listeners are closed, so a reload applies new rules and limits to
+every client.
 
 ## Usage
 
@@ -215,6 +237,7 @@ For a comprehensive YAML guide with annotated client/server examples and option 
 -   `--tun-udp-timeout`: Close a tun UDP flow after this long without traffic (default `30s`).
 -   `--tun-max-flows`: Maximum concurrent outbound flows across all tun sessions (default `4096`).
 -   `--tun-max-sessions`: Maximum concurrent tun sessions; extra sessions are closed immediately (default `256`).
+-   `--tun-allow`: Limit tun flow destinations to this CIDR or address; repeatable. The built-in deny list still applies.
 
 ### YAML Configuration Example
 
