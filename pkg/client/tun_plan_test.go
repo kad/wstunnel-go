@@ -13,6 +13,7 @@ type recordingConfigurer struct {
 	calls   []string
 	failOn  string // exact call text that returns an error
 	failErr error
+	routes  routeGetter // answers RouteGet
 }
 
 func (r *recordingConfigurer) record(call string) error {
@@ -32,6 +33,37 @@ func (r *recordingConfigurer) AddAddr(ifname string, p netip.Prefix) error {
 func (r *recordingConfigurer) LinkUp(ifname string) error { return r.record("up " + ifname) }
 func (r *recordingConfigurer) AddRoute(ifname string, dst netip.Prefix) error {
 	return r.record(fmt.Sprintf("route %s %s", ifname, dst))
+}
+
+// The full-tunnel operations are recorded as the call text, and a tiny state
+// model checks that undo is symmetric.
+func (r *recordingConfigurer) DelRoute(ifname string, dst netip.Prefix) error {
+	return r.record(fmt.Sprintf("delroute %s %s", ifname, dst))
+}
+func (r *recordingConfigurer) AddTableRoute(ifname string, dst netip.Prefix, table int) error {
+	return r.record(fmt.Sprintf("tableroute %s %s table %d", ifname, dst, table))
+}
+func (r *recordingConfigurer) DelTableRoute(ifname string, dst netip.Prefix, table int) error {
+	return r.record(fmt.Sprintf("deltableroute %s %s table %d", ifname, dst, table))
+}
+func (r *recordingConfigurer) AddHostRoute(dst netip.Prefix, gw netip.Addr, link string) error {
+	return r.record(fmt.Sprintf("hostroute %s via %s dev %s", dst, gw, link))
+}
+func (r *recordingConfigurer) DelHostRoute(dst netip.Prefix, gw netip.Addr, link string) error {
+	return r.record(fmt.Sprintf("delhostroute %s via %s dev %s", dst, gw, link))
+}
+func (r *recordingConfigurer) AddRule(rule ruleSpec) error {
+	return r.record("rule add " + rule.String())
+}
+func (r *recordingConfigurer) DelRule(rule ruleSpec) error {
+	return r.record("rule del " + rule.String())
+}
+func (r *recordingConfigurer) RouteGet(ip netip.Addr, avoid string) (routeInfo, error) {
+	r.calls = append(r.calls, fmt.Sprintf("routeget %s avoid %s", ip, avoid))
+	if r.routes == nil {
+		return routeInfo{}, errors.New("no route")
+	}
+	return r.routes.RouteGet(ip)
 }
 
 func mustSpec(t *testing.T, arg string) *TunSpec {

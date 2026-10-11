@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
@@ -138,4 +140,188 @@ func (netlinkConfigurer) AddRoute(ifname string, dst netip.Prefix) error {
 		Dst:       ipNet(dst),
 		Scope:     netlink.SCOPE_LINK,
 	})
+}
+
+func (netlinkConfigurer) DelRoute(ifname string, dst netip.Prefix) error {
+	link, err := netlink.LinkByName(ifname)
+	if err != nil {
+		return err
+	}
+	return netlink.RouteDel(&netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst:       ipNet(dst),
+		Scope:     netlink.SCOPE_LINK,
+	})
+}
+
+func (netlinkConfigurer) tableRoute(ifname string, dst netip.Prefix, table int) (*netlink.Route, error) {
+	link, err := netlink.LinkByName(ifname)
+	if err != nil {
+		return nil, err
+	}
+	return &netlink.Route{
+		LinkIndex: link.Attrs().Index,
+		Dst:       ipNet(dst),
+		Scope:     netlink.SCOPE_LINK,
+		Table:     table,
+	}, nil
+}
+
+func (n netlinkConfigurer) AddTableRoute(ifname string, dst netip.Prefix, table int) error {
+	r, err := n.tableRoute(ifname, dst, table)
+	if err != nil {
+		return err
+	}
+	return netlink.RouteAdd(r)
+}
+
+func (n netlinkConfigurer) DelTableRoute(ifname string, dst netip.Prefix, table int) error {
+	r, err := n.tableRoute(ifname, dst, table)
+	if err != nil {
+		return err
+	}
+	return netlink.RouteDel(r)
+}
+
+func hostRoute(dst netip.Prefix, gw netip.Addr, linkName string) (*netlink.Route, error) {
+	link, err := netlink.LinkByName(linkName)
+	if err != nil {
+		return nil, err
+	}
+	r := &netlink.Route{LinkIndex: link.Attrs().Index, Dst: ipNet(dst), Scope: netlink.SCOPE_LINK}
+	if gw.IsValid() {
+		r.Gw = net.IP(gw.AsSlice())
+		r.Scope = netlink.SCOPE_UNIVERSE
+	}
+	return r, nil
+}
+
+func (netlinkConfigurer) AddHostRoute(dst netip.Prefix, gw netip.Addr, link string) error {
+	r, err := hostRoute(dst, gw, link)
+	if err != nil {
+		return err
+	}
+	return netlink.RouteAdd(r)
+}
+
+func (netlinkConfigurer) DelHostRoute(dst netip.Prefix, gw netip.Addr, link string) error {
+	r, err := hostRoute(dst, gw, link)
+	if err != nil {
+		return err
+	}
+	return netlink.RouteDel(r)
+}
+
+func toNetlinkRule(r ruleSpec) *netlink.Rule {
+	nr := netlink.NewRule()
+	nr.Family = netlink.FAMILY_V4
+	if r.Family == 6 {
+		nr.Family = netlink.FAMILY_V6
+	}
+	nr.Priority = r.Priority
+	nr.Table = r.Table
+	if r.NotMark {
+		mask := ^uint32(0)
+		nr.Mark = r.Mark
+		nr.Mask = &mask
+		nr.Invert = true
+	}
+	nr.SuppressPrefixlen = r.Suppress
+	return nr
+}
+
+func (netlinkConfigurer) AddRule(r ruleSpec) error { return netlink.RuleAdd(toNetlinkRule(r)) }
+func (netlinkConfigurer) DelRule(r ruleSpec) error { return netlink.RuleDel(toNetlinkRule(r)) }
+
+// RouteGet finds the best main-table route to ip that does not go through
+// avoidLink. The kernel's own lookup (ip route get) cannot be used for this:
+// once the tunnel's /1 routes exist it answers with the tunnel, which is
+// exactly the path being avoided.
+func (netlinkConfigurer) RouteGet(ip netip.Addr, avoidLink string) (routeInfo, error) {
+	avoidIdx := 0
+	if avoidLink != "" {
+		if l, err := netlink.LinkByName(avoidLink); err == nil {
+			avoidIdx = l.Attrs().Index
+		}
+	}
+	family := netlink.FAMILY_V4
+	if ip.Is6() {
+		family = netlink.FAMILY_V6
+	}
+	routes, err := netlink.RouteListFiltered(family, &netlink.Route{Table: unix.RT_TABLE_MAIN}, netlink.RT_FILTER_TABLE)
+	if err != nil {
+		return routeInfo{}, err
+	}
+	var best *netlink.Route
+	bestBits := -1
+	var bestIdx int
+	var bestGw net.IP
+	for i := range routes {
+		r := &routes[i]
+		if r.Type != unix.RTN_UNICAST {
+			continue
+		}
+		idx, gw := r.LinkIndex, r.Gw
+		if len(r.MultiPath) > 0 {
+			idx, gw = r.MultiPath[0].LinkIndex, r.MultiPath[0].Gw
+		}
+		if idx == 0 || idx == avoidIdx {
+			continue
+		}
+		bits := 0
+		if r.Dst != nil {
+			base, ok := netip.AddrFromSlice(r.Dst.IP)
+			if !ok {
+				continue
+			}
+			ones, _ := r.Dst.Mask.Size()
+			if base.Is4In6() {
+				base = base.Unmap()
+				ones -= 96
+			}
+			if ones < 0 || !netip.PrefixFrom(base, ones).Contains(ip) {
+				continue
+			}
+			bits = ones
+		}
+		if bits > bestBits || (bits == bestBits && r.Priority < best.Priority) {
+			best, bestBits, bestIdx, bestGw = r, bits, idx, gw
+		}
+	}
+	if best == nil {
+		return routeInfo{}, fmt.Errorf("no route to %s", ip)
+	}
+	link, err := netlink.LinkByIndex(bestIdx)
+	if err != nil {
+		return routeInfo{}, err
+	}
+	info := routeInfo{Link: link.Attrs().Name}
+	if gw, ok := netip.AddrFromSlice(bestGw); ok {
+		info.Gateway = gw.Unmap()
+	}
+	if src, ok := netip.AddrFromSlice(best.Src); ok {
+		info.Src = src.Unmap()
+	}
+	return info, nil
+}
+
+// rpFilterOf reads the effective rp_filter for traffic arriving on ifname: the
+// larger of the "all" and per-interface settings, as the kernel does.
+func rpFilterOf(ifname string) (int, error) {
+	read := func(scope string) (int, error) {
+		b, err := os.ReadFile("/proc/sys/net/ipv4/conf/" + scope + "/rp_filter")
+		if err != nil {
+			return 0, err
+		}
+		return strconv.Atoi(strings.TrimSpace(string(b)))
+	}
+	all, err := read("all")
+	if err != nil {
+		return 0, err
+	}
+	dev, err := read(ifname)
+	if err != nil {
+		return 0, err
+	}
+	return max(all, dev), nil
 }
