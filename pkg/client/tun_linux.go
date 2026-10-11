@@ -251,6 +251,66 @@ func toNetlinkRule(r ruleSpec) *netlink.Rule {
 	return nr
 }
 
+// ruleFromNetlink converts a listed rule, recording in Selectors everything our
+// own rules never have.
+func ruleFromNetlink(family int, r netlink.Rule) ruleSpec {
+	var sel []string
+	if r.Src != nil {
+		sel = append(sel, "from "+r.Src.String())
+	}
+	if r.Dst != nil {
+		sel = append(sel, "to "+r.Dst.String())
+	}
+	if r.IifName != "" {
+		sel = append(sel, "iif "+r.IifName)
+	}
+	if r.OifName != "" {
+		sel = append(sel, "oif "+r.OifName)
+	}
+	if r.Mask != nil && *r.Mask != ^uint32(0) {
+		sel = append(sel, fmt.Sprintf("mask %#x", *r.Mask))
+	}
+	if r.Tos != 0 {
+		sel = append(sel, fmt.Sprintf("tos %#x", r.Tos))
+	}
+	if r.TunID != 0 {
+		sel = append(sel, fmt.Sprintf("tunid %d", r.TunID))
+	}
+	if r.IPProto != 0 {
+		sel = append(sel, fmt.Sprintf("ipproto %d", r.IPProto))
+	}
+	if r.Sport != nil {
+		sel = append(sel, "sport")
+	}
+	if r.Dport != nil {
+		sel = append(sel, "dport")
+	}
+	if r.UIDRange != nil {
+		sel = append(sel, "uidrange")
+	}
+	if r.Goto >= 0 {
+		sel = append(sel, fmt.Sprintf("goto %d", r.Goto))
+	}
+	if r.Flow > 0 {
+		sel = append(sel, fmt.Sprintf("flow %d", r.Flow))
+	}
+	if r.SuppressIfgroup >= 0 {
+		sel = append(sel, fmt.Sprintf("suppress_ifgroup %d", r.SuppressIfgroup))
+	}
+	if r.Type != 0 && r.Type != unix.FR_ACT_TO_TBL {
+		sel = append(sel, fmt.Sprintf("type %d", r.Type))
+	}
+	return ruleSpec{
+		Family:    family,
+		Priority:  r.Priority,
+		Table:     r.Table,
+		Mark:      r.Mark,
+		NotMark:   r.Invert && (r.Mark != 0 || r.Mask != nil),
+		Suppress:  r.SuppressPrefixlen,
+		Selectors: strings.Join(sel, " "),
+	}
+}
+
 func (netlinkConfigurer) ListRules(family int) ([]ruleSpec, error) {
 	fam := netlink.FAMILY_V4
 	if family == 6 {
@@ -262,14 +322,7 @@ func (netlinkConfigurer) ListRules(family int) ([]ruleSpec, error) {
 	}
 	out := make([]ruleSpec, 0, len(rules))
 	for _, r := range rules {
-		out = append(out, ruleSpec{
-			Family:   family,
-			Priority: r.Priority,
-			Table:    r.Table,
-			Mark:     r.Mark,
-			NotMark:  r.Invert && (r.Mark != 0 || r.Mask != nil),
-			Suppress: r.SuppressPrefixlen,
-		})
+		out = append(out, ruleFromNetlink(family, r))
 	}
 	return out, nil
 }

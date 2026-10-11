@@ -90,6 +90,11 @@ type ruleSpec struct {
 	NotMark bool
 	// Suppress is the suppress_prefixlength value; negative for none.
 	Suppress int
+	// Selectors describes anything else the rule matches on or does (source,
+	// destination, interface, ports, a partial mark mask, ...). It is only
+	// filled in when listing rules; a rule of ours never has any, so a rule
+	// with selectors is somebody else's.
+	Selectors string
 }
 
 func (r ruleSpec) String() string {
@@ -101,6 +106,9 @@ func (r ruleSpec) String() string {
 	fmt.Fprintf(&b, " table %d", r.Table)
 	if r.Suppress >= 0 {
 		fmt.Fprintf(&b, " suppress_prefixlength %d", r.Suppress)
+	}
+	if r.Selectors != "" {
+		fmt.Fprintf(&b, " [%s]", r.Selectors)
 	}
 	return b.String()
 }

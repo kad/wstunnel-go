@@ -129,6 +129,9 @@ func (c *Client) resolveUDPAddr(ctx context.Context, addr string) (*net.UDPAddr,
 func classifyRules(existing []ruleSpec, mark uint32) (stale []ruleSpec, conflict []ruleSpec) {
 	for _, r := range existing {
 		switch {
+		case r.Selectors != "" && (r.Priority == rulePrioSuppress || r.Priority == rulePrioMark):
+			// Looks like ours but matches more than ours does: not ours.
+			conflict = append(conflict, r)
 		case r.Priority == rulePrioSuppress && r.Suppress == 0 && r.Table == 254 && !r.NotMark:
 			stale = append(stale, r)
 		case r.Priority == rulePrioMark && r.NotMark && r.Table == int(mark) && r.Mark == mark:

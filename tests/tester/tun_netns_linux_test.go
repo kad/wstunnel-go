@@ -519,6 +519,7 @@ var fullCases = []fullCase{
 	{"Go-Go-Tun-Full-Fwmark-StrictRP-Refused", "fwmark", 1, "refuse", ""},
 	{"Go-Go-Tun-Full-Inbound-Fwmark", "fwmark", 2, "inbound", "fwmark"},
 	{"Go-Go-Tun-Full-Inbound-Pin", "pin", 2, "inbound", "pin"},
+	{"Go-Go-Tun-Full-ForeignSelectorRule-Refused", "fwmark", 2, "refuse-selector", ""},
 	{"Go-Go-Tun-Full-PersistentDevice-Refused", "fwmark", 2, "refuse-persistent", ""},
 	{"Go-Go-Tun-Full-Cleanup-Fwmark", "fwmark", 2, "cleanup", "fwmark"},
 	{"Go-Go-Tun-Full-Cleanup-Pin", "pin", 2, "cleanup", "pin"},
@@ -892,6 +893,24 @@ print("CONNECTED" if s.recv(2)==b"hi" else "NO")`, src)...)
 			t.Errorf("a more specific route in the main table did not keep the peer connected (mode %s)", tc.wantMode)
 		}
 		run("ip", "route", "del", adminNet, "via", "10.200.0.2")
+
+	case "refuse-selector":
+		// Same priority, mark and table as ours, but restricted to a source: not
+		// ours, so it must neither be deleted nor allowed to coexist silently.
+		run("ip", "rule", "add", "pref", "32761", "from", "10.9.9.0/24", "not", "fwmark", "30580", "lookup", "30580")
+		cli := startClient()
+		select {
+		case <-cli.done:
+		case <-time.After(15 * time.Second):
+			cli.kill()
+			t.Fatalf("the client kept running; it must refuse:\n%s", cli.output())
+		}
+		if cli.err == nil || !strings.Contains(cli.output(), "ip rule del") {
+			t.Fatalf("want an actionable refusal, got err=%v:\n%s", cli.err, cli.output())
+		}
+		if !strings.Contains(rulesText(), "from 10.9.9.0/24") {
+			t.Errorf("the foreign rule was deleted:\n%s", rulesText())
+		}
 
 	case "refuse-persistent":
 		// A persistent device would outlive a crashed client and keep the default
