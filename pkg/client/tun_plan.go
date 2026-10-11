@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"syscall"
 )
 
 type netOpKind int
@@ -14,6 +15,13 @@ const (
 	opAddAddr
 	opLinkUp
 	opAddRoute
+	opDelRoute
+	opAddTableRoute
+	opDelTableRoute
+	opAddHostRoute
+	opDelHostRoute
+	opAddRule
+	opDelRule
 )
 
 // netOp is one step of configuring the TUN device.
@@ -25,6 +33,21 @@ type netOp struct {
 	// startup. Only the built-in default IPv6 address is optional, because
 	// hosts with IPv6 disabled cannot take it.
 	Optional bool
+	// SkipIfUnsupported skips the step, with a warning, only when the kernel
+	// says the address family or feature is not available (IPv6 disabled, no
+	// IPv6 policy routing). Any other failure still aborts, so a working IPv6
+	// stack cannot be left uncovered by a full tunnel.
+	SkipIfUnsupported bool
+
+	// Link is the interface a route uses; empty means the device being
+	// configured.
+	Link string
+	// Table is the routing table of opAddTableRoute and opDelTableRoute.
+	Table int
+	// Gateway is the next hop of a host route; invalid means on-link.
+	Gateway netip.Addr
+	// Rule is the policy rule of opAddRule and opDelRule.
+	Rule ruleSpec
 }
 
 // netConfigurer applies netOps to a named interface. The Linux implementation
@@ -34,6 +57,21 @@ type netConfigurer interface {
 	AddAddr(ifname string, p netip.Prefix) error
 	LinkUp(ifname string) error
 	AddRoute(ifname string, dst netip.Prefix) error
+	DelRoute(ifname string, dst netip.Prefix) error
+
+	// AddTableRoute installs dst via ifname in a routing table other than main.
+	AddTableRoute(ifname string, dst netip.Prefix, table int) error
+	DelTableRoute(ifname string, dst netip.Prefix, table int) error
+	// AddHostRoute installs dst via gw (or on-link when gw is invalid) on link.
+	AddHostRoute(dst netip.Prefix, gw netip.Addr, link string) error
+	DelHostRoute(dst netip.Prefix, gw netip.Addr, link string) error
+	AddRule(r ruleSpec) error
+	DelRule(r ruleSpec) error
+
+	// RouteGet reports how the host reaches ip over the main table, ignoring
+	// routes through avoidLink (the tunnel device): the answer must be the real
+	// path even after the tunnel's own routes exist.
+	RouteGet(ip netip.Addr, avoidLink string) (routeInfo, error)
 }
 
 // planTunNetConfig returns the ordered steps that configure a device created
@@ -154,22 +192,19 @@ func checkLoop(network netip.Prefix, kind string, spec netip.Prefix, servers []n
 // applyNetOps runs ops against ifname in order.
 func applyNetOps(ifname string, ops []netOp, nl netConfigurer) error {
 	for _, op := range ops {
-		var err error
-		switch op.Kind {
-		case opSetMTU:
-			err = nl.SetMTU(ifname, op.MTU)
-		case opAddAddr:
-			err = nl.AddAddr(ifname, op.Prefix)
-		case opLinkUp:
-			err = nl.LinkUp(ifname)
-		case opAddRoute:
-			err = nl.AddRoute(ifname, op.Prefix)
+		if op.Link == "" {
+			op.Link = ifname
 		}
+		err := runNetOp(op, nl)
 		if err == nil {
 			continue
 		}
 		if op.Optional {
-			slog.Warn("Skipping optional tun configuration", "interface", ifname, "address", op.Prefix, "err", err)
+			slog.Warn("Skipping optional tun configuration", "interface", ifname, "step", op.describe(), "err", err)
+			continue
+		}
+		if op.SkipIfUnsupported && isUnsupportedError(err) {
+			slog.Warn("Not supported here; skipping", "step", op.describe(), "err", err)
 			continue
 		}
 		return fmt.Errorf("configure %s: %s: %w", ifname, op.describe(), err)
@@ -177,7 +212,48 @@ func applyNetOps(ifname string, ops []netOp, nl netConfigurer) error {
 	return nil
 }
 
+// isUnsupportedError reports whether err means the kernel lacks the address
+// family or feature (IPv6 disabled, no IPv6 policy routing).
+func isUnsupportedError(err error) bool {
+	return errors.Is(err, syscall.EAFNOSUPPORT) || errors.Is(err, syscall.EOPNOTSUPP) ||
+		errors.Is(err, syscall.EPROTONOSUPPORT)
+}
+
+// runNetOp executes one op. Ops without a Link act on the device passed in
+// by the caller through Link.
+func runNetOp(op netOp, nl netConfigurer) error {
+	switch op.Kind {
+	case opSetMTU:
+		return nl.SetMTU(op.Link, op.MTU)
+	case opAddAddr:
+		return nl.AddAddr(op.Link, op.Prefix)
+	case opLinkUp:
+		return nl.LinkUp(op.Link)
+	case opAddRoute:
+		return nl.AddRoute(op.Link, op.Prefix)
+	case opDelRoute:
+		return nl.DelRoute(op.Link, op.Prefix)
+	case opAddTableRoute:
+		return nl.AddTableRoute(op.Link, op.Prefix, op.Table)
+	case opDelTableRoute:
+		return nl.DelTableRoute(op.Link, op.Prefix, op.Table)
+	case opAddHostRoute:
+		return nl.AddHostRoute(op.Prefix, op.Gateway, op.Link)
+	case opDelHostRoute:
+		return nl.DelHostRoute(op.Prefix, op.Gateway, op.Link)
+	case opAddRule:
+		return nl.AddRule(op.Rule)
+	case opDelRule:
+		return nl.DelRule(op.Rule)
+	}
+	return fmt.Errorf("unknown step %d", op.Kind)
+}
+
 func (op netOp) describe() string {
+	via := ""
+	if op.Gateway.IsValid() {
+		via = " via " + op.Gateway.String()
+	}
 	switch op.Kind {
 	case opSetMTU:
 		return fmt.Sprintf("set mtu %d", op.MTU)
@@ -186,7 +262,21 @@ func (op netOp) describe() string {
 	case opLinkUp:
 		return "bring link up"
 	case opAddRoute:
-		return fmt.Sprintf("add route %s", op.Prefix)
+		return fmt.Sprintf("add route %s dev %s", op.Prefix, op.Link)
+	case opDelRoute:
+		return fmt.Sprintf("delete route %s dev %s", op.Prefix, op.Link)
+	case opAddTableRoute:
+		return fmt.Sprintf("add route %s dev %s table %d", op.Prefix, op.Link, op.Table)
+	case opDelTableRoute:
+		return fmt.Sprintf("delete route %s dev %s table %d", op.Prefix, op.Link, op.Table)
+	case opAddHostRoute:
+		return fmt.Sprintf("add route %s%s dev %s", op.Prefix, via, op.Link)
+	case opDelHostRoute:
+		return fmt.Sprintf("delete route %s%s dev %s", op.Prefix, via, op.Link)
+	case opAddRule:
+		return fmt.Sprintf("add rule %s", op.Rule)
+	case opDelRule:
+		return fmt.Sprintf("delete rule %s", op.Rule)
 	}
 	return "unknown step"
 }
