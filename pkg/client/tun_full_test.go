@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -914,4 +915,61 @@ func (b *syncBuffer) String() string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buf.String()
+}
+
+// blackholeListener listens on ip:port with a backlog of zero and fills it, so
+// later SYNs are dropped silently: a server address that never answers.
+func blackholeListener(t *testing.T, ip string, port int) {
+	t.Helper()
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_STREAM, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = syscall.Close(fd) })
+	sa := &syscall.SockaddrInet4{Port: port}
+	copy(sa.Addr[:], net.ParseIP(ip).To4())
+	if err := syscall.Bind(fd, sa); err != nil {
+		t.Skipf("cannot bind %s:%d: %v", ip, port, err)
+	}
+	if err := syscall.Listen(fd, 0); err != nil {
+		t.Fatal(err)
+	}
+	addr := net.JoinHostPort(ip, strconv.Itoa(port))
+	for range 8 {
+		if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
+			t.Cleanup(func() { _ = c.Close() })
+		}
+	}
+	c, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+	if err == nil {
+		_ = c.Close()
+		t.Skip("could not fill the accept backlog; no black hole on this kernel")
+	}
+}
+
+// A first address that silently drops packets must not use up the whole dial
+// deadline: the second address still gets its turn.
+func TestFullTunnelFallsBackFromABlackHoleAddress(t *testing.T) {
+	for _, tc := range []struct{ name, scheme string }{{"rust websocket", "ws"}, {"http2 cleartext", "http"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newTestTunServer(t, "rust", "")
+			_, portStr, _ := net.SplitHostPort(srv.addr)
+			port, _ := strconv.Atoi(portStr)
+			blackholeListener(t, "127.0.0.2", port)
+
+			orig := lookupNetIP
+			t.Cleanup(func() { lookupNetIP = orig })
+			lookupNetIP = func(context.Context, string) ([]netip.Addr, error) {
+				return []netip.Addr{netip.MustParseAddr("127.0.0.2"), netip.MustParseAddr("127.0.0.1")}, nil
+			}
+			f := newFakeHost(t, "127.0.0.1")
+			f.nl.routes = routes(map[string]routeInfo{
+				"127.0.0.1": {Gateway: netip.MustParseAddr("10.200.0.2"), Link: "eth0"},
+				"127.0.0.2": {Gateway: netip.MustParseAddr("10.200.0.2"), Link: "eth0"},
+			})
+			startFullTunnel(t, f, Config{ServerURL: tc.scheme + "://" + net.JoinHostPort("tun-server.invalid", portStr), PathPrefix: "v1", WebsocketProtocol: "rust"},
+				"tun://wst0?route=default&routing=pin")
+			waitEcho(t, f.host, "after the black hole")
+		})
+	}
 }

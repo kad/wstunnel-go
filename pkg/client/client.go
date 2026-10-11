@@ -103,16 +103,41 @@ func (c *Client) pinnedTargets(addr string) []string {
 	return targets
 }
 
+// pinnedAttemptFloor is the least time one pinned address gets, when the
+// deadline allows it.
+const pinnedAttemptFloor = 2 * time.Second
+
 // dialPinned dials addr with d, trying the pinned server addresses in order
-// when there are any; the first connection that succeeds wins.
+// when there are any; the first connection that succeeds wins. The dial
+// deadline (d.Timeout and the context's) is shared out: each attempt gets the
+// remaining time divided by the addresses still to try (at least
+// pinnedAttemptFloor, never more than what is left), so an address that drops
+// packets cannot use up the deadline before the next one is tried.
 func (c *Client) dialPinned(ctx context.Context, d *net.Dialer, network, addr string) (net.Conn, error) {
 	targets := c.pinnedTargets(addr)
 	if targets == nil {
 		return d.DialContext(ctx, network, addr)
 	}
+	var deadline time.Time
+	if d.Timeout > 0 {
+		deadline = time.Now().Add(d.Timeout)
+	}
+	if dl, ok := ctx.Deadline(); ok && (deadline.IsZero() || dl.Before(deadline)) {
+		deadline = dl
+	}
 	var errs []error
-	for _, t := range targets {
-		conn, err := d.DialContext(ctx, network, t)
+	for i, t := range targets {
+		attempt := *d
+		if !deadline.IsZero() {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				errs = append(errs, context.DeadlineExceeded)
+				break
+			}
+			slice := min(max(remaining/time.Duration(len(targets)-i), pinnedAttemptFloor), remaining)
+			attempt.Timeout, attempt.Deadline = slice, time.Time{}
+		}
+		conn, err := attempt.DialContext(ctx, network, t)
 		if err == nil {
 			return conn, nil
 		}
