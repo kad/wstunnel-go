@@ -199,6 +199,9 @@ func applyServerFlagOverrides(c *cli.Context, config *server.Config, listenAddr 
 	if flagExplicitlySet(c, "tun-max-sessions") || config.TunMaxSessions == 0 {
 		config.TunMaxSessions = c.Int("tun-max-sessions")
 	}
+	if flagExplicitlySet(c, "tun-allow") || len(config.TunAllow) == 0 {
+		config.TunAllow = c.StringSlice("tun-allow")
+	}
 	if flagExplicitlySet(c, "mode") || config.WebsocketProtocol == "" {
 		config.WebsocketProtocol = c.String("mode")
 	}
@@ -481,6 +484,10 @@ func main() {
 						Value: server.DefaultTunMaxSessions,
 						Usage: "Maximum concurrent tun sessions; extra sessions are closed immediately",
 					},
+					&cli.StringSliceFlag{
+						Name:  "tun-allow",
+						Usage: "Limit tun flow destinations to this CIDR or address (repeatable). The built-in deny list still applies",
+					},
 				},
 				Action: runServer,
 			},
@@ -642,6 +649,9 @@ func runServer(c *cli.Context) error {
 }
 
 func startServer(c *cli.Context, config *server.Config) error {
+	if _, err := server.ParseTunAllow(config.TunAllow); err != nil {
+		return err
+	}
 	srv := server.NewServer(*config)
 	return srv.Start()
 }

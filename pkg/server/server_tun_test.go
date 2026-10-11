@@ -526,3 +526,40 @@ func TestH2ForwardTunnelEndsCleanly(t *testing.T) {
 		t.Fatalf("%d/%d forward h2 tunnels did not end cleanly", bad, iterations)
 	}
 }
+
+func TestTunAllowLimitsFlowsEndToEnd(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		allow   []string
+		allowed bool
+	}{
+		{"destination listed", []string{"127.0.0.1/32"}, true},
+		{"destination not listed", []string{"10.0.0.0/8"}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewServer(Config{EnableTun: true, TunAllow: tc.allow})
+			s.SetRules(tunRules(t, tunLoopbackRules))
+			addr := startTunServer(t, s)
+			pc, err := dialTunWST(t, addr, tunToken(t, 1500))
+			if err != nil {
+				t.Fatalf("dial: %v", err)
+			}
+			host := tuntest.NewHost(t, pc, 1500)
+
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			c, err := host.DialTCP(ctx, echoListener(t))
+			if tc.allowed {
+				if err != nil {
+					t.Fatalf("a flow inside tun_allow was refused: %v", err)
+				}
+				_ = c.Close()
+				return
+			}
+			if err == nil {
+				_ = c.Close()
+				t.Fatal("a flow outside tun_allow was accepted")
+			}
+		})
+	}
+}
