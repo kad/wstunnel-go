@@ -26,7 +26,7 @@ func TestParseTunAllow(t *testing.T) {
 	if none, err := ParseTunAllow(nil); err != nil || len(none) != 0 {
 		t.Fatalf("ParseTunAllow(nil) = %v, %v; want nothing", none, err)
 	}
-	for _, bad := range []string{"", "not-an-address", "10.0.0.0/33", "10.0.0.0/", "300.1.1.1"} {
+	for _, bad := range []string{"", "not-an-address", "10.0.0.0/33", "10.0.0.0/", "300.1.1.1", "::ffff:10.0.0.0/8"} {
 		if _, err := ParseTunAllow([]string{"10.0.0.0/8", bad}); err == nil || !strings.Contains(err.Error(), "tun_allow") {
 			t.Errorf("ParseTunAllow(%q) error = %v, want one naming tun_allow", bad, err)
 		}
