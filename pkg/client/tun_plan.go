@@ -50,10 +50,21 @@ func planTunNetConfig(spec *TunSpec, serverAddrs []netip.Addr) ([]netOp, error) 
 	if len(spec.Routes) > 0 && len(serverAddrs) == 0 {
 		return nil, errors.New("cannot check tun:// routes against the tunnel server because its address is unknown")
 	}
+	servers := make([]netip.Addr, 0, len(serverAddrs))
+	for _, server := range serverAddrs {
+		servers = append(servers, server.WithZone("").Unmap())
+	}
 	for _, route := range spec.Routes {
-		for _, server := range serverAddrs {
-			if route.Contains(server.Unmap()) {
-				return nil, fmt.Errorf("tun:// route %s contains the tunnel server %s: the tunnel's own traffic would loop into the tunnel", route, server.Unmap())
+		if err := checkLoop(normalizePrefix(route), "route", route, servers); err != nil {
+			return nil, err
+		}
+	}
+	for _, addr := range spec.Addrs {
+		// An address shorter than a host prefix makes the kernel install a
+		// route for its whole network into the device.
+		if addr.Bits() < addr.Addr().BitLen() {
+			if err := checkLoop(normalizePrefix(addr).Masked(), "addr", addr, servers); err != nil {
+				return nil, err
 			}
 		}
 	}
@@ -71,6 +82,29 @@ func planTunNetConfig(spec *TunSpec, serverAddrs []netip.Addr) ([]netOp, error) 
 		ops = append(ops, netOp{Kind: opAddRoute, Prefix: route})
 	}
 	return ops, nil
+}
+
+// normalizePrefix turns a 4in6 prefix such as ::ffff:203.0.113.0/120 into the
+// IPv4 prefix it names.
+func normalizePrefix(p netip.Prefix) netip.Prefix {
+	if p.Addr().Is4In6() && p.Bits() >= 96 {
+		return netip.PrefixFrom(p.Addr().Unmap(), p.Bits()-96)
+	}
+	return p
+}
+
+// checkLoop refuses a network routed into the device that holds a tunnel server.
+func checkLoop(network netip.Prefix, kind string, spec netip.Prefix, servers []netip.Addr) error {
+	for _, server := range servers {
+		if !network.Contains(server) {
+			continue
+		}
+		if kind == "addr" {
+			return fmt.Errorf("tun:// addr %s creates a connected route for %s, which contains the tunnel server %s: the tunnel's own traffic would loop into the tunnel; use a host prefix (/32 or /128)", spec, network, server)
+		}
+		return fmt.Errorf("tun:// route %s contains the tunnel server %s: the tunnel's own traffic would loop into the tunnel", spec, server)
+	}
+	return nil
 }
 
 // applyNetOps runs ops against ifname in order.

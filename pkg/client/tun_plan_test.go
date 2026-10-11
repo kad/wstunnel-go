@@ -161,3 +161,37 @@ func TestPlanTunNetConfigFailsClosedWithoutServerAddress(t *testing.T) {
 		t.Errorf("configure=false needs no server address: %v", err)
 	}
 }
+
+func TestPlanTunNetConfigLoopGuardCoversConnectedRoutes(t *testing.T) {
+	v4 := []netip.Addr{netip.MustParseAddr("203.0.113.5")}
+	// A shorter-than-host prefix on the device installs a route for the whole
+	// network into it.
+	_, err := planTunNetConfig(mustSpec(t, "tun://wst0?addr=203.0.113.1/24"), v4)
+	if err == nil || !strings.Contains(err.Error(), "loop") || !strings.Contains(err.Error(), "connected route") {
+		t.Errorf("addr 203.0.113.1/24 with server 203.0.113.5: error = %v, want a loop error naming the connected route", err)
+	}
+	if _, err := planTunNetConfig(mustSpec(t, "tun://wst0?addr=203.0.113.1/32"), v4); err != nil {
+		t.Errorf("a host address creates no connected route: %v", err)
+	}
+	v6 := []netip.Addr{netip.MustParseAddr("fd00::77")}
+	if _, err := planTunNetConfig(mustSpec(t, "tun://wst0?addr=fd00::1/64"), v6); err == nil {
+		t.Error("addr fd00::1/64 with a server inside fd00::/64 must be refused")
+	}
+	if _, err := planTunNetConfig(mustSpec(t, "tun://wst0?addr=fd00::1/128"), v6); err != nil {
+		t.Errorf("an IPv6 host address creates no connected route: %v", err)
+	}
+}
+
+func TestPlanTunNetConfigLoopGuardNormalisesAddresses(t *testing.T) {
+	server := []netip.Addr{netip.MustParseAddr("203.0.113.5")}
+	// A 4in6 prefix is the IPv4 network it names.
+	spec := &TunSpec{Configure: true, MTU: 1500, Routes: []netip.Prefix{netip.MustParsePrefix("::ffff:203.0.113.0/120")}}
+	if _, err := planTunNetConfig(spec, server); err == nil {
+		t.Error("a 4in6 route prefix covering an IPv4 server must be refused")
+	}
+	// netip.Prefix.Contains is false for a zoned address.
+	spec = &TunSpec{Configure: true, MTU: 1500, Routes: []netip.Prefix{netip.MustParsePrefix("fe80::/10")}}
+	if _, err := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("fe80::1%eth0")}); err == nil {
+		t.Error("a zoned server address inside the route must be refused")
+	}
+}
