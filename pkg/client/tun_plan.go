@@ -116,7 +116,7 @@ func normalizePrefix(p netip.Prefix) netip.Prefix {
 // checkNotWholeHost refuses a default route and the two /1 halves that together
 // make one. They would capture all of the host's traffic of that family, DNS and
 // replies to inbound connections included; full-tunnel routing needs more than
-// a route and is not supported yet.
+// a route; route=default does the extra work.
 func checkNotWholeHost(p netip.Prefix) error {
 	p = p.Masked()
 	if p.Bits() > 1 {
@@ -134,7 +134,7 @@ func checkNotWholeHost(p netip.Prefix) error {
 	if p.Addr().Is6() {
 		family = "IPv6"
 	}
-	return fmt.Errorf("tun:// route %s would capture all %s traffic; routing the whole host through the tunnel is not supported yet", p, family)
+	return fmt.Errorf("tun:// route %s would capture all %s traffic; use route=default (tun://NAME?route=default) to route the whole host through the tunnel", p, family)
 }
 
 // checkLoop refuses a network routed into the device that holds a tunnel server.

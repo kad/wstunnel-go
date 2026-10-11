@@ -142,3 +142,70 @@ func TestParseTunnelArgRejectsTun(t *testing.T) {
 		}
 	}
 }
+
+func TestParseTunArgFullTunnel(t *testing.T) {
+	spec, err := ParseTunArg("tun://wst0?route=default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !spec.FullTunnel || spec.Routing != "auto" || len(spec.Routes) != 0 || len(spec.DNS) != 0 {
+		t.Fatalf("spec = %+v, want FullTunnel, Routing auto, no routes, no dns", spec)
+	}
+	if !spec.Configure || !spec.DefaultAddrs {
+		t.Fatalf("spec = %+v, want the default addresses configured", spec)
+	}
+
+	spec, err = ParseTunArg("tun://wst0?route=default&routing=pin&dns=1.1.1.1&dns=2606:4700:4700::1111&dns=1.1.1.1&addr=10.9.0.2/32")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if spec.Routing != "pin" {
+		t.Errorf("Routing = %q, want pin", spec.Routing)
+	}
+	wantDNS := []netip.Addr{netip.MustParseAddr("1.1.1.1"), netip.MustParseAddr("2606:4700:4700::1111")}
+	if !reflect.DeepEqual(spec.DNS, wantDNS) {
+		t.Errorf("DNS = %v, want %v (duplicates dropped)", spec.DNS, wantDNS)
+	}
+
+	for _, r := range []string{"auto", "fwmark", "pin"} {
+		spec, err := ParseTunArg("tun://wst0?route=default&routing=" + r)
+		if err != nil || spec.Routing != r {
+			t.Errorf("routing=%s: %+v, %v", r, spec, err)
+		}
+	}
+
+	// Split-tunnel specs are unchanged.
+	spec, err = ParseTunArg("tun://wst0?route=10.0.0.0/8")
+	if err != nil || spec.FullTunnel || spec.Routing != "" {
+		t.Fatalf("split spec = %+v, %v", spec, err)
+	}
+}
+
+func TestParseTunArgFullTunnelErrors(t *testing.T) {
+	for arg, wantSubstr := range map[string]string{
+		"tun://wst0?route=default&route=10.0.0.0/8":         "cannot be combined",
+		"tun://wst0?route=10.0.0.0/8&route=default":         "cannot be combined",
+		"tun://wst0?route=default&route=default":            "cannot be combined",
+		"tun://wst0?route=default&configure=false":          "configure=false",
+		"tun://wst0?routing=pin":                            "only valid with route=default",
+		"tun://wst0?route=10.0.0.0/8&routing=pin":           "only valid with route=default",
+		"tun://wst0?route=default&routing=bogus":            "invalid tun:// routing",
+		"tun://wst0?route=default&routing=":                 "empty",
+		"tun://wst0?route=default&routing=pin&routing=auto": "more than once",
+		"tun://wst0?route=default&routing=PIN":              "invalid tun:// routing",
+		"tun://wst0?dns=1.1.1.1":                            "only valid with route=default",
+		"tun://wst0?route=10.0.0.0/8&dns=1.1.1.1":           "only valid with route=default",
+		"tun://wst0?configure=false&dns=1.1.1.1":            "configure=false",
+		"tun://wst0?route=default&dns=one.one.one.one":      "invalid tun:// dns",
+		"tun://wst0?route=default&dns=":                     "invalid tun:// dns",
+		"tun://wst0?route=default&dns=fe80::1%25eth0":       "zone",
+		"tun://wst0?route=default&dns=::ffff:1.1.1.1":       "invalid tun:// dns",
+		"tun://wst0?route=default&dns=0.0.0.0":              "invalid tun:// dns",
+		"tun://wst0?bogus=1":                                "routing, dns",
+	} {
+		_, err := ParseTunArg(arg)
+		if err == nil || !strings.Contains(err.Error(), wantSubstr) {
+			t.Errorf("ParseTunArg(%q) error = %v, want substring %q", arg, err, wantSubstr)
+		}
+	}
+}

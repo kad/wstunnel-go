@@ -211,7 +211,7 @@ func TestPlanTunNetConfigRejectsWholeHostRoutes(t *testing.T) {
 		{"8000::/1", v4},
 	} {
 		_, err := planTunNetConfig(mustSpec(t, "tun://wst0?route="+tc.route), tc.servers)
-		if err == nil || !strings.Contains(err.Error(), "would capture all") || !strings.Contains(err.Error(), "not supported yet") {
+		if err == nil || !strings.Contains(err.Error(), "would capture all") || !strings.Contains(err.Error(), "route=default") {
 			t.Errorf("route %s: error = %v, want a whole-host routing refusal", tc.route, err)
 		}
 	}
@@ -244,5 +244,26 @@ func TestPlannerRefusesAddrWithZeroLength(t *testing.T) {
 	spec := &TunSpec{Configure: true, MTU: 1500, Addrs: []netip.Prefix{netip.MustParsePrefix("10.0.0.1/0")}}
 	if _, err := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")}); err == nil || !strings.Contains(err.Error(), "loop") {
 		t.Fatalf("addr /0 = %v, want a loop refusal", err)
+	}
+}
+
+func TestWholeHostRefusalPointsAtRouteDefault(t *testing.T) {
+	spec := &TunSpec{Configure: true, Routes: []netip.Prefix{netip.MustParsePrefix("0.0.0.0/0")}}
+	err := checkTunLoops(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")})
+	if err == nil || !strings.Contains(err.Error(), "route=default") {
+		t.Fatalf("error = %v, want a pointer to route=default", err)
+	}
+}
+
+func TestFullTunnelSpecSkipsRouteLoopGuardButKeepsAddrCheck(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("203.0.113.5")}
+	spec := mustSpec(t, "tun://wst0?route=default")
+	if err := checkTunLoops(spec, servers); err != nil {
+		t.Fatalf("full tunnel: %v", err)
+	}
+	// A connected route to the server's own network would still capture its traffic.
+	spec = mustSpec(t, "tun://wst0?route=default&addr=203.0.113.9/24")
+	if err := checkTunLoops(spec, servers); err == nil || !strings.Contains(err.Error(), "loop") {
+		t.Fatalf("addr covering the server = %v, want a loop error", err)
 	}
 }
