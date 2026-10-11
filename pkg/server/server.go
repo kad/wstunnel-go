@@ -95,6 +95,12 @@ type Server struct {
 
 	tunFlowSlots    chan struct{} // shared by all tun sessions
 	tunSessionSlots chan struct{}
+
+	// ctx ends when the server is closed; tun sessions run under it.
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func NewServer(config Config) *Server {
@@ -164,6 +170,7 @@ func NewServer(config Config) *Server {
 		rules.Restrictions = append(rules.Restrictions, rc)
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Server{
 		Config: config,
 		mux:    http.NewServeMux(),
@@ -172,10 +179,30 @@ func NewServer(config Config) *Server {
 
 		tunFlowSlots:    make(chan struct{}, config.TunMaxFlows),
 		tunSessionSlots: make(chan struct{}, config.TunMaxSessions),
+
+		ctx:    ctx,
+		cancel: cancel,
 	}
 	s.wtServer = NewWebTransportServer(s)
 	s.mux.HandleFunc("/", s.ServeHTTP)
 	return s
+}
+
+// Close ends the server's long-lived work: every tun session is closed, the
+// reverse-tunnel listeners are released, and a WebTransport listener started by
+// Start is shut down. A closed server refuses new tun sessions.
+//
+// Close does not stop the HTTP listener that Start opened (end Start by closing
+// that listener's process or by embedding the server behind another HTTP server,
+// as the Caddy module does), and forward tunnels that are already piping data
+// are left to finish. Close is safe to call more than once.
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() {
+		s.cancel()
+		s.rvMgr.Close()
+		s.closeErr = s.wtServer.Close()
+	})
+	return s.closeErr
 }
 
 func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, error) {
@@ -388,7 +415,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.admitTun(claims); err != nil {
 		slog.Warn("Tunnel rejected", "tunnel_id", claims.ID, "err", err)
-		http.Error(w, err.Error(), http.StatusForbidden)
+		http.Error(w, err.Error(), tunAdmitStatus(err))
 		return
 	}
 
@@ -621,10 +648,39 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 // separately from restrictions because an empty protocol list in a rule
 // admits every protocol.
 func (s *Server) admitTun(claims *protocol.JwtTunnelConfig) error {
-	if claims.Protocol.Tun != nil && !s.Config.EnableTun {
-		return fmt.Errorf("tun mode is disabled on this server")
+	if claims.Protocol.Tun == nil {
+		return nil
+	}
+	if !s.Config.EnableTun {
+		return &tunAdmitError{http.StatusForbidden, "tun mode is disabled on this server"}
+	}
+	if s.ctx.Err() != nil {
+		return &tunAdmitError{http.StatusServiceUnavailable, "server is shutting down"}
+	}
+	// 0 selects the default; anything else below the minimum could not carry
+	// IPv6, so refuse it before the connection is upgraded.
+	if mtu := claims.Protocol.Tun.Mtu; mtu != 0 && mtu < tun.MinMTU {
+		return &tunAdmitError{http.StatusBadRequest, fmt.Sprintf("tun mtu %d is below the minimum %d", mtu, tun.MinMTU)}
 	}
 	return nil
+}
+
+// tunAdmitError is a refusal of a tun session that happens before the
+// connection is upgraded, with the HTTP status that describes it.
+type tunAdmitError struct {
+	status int
+	msg    string
+}
+
+func (e *tunAdmitError) Error() string { return e.msg }
+
+// tunAdmitStatus is the HTTP status for an admitTun error.
+func tunAdmitStatus(err error) int {
+	var ae *tunAdmitError
+	if errors.As(err, &ae) {
+		return ae.status
+	}
+	return http.StatusForbidden
 }
 
 // serveTun runs a tun session until the client disconnects. rule is the
@@ -634,6 +690,10 @@ func (s *Server) admitTun(claims *protocol.JwtTunnelConfig) error {
 // SO_MARK, since socket_so_mark only applies to listener sockets.
 func (s *Server) serveTun(pc tun.PacketConn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
 	log := slog.With("tunnel_id", claims.ID)
+	if s.ctx.Err() != nil {
+		_ = pc.Close()
+		return
+	}
 	select {
 	case s.tunSessionSlots <- struct{}{}:
 		defer func() { <-s.tunSessionSlots }()
@@ -643,7 +703,7 @@ func (s *Server) serveTun(pc tun.PacketConn, claims *protocol.JwtTunnelConfig, r
 		return
 	}
 	log.Info("Accepted tun session", "mtu", claims.Protocol.Tun.Mtu)
-	err := tun.Serve(context.Background(), pc, tun.Options{
+	err := tun.Serve(s.ctx, pc, tun.Options{
 		MTU:             uint32(claims.Protocol.Tun.Mtu),
 		Authorize:       func(f tun.Flow) bool { return tunFlowAllowed(rule, f) },
 		UDPIdleTimeout:  s.Config.TunUdpTimeout,

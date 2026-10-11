@@ -95,6 +95,44 @@ type session struct {
 	opts  Options
 	log   *slog.Logger
 	slots chan struct{}
+	deny  logLimiter
+}
+
+// Denied flows are logged individually only up to denyLogBurst per session; after
+// that one line per denyLogInterval reports how many were suppressed. A client
+// can otherwise make the server write a line per packet it sends to a denied
+// destination.
+const (
+	denyLogBurst    = 10
+	denyLogInterval = 30 * time.Second
+)
+
+// logLimiter decides which repeated log events are written.
+type logLimiter struct {
+	mu         sync.Mutex
+	logged     int
+	suppressed int
+	last       time.Time
+}
+
+// allow reports whether the event at now should be logged, and how many events
+// were suppressed since the previous logged one.
+func (l *logLimiter) allow(now time.Time) (ok bool, suppressed int) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.logged < denyLogBurst {
+		l.logged++
+		l.last = now
+		return true, 0
+	}
+	if now.Sub(l.last) < denyLogInterval {
+		l.suppressed++
+		return false, 0
+	}
+	suppressed = l.suppressed
+	l.suppressed = 0
+	l.last = now
+	return true, suppressed
 }
 
 // Serve terminates the IP packets carried by pc in a fresh userspace stack and
@@ -193,13 +231,17 @@ func isClosedErr(err error) bool {
 // the flow ends if admit returns true.
 func (s *session) admit(f Flow) bool {
 	if !s.opts.Authorize(f) {
-		s.log.Info("tun flow denied", "network", f.Network, "src", f.Src, "dst", f.Dst)
+		if ok, suppressed := s.deny.allow(time.Now()); ok {
+			s.log.Info("tun flow denied", "network", f.Network, "src", f.Src, "dst", f.Dst, "suppressed_since_last", suppressed)
+		}
 		return false
 	}
 	select {
 	case s.slots <- struct{}{}:
 	default:
-		s.log.Warn("tun flow limit reached", "network", f.Network, "dst", f.Dst, "max_flows", s.opts.MaxFlows)
+		if ok, suppressed := s.deny.allow(time.Now()); ok {
+			s.log.Warn("tun flow limit reached", "network", f.Network, "dst", f.Dst, "max_flows", s.opts.MaxFlows, "suppressed_since_last", suppressed)
+		}
 		return false
 	}
 	if shared := s.opts.SharedFlowSlots; shared != nil {
@@ -207,7 +249,9 @@ func (s *session) admit(f Flow) bool {
 		case shared <- struct{}{}:
 		default:
 			<-s.slots
-			s.log.Warn("tun server-wide flow limit reached", "network", f.Network, "dst", f.Dst, "max_flows", cap(shared))
+			if ok, suppressed := s.deny.allow(time.Now()); ok {
+				s.log.Warn("tun server-wide flow limit reached", "network", f.Network, "dst", f.Dst, "max_flows", cap(shared), "suppressed_since_last", suppressed)
+			}
 			return false
 		}
 	}
