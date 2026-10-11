@@ -493,7 +493,7 @@ func TestConfigureDNS(t *testing.T) {
 }
 
 func TestConfigureDNSWithoutResolvectlWarns(t *testing.T) {
-	var buf bytes.Buffer
+	var buf syncBuffer
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
@@ -796,7 +796,7 @@ func TestFullTunnelHungResolvectlIsBoundedAndNotFatal(t *testing.T) {
 		<-ctx.Done() // a resolver that never answers
 		return ctx.Err()
 	}
-	var buf bytes.Buffer
+	var buf syncBuffer
 	old := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
 	t.Cleanup(func() { slog.SetDefault(old) })
@@ -895,4 +895,23 @@ func TestFailedFullTunnelStartResetsTheClient(t *testing.T) {
 	if c.serverAddrs.Load() != nil {
 		t.Error("pinned server addresses left set after a failed start")
 	}
+}
+
+// syncBuffer is a bytes.Buffer safe to share between the logger's goroutines
+// (the in-process server logs too) and the test reading it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
