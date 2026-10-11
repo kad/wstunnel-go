@@ -128,7 +128,11 @@ func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error
 }
 
 func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retry tunRetry) (h *TunHandle, err error) {
+	var full *fullTunnel
 	defer func() {
+		if err != nil && full != nil {
+			full.release()
+		}
 		if err != nil && spec.FullTunnel {
 			// A failed start must not leave the client's sockets marked or its
 			// lookups on the marked resolver: it may still be used for other
@@ -144,7 +148,6 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 	if err != nil {
 		return nil, err
 	}
-	var full *fullTunnel
 	if spec.FullTunnel {
 		if spec.Name != "" && deps.ifaceExists != nil && deps.ifaceExists(spec.Name) {
 			return nil, fmt.Errorf("tun device %q already exists, and route=default needs a device this client creates itself, so that it disappears with the process: if the client crashed while a persistent device carried the default route, the host would have no usable route until someone removed it. Delete the device (`ip link del %s`) and let the client create it, or omit the name", spec.Name, spec.Name)
@@ -179,7 +182,8 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 				return nil, err
 			}
 			// Cleanups run in reverse: the routing goes first, DNS last.
-			cleanups = append(cleanups, revertDNS, cleanup)
+			// The lock is released last.
+			cleanups = append(cleanups, func() error { full.release(); return nil }, revertDNS, cleanup)
 		}
 	} else {
 		current, err := deps.deviceMTU(dev.Name())

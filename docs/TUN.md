@@ -212,8 +212,16 @@ or another full tunnel), the client refuses to start and tells you to remove it 
 `ip rule del`. Pin mode installs no rules and never reads or deletes any. Nothing is
 stored on disk.
 
-Only one full-tunnel client can run per host: a second one would find the first one's
-rules at its priorities and refuse to start.
+Only one fwmark full-tunnel client can run per host. A second one refuses to start
+in two ways: with the same mark it cannot take the lock file
+`/run/wstunnel-go-tun-<mark>.lock` (in the temp directory when `/run` is not
+writable), which a running client holds with an exclusive `flock` for its whole
+life (`another full tunnel with mark ... is running (pid N)`); with another mark it
+finds the first one's rules at 32760/32761 and refuses as described above. The
+lock is released when the client stops, and also when it is killed, which is why
+the rules a crashed client left behind are known to be stale and are purged. The
+lock file itself stays on disk (empty of meaning once unlocked); it is not
+inherited by child processes. Pin mode installs no rules and takes no lock.
 
 ### Things to know
 
