@@ -14,7 +14,7 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
     -   **Unix Domain Sockets**: Tunneling to/from local unix sockets.
     -   **Stdio**: Tunneling via standard input/output.
 -   **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
--   **Tun mode (Go-only, Linux client)**: Route whole subnets through the server with a TUN device: `-L 'tun://wst0?route=10.0.0.0/8'` on the client, `--enable-tun` on the server. The server forwards each TCP/UDP flow to the real network through a userspace TCP/IP stack. See [docs/TUN.md](docs/TUN.md).
+-   **Tun mode (Go-only, Linux client)**: Route whole subnets through the server with a TUN device: `-L 'tun://wst0?route=10.0.0.0/8'` on the client, `--enable-tun` on the server. The server forwards each TCP/UDP flow to the real network through a userspace TCP/IP stack. With `route=default` (`-L 'tun://wst0?route=default'`) the whole host's IPv4 and IPv6 traffic goes through the tunnel. See [docs/TUN.md](docs/TUN.md).
 -   **Reverse Tunneling**: Stable support for static reverse TCP and reverse Unix socket tunnels (server-to-client).
 -   **Transports**:
     -   **WebSocket-like transport**: Secure WebSocket-style transport (default) with intentional RFC 6455 deviations for compatibility with the original Rust implementation.
@@ -94,7 +94,10 @@ For the server:
 
 For a tun (packet tunnel) client or server, including a systemd unit that grants
 `CAP_NET_ADMIN` to the client and the Caddy variants, see
-[Deployment in docs/TUN.md](docs/TUN.md#deployment).
+[Deployment in docs/TUN.md](docs/TUN.md#deployment). That section also has the
+full-tunnel variants (`route=default`): one command line, the same tunnel from a
+YAML file, and the systemd unit; the full tunnel needs no capability beyond
+`CAP_NET_ADMIN`.
 
 ### Windows Task Scheduler Integration
 
@@ -179,6 +182,9 @@ wstunnel-go client --dns-resolver 8.8.8.8 --dns-resolver-prefer-ipv4 -L tcp://80
 
 # Route 10.0.0.0/8 through the server with a TUN device (Linux, Go-only; see docs/TUN.md)
 sudo wstunnel-go client -L 'tun://wst0?route=10.0.0.0/8' wss://my-server.com
+
+# Route all IPv4 and IPv6 traffic through the server (full tunnel; see docs/TUN.md)
+sudo wstunnel-go client -L 'tun://wst0?route=default&routing=auto&dns=1.1.1.1' wss://my-server.com
 ```
 
 ### Server Mode

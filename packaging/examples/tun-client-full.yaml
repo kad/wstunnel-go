@@ -1,0 +1,7 @@
+mode: client
+log_lvl: INFO
+client:
+  remote_addr: "wss://tunnel.example.com"
+  http_upgrade_path_prefix: v1
+  local_to_remote:
+    - "tun://wst0?addr=198.18.0.1%2F32&addr=fd77:7473::1%2F128&mtu=1400&route=default&routing=auto&dns=1.1.1.1&dns=2606:4700:4700::1111&configure=true"
