@@ -79,6 +79,9 @@ Notes:
 - A route that contains the tunnel server's own address is refused at startup:
   the packets that carry the tunnel would be routed back into it and never leave
   the host. Route the networks you want through the tunnel, not the server itself.
+- An `addr` shorter than a host prefix (for example `198.18.0.1/24`) also makes
+  the kernel route that whole network into the device, so the same check applies
+  to it. The defaults, `/32` and `/128`, are right for almost everyone.
 
 ## Without root
 
