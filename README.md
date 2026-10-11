@@ -46,7 +46,7 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
 
 ### Prerequisites
 
--   **Go version 1.27.1** or above.
+-   **Go version 1.27.2** or above.
 -   `make` (optional, for convenient building).
 
 ### Build from Source
@@ -294,7 +294,7 @@ func main() {
 ### Compatibility Versions
 
 -   **Rust wstunnel**: v9.0.0+
--   **Go**: 1.27.1+
+-   **Go**: 1.27.2+
 
 ## Contributing
 
