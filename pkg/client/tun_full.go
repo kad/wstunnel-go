@@ -11,8 +11,6 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
-
-	"github.com/kad/wstunnel-go/internal/socket"
 )
 
 // tunDeps are the host interactions of StartTun. Production uses the kernel;
@@ -23,10 +21,12 @@ type tunDeps struct {
 	// ifaceExists reports whether a network interface with this name exists. Nil
 	// means no.
 	ifaceExists func(name string) bool
-	deviceMTU   func(name string) (int, error)
-	nl          netConfigurer
-	lookPath    func(file string) (string, error)
-	runCmd      func(ctx context.Context, name string, args ...string) error
+	// setMark replaces socket.SetSoMark for the client's sockets when non-nil.
+	setMark   func(fd uintptr, mark uint32) error
+	deviceMTU func(name string) (int, error)
+	nl        netConfigurer
+	lookPath  func(file string) (string, error)
+	runCmd    func(ctx context.Context, name string, args ...string) error
 }
 
 func defaultTunDeps() tunDeps {
@@ -266,6 +266,9 @@ func (c *Client) prepareFullTunnel(spec *TunSpec, servers []netip.Addr, deps tun
 	if err != nil {
 		return nil, err
 	}
+	if deps.setMark != nil {
+		c.setMark = deps.setMark
+	}
 	mark := tunMark(c.Config.SocketSoMark)
 	if choice.Mode == tunRoutingFwmark {
 		if err := checkTunMark(mark); err != nil {
@@ -288,7 +291,7 @@ func (c *Client) prepareFullTunnel(spec *TunSpec, servers []netip.Addr, deps tun
 		// The client's own sockets and DNS lookups must carry the mark, even if
 		// the operator did not ask for --socket-so-mark.
 		c.fullTunnelMark.Store(mark)
-		c.resolver.Store(markedResolver(mark, socket.SetSoMark))
+		c.resolver.Store(markedResolver(mark, c.markSetter()))
 	}
 	return ft, nil
 }

@@ -217,6 +217,10 @@ rules at its priorities and refuse to start.
   client refuses to start. A persistent device would keep carrying the default
   route after a crash, with nobody reading its packets, and the host would have no
   working route until someone removed it. Delete the device or omit the name.
+- In a full tunnel (fwmark mode) a socket that cannot be marked fails the
+  connection attempt with an error naming `SO_MARK`; the client never connects
+  unmarked, because the tunnel's own packets would loop into the tunnel. Outside a
+  full tunnel `--socket-so-mark` stays best effort.
 - `connection_min_idle` cannot be combined with `route=default`: pooled
   connections are opened before the routing exists and would be cut off. The
   client refuses to start.

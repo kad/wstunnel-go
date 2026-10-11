@@ -12,6 +12,40 @@ import (
 	"github.com/kad/wstunnel-go/internal/socket"
 )
 
+// markSetter is what sets SO_MARK on a socket: socket.SetSoMark unless a test
+// substituted setMark.
+func (c *Client) markSetter() func(fd uintptr, mark uint32) error {
+	if c.setMark != nil {
+		return c.setMark
+	}
+	return socket.SetSoMark
+}
+
+// markControl returns the Control hook that marks the client's own sockets, nil
+// when no mark is configured. In a full tunnel the mark is what keeps the
+// tunnel's own traffic out of the tunnel, so a socket that cannot be marked
+// fails the dial: connecting unmarked would send the tunnel's packets into the
+// tunnel. Outside a full tunnel --socket-so-mark stays best effort, as it is on
+// the server.
+func (c *Client) markControl() func(network, address string, rc syscall.RawConn) error {
+	mark := c.socketMark()
+	if mark == 0 {
+		return nil
+	}
+	strict := c.fullTunnelMark.Load() != 0
+	setMark := c.markSetter()
+	return func(network, address string, rc syscall.RawConn) error {
+		var serr error
+		if err := rc.Control(func(fd uintptr) { serr = setMark(fd, mark) }); err != nil {
+			return err
+		}
+		if serr != nil && strict {
+			return fmt.Errorf("set SO_MARK %#x on a socket of the full tunnel (refusing to connect unmarked, the tunnel's own traffic would loop into it): %w", mark, serr)
+		}
+		return nil
+	}
+}
+
 func (c *Client) tlsClientConfig(serverName string) (*tls.Config, error) {
 	tlsConfig := &tls.Config{
 		InsecureSkipVerify: !c.Config.TlsVerifyCert,
@@ -57,13 +91,7 @@ func (c *Client) dialRawTransport(ctx context.Context, network, addr string) (ne
 	var d net.Dialer
 	d.Timeout = 10 * time.Second
 
-	if mark := c.socketMark(); mark != 0 {
-		d.Control = func(network, address string, rc syscall.RawConn) error {
-			return rc.Control(func(fd uintptr) {
-				_ = socket.SetSoMark(fd, mark)
-			})
-		}
-	}
+	d.Control = c.markControl()
 	d.Resolver = c.resolver.Load()
 
 	conn, err := c.dialPinned(ctx, &d, network, addr)
