@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"regexp"
@@ -59,6 +60,11 @@ type Config struct {
 	// TunMaxSessions bounds concurrent tun sessions. Zero selects the defaults.
 	TunMaxFlows    int `yaml:"tun_max_flows"`
 	TunMaxSessions int `yaml:"tun_max_sessions"`
+	// TunAllow, when non-empty, limits the destinations of tun flows to these
+	// networks (CIDR, or a bare address for a single host), in addition to any
+	// restriction rule. It does not affect other tunnel types and does not lift
+	// the built-in deny list.
+	TunAllow []string `yaml:"tun_allow"`
 }
 
 // Server-wide tun limits applied when the Config leaves them zero.
@@ -101,6 +107,12 @@ type Server struct {
 	cancel    context.CancelFunc
 	closeOnce sync.Once
 	closeErr  error
+
+	// tunAllow is the parsed Config.TunAllow. tunAllowSet distinguishes "no
+	// limit" from a configured list that failed to parse, which must deny every
+	// tun flow rather than silently allow them.
+	tunAllow    []netip.Prefix
+	tunAllowSet bool
 }
 
 func NewServer(config Config) *Server {
@@ -171,6 +183,10 @@ func NewServer(config Config) *Server {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	tunAllow, tunAllowErr := ParseTunAllow(config.TunAllow)
+	if tunAllowErr != nil {
+		slog.Error("Invalid tun_allow; every tun flow will be refused", "err", tunAllowErr)
+	}
 	s := &Server{
 		Config: config,
 		mux:    http.NewServeMux(),
@@ -182,6 +198,9 @@ func NewServer(config Config) *Server {
 
 		ctx:    ctx,
 		cancel: cancel,
+
+		tunAllow:    tunAllow,
+		tunAllowSet: len(config.TunAllow) > 0,
 	}
 	s.wtServer = NewWebTransportServer(s)
 	s.mux.HandleFunc("/", s.ServeHTTP)
@@ -705,7 +724,7 @@ func (s *Server) serveTun(pc tun.PacketConn, claims *protocol.JwtTunnelConfig, r
 	log.Info("Accepted tun session", "mtu", claims.Protocol.Tun.Mtu)
 	err := tun.Serve(s.ctx, pc, tun.Options{
 		MTU:             uint32(claims.Protocol.Tun.Mtu),
-		Authorize:       func(f tun.Flow) bool { return tunFlowAllowed(rule, f) },
+		Authorize:       func(f tun.Flow) bool { return s.authorizeTunFlow(rule, f) },
 		UDPIdleTimeout:  s.Config.TunUdpTimeout,
 		SharedFlowSlots: s.tunFlowSlots,
 		Logger:          log,

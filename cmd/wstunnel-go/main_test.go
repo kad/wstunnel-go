@@ -47,6 +47,7 @@ func newTestContext(t *testing.T, args []string) *cli.Context {
 	fs.String("restrict-config", "", "")
 	fs.String("tls-client-ca-certs", "", "")
 	fs.Duration("remote-to-local-server-idle-timeout", 0, "")
+	fs.Var(cli.NewStringSlice(), "tun-allow", "")
 	fs.Bool("enable-tun", false, "")
 	fs.Duration("tun-udp-timeout", 30*time.Second, "")
 	fs.Int("tun-max-flows", 4096, "")
@@ -175,5 +176,19 @@ func TestLoadConfigFileCarriesTunTunnel(t *testing.T) {
 	spec, err := client.ParseTunArg(cfg.Client.LocalToRemote[0])
 	if err != nil || spec.MTU != 1400 || len(spec.Routes) != 2 {
 		t.Fatalf("ParseTunArg = %+v, %v", spec, err)
+	}
+}
+
+func TestApplyServerFlagOverridesTunAllow(t *testing.T) {
+	cfg := &server.Config{TunAllow: []string{"10.0.0.0/8"}}
+	applyServerFlagOverrides(newTestContext(t, nil), cfg, "")
+	if len(cfg.TunAllow) != 1 || cfg.TunAllow[0] != "10.0.0.0/8" {
+		t.Fatalf("TunAllow = %v, want the config value kept when the flag is not set", cfg.TunAllow)
+	}
+
+	cfg = &server.Config{TunAllow: []string{"10.0.0.0/8"}}
+	applyServerFlagOverrides(newTestContext(t, []string{"--tun-allow=192.0.2.0/24", "--tun-allow=203.0.113.9"}), cfg, "")
+	if len(cfg.TunAllow) != 2 || cfg.TunAllow[0] != "192.0.2.0/24" || cfg.TunAllow[1] != "203.0.113.9" {
+		t.Fatalf("TunAllow = %v, want the explicit flag values to replace the config", cfg.TunAllow)
 	}
 }

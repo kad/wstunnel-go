@@ -1,8 +1,10 @@
 package server
 
 import (
+	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 
 	"github.com/kad/wstunnel-go/pkg/protocol"
 	"github.com/kad/wstunnel-go/pkg/tun"
@@ -85,6 +87,56 @@ func deniedPrefixContains(ip netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// ParseTunAllow parses tun_allow entries: CIDR prefixes, or bare addresses for
+// single hosts. Prefixes are masked, and IPv4-mapped IPv6 entries are
+// converted to plain IPv4. It reports the first entry that does not parse, so
+// the command line and the Caddy module can refuse a bad value at startup.
+func ParseTunAllow(entries []string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, e := range entries {
+		e = strings.TrimSpace(e)
+		var p netip.Prefix
+		if strings.Contains(e, "/") {
+			var err error
+			p, err = netip.ParsePrefix(e)
+			if err != nil {
+				return nil, fmt.Errorf("tun_allow %q: %w", e, err)
+			}
+		} else {
+			a, err := netip.ParseAddr(e)
+			if err != nil {
+				return nil, fmt.Errorf("tun_allow %q: want a CIDR or an address", e)
+			}
+			p = netip.PrefixFrom(a, a.BitLen())
+		}
+		p = p.Masked()
+		if a := p.Addr(); a.Is4In6() && p.Bits() >= 96 {
+			p = netip.PrefixFrom(a.Unmap(), p.Bits()-96)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
+// authorizeTunFlow applies the server-wide tun_allow list, if any, and then
+// the restriction rule that admitted the session.
+func (s *Server) authorizeTunFlow(rule *RestrictionConfig, f tun.Flow) bool {
+	if s.tunAllowSet {
+		ip := f.Dst.Addr().WithZone("").Unmap()
+		allowed := false
+		for _, p := range s.tunAllow {
+			if p.Contains(ip) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return false
+		}
+	}
+	return tunFlowAllowed(rule, f)
 }
 
 // tunFlowAllowed reports whether a tun flow may be forwarded. rule is the
