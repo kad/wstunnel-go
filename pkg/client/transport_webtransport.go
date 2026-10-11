@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/kad/wstunnel-go/internal/socket"
@@ -59,6 +60,12 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 
 	w.mu.Lock()
 	sess := w.sess
+	if sess != nil && sessionDead(sess) {
+		// A session whose QUIC connection is gone would fail the first stream
+		// open; dial a fresh one instead.
+		w.sess = nil
+		sess = nil
+	}
 	if sess == nil {
 		var tlsConfig *tls.Config
 		if isTLS {
@@ -77,6 +84,7 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 
 		tr := &webtransport.Transport{
 			TLSClientConfig: tlsConfig,
+			QUICConfig:      newWebTransportQUICConfig(),
 		}
 		if w.client.Config.SocketSoMark != 0 {
 			tr.DialAddr = w.dialMarkedAddr
@@ -122,6 +130,26 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 	}
 
 	return rwc, nil, nil
+}
+
+// webTransportKeepAlive is how often an otherwise idle WebTransport connection
+// sends a QUIC keepalive. It must stay below quic-go's default idle timeout
+// (30s), or an idle tunnel is dropped and every flow through it is reset.
+const webTransportKeepAlive = 15 * time.Second
+
+// newWebTransportQUICConfig is the QUIC configuration of the WebTransport client.
+// DATAGRAM and partial-delivery support are required by webtransport-go.
+func newWebTransportQUICConfig() *quic.Config {
+	return &quic.Config{
+		EnableDatagrams:                  true,
+		EnableStreamResetPartialDelivery: true,
+		KeepAlivePeriod:                  webTransportKeepAlive,
+	}
+}
+
+// sessionDead reports whether a cached session has ended.
+func sessionDead(s interface{ Context() context.Context }) bool {
+	return s.Context().Err() != nil
 }
 
 func (w *WebTransportClient) dialMarkedAddr(ctx context.Context, addr string, tlsConfig *tls.Config, quicConfig *quic.Config) (*quic.Conn, error) {
