@@ -104,6 +104,11 @@ wstunnel-go client -L 'tun://wst0?configure=false' wss://tunnel.example.com
 With `configure=false` the client reads the device's MTU, sends it to the server,
 and never touches addresses, routes or link state.
 
+With `configure=true` against an existing persistent device, the addresses,
+routes and link state the client sets stay after it exits; the client only removes
+what it created when the device itself goes away. For a persistent device, prefer
+`configure=false` and manage it yourself, as above.
+
 ## Server setup
 
 Tun mode is off unless the server is started with `--enable-tun` (YAML
@@ -152,6 +157,7 @@ and `tun_udp_timeout`.
   the transport itself fails. WebTransport sends QUIC keepalives every 15
   seconds, so an idle session stays up, and it does not need the websocket
   watchdog because QUIC ends a connection that stops answering.
+  `--websocket-ping-frequency 0` turns the websocket watchdog off.
 - **Transports.** Works over `ws://`, `wss://`, `http://`, `https://`, `wt://`
   and `wts://`, and with `--mode ws`. The automated tests run tun mode end to end
   over the websocket (both modes), HTTP/2 and WebTransport transports without TLS;
@@ -181,6 +187,7 @@ mTLS, with a rule that matches `ClientCommonName`) on the listener. A `wss://` o
 | `403 Forbidden (is the server started with --enable-tun, ...)` | The server lacks `--enable-tun`, or no rule allows protocol `Tun` for your path or client certificate. |
 | `route ... contains the tunnel server ...` | A `route` covers the server's address. Narrow the route. |
 | `cannot create or attach tun device ... CAP_NET_ADMIN` | Run as root, or attach to a persistent device with `configure=false`. |
+| `tun device ... is already attached by another process` | A persistent device can be used by one process at a time. Stop the other client or use another device. |
 | `configure wst0: set mtu ...: operation not permitted` | You asked the client to configure the device without `CAP_NET_ADMIN`. Use `configure=false`. |
 | Connections to a routed network are refused | A rule does not allow that destination. The server logs `tun flow denied` with the destination. |
 | Connections hang right after the client starts | The session is still being established; they succeed after the first retry. |
