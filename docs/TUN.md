@@ -115,7 +115,7 @@ two ways around it, chosen by `routing=`.
 
 | `routing` | How the tunnel's own traffic bypasses the TUN |
 |---|---|
-| `fwmark` | The client marks its own sockets (and its own DNS lookups of the server name) with a firewall mark. The mark is `--socket-so-mark` if you set it, otherwise `0x7774` (30580). The same number is the routing table id. Table 30580 holds `default dev <tun>` for IPv4 and IPv6. Two rules per family: priority 32764 `lookup main suppress_prefixlength 0` (so more specific main-table routes still win) and priority 32765 `not fwmark <mark> lookup <mark>`. |
+| `fwmark` | The client marks its own sockets (and its own DNS lookups of the server name) with a firewall mark. The mark is `--socket-so-mark` if you set it, otherwise `0x7774` (30580). The same number is the routing table id. Table 30580 holds `default dev <tun>` for IPv4 and IPv6. Two rules per family: priority 32760 `lookup main suppress_prefixlength 0` (so more specific main-table routes still win) and priority 32761 `not fwmark <mark> lookup <mark>`. |
 | `pin` | A host route (`/32` or `/128`) to every address of the server through the real gateway and device, found with a route lookup that ignores the tunnel's own routes, plus the four halves `0.0.0.0/1`, `128.0.0.0/1`, `::/1` and `8000::/1` through the TUN, which override the default route without removing it. The pins are deleted and looked up again before every reconnect, so a changed gateway or a changed DNS answer is followed. |
 | `auto` (default) | `fwmark`, unless the reverse-path filter would break it, then `pin`. |
 
@@ -190,8 +190,17 @@ device and its `/1` and default routes disappear with the device). A forced kill
 (SIGKILL, power loss) cannot clean up. What it leaves is harmless: with the device
 gone, table 30580 is empty, so lookups fall through to the main table and the host
 keeps its normal routing; a stale pin is a correct route to the server. The next
-start deletes the leftover rules at priorities 32764 and 32765 before installing
-its own (it logs `Removed a stale rule`). Nothing is stored on disk.
+start in fwmark mode deletes the leftover rules at priorities 32760 and 32761 before
+installing its own (it logs `Removed a stale rule`). It deletes only the suppress
+rule at 32760 and the `not fwmark <mark>` rule at 32761 for its own mark; rules at
+any other priority, including the 32764/32765 pair that wg-quick installs, are never
+touched. If a different rule sits at 32760 or 32761 (a stale rule of another fwmark,
+or another full tunnel), the client refuses to start and tells you to remove it with
+`ip rule del`. Pin mode installs no rules and never reads or deletes any. Nothing is
+stored on disk.
+
+Only one full-tunnel client can run per host: a second one would find the first one's
+rules at its priorities and refuse to start.
 
 ### Things to know
 
@@ -572,7 +581,8 @@ mTLS, with a rule that matches `ClientCommonName`) on the listener. A `wss://` o
 | `route=default cannot be combined with connection_min_idle` | Remove `connection_min_idle` from the config. |
 | `--socket-so-mark N cannot be used for a full tunnel` | `N` is `0`, `253`, `254` or `255`, which are not usable as a routing table id. |
 | `tunnel server address never resolved` (repeated, full tunnel) | The name could not be resolved and there is no earlier address to fall back on; use an IP address. |
-| Rules at priority 32764 or 32765 after a crash | Harmless; the next start removes them. To remove them by hand: `ip rule del pref 32764; ip rule del pref 32765` (and `ip -6 ...`). |
+| Rules at priority 32760 or 32761 after a crash | Harmless; the next start (same fwmark) removes them. To remove them by hand: `ip rule del pref 32760; ip rule del pref 32761` (and `ip -6 ...`). |
+| `a policy rule at priority 32760 or 32761 that this client did not install` | Another full tunnel is active, or a stale rule of another fwmark is left. Remove it with `ip rule del pref <n>` (and `ip -6 rule del pref <n>`), then start again. |
 | `cannot create or attach tun device ... CAP_NET_ADMIN` | Run as root, or attach to a persistent device with `configure=false`. |
 | `tun device ... is already attached by another process` | A persistent device can be used by one process at a time. Stop the other client or use another device. |
 | `configure wst0: set mtu ...: operation not permitted` | You asked the client to configure the device without `CAP_NET_ADMIN`. Use `configure=false`. |

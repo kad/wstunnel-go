@@ -45,19 +45,19 @@ func TestPlanFullTunnelFwmark(t *testing.T) {
 	want := []string{
 		"add route 0.0.0.0/0 dev wst0 table 30580",
 		"add route ::/0 dev wst0 table 30580",
-		"add rule ipv4 pref 32764 table 254 suppress_prefixlength 0",
-		"add rule ipv4 pref 32765 not fwmark 0x7774 table 30580",
-		"add rule ipv6 pref 32764 table 254 suppress_prefixlength 0",
-		"add rule ipv6 pref 32765 not fwmark 0x7774 table 30580",
+		"add rule ipv4 pref 32760 table 254 suppress_prefixlength 0",
+		"add rule ipv4 pref 32761 not fwmark 0x7774 table 30580",
+		"add rule ipv6 pref 32760 table 254 suppress_prefixlength 0",
+		"add rule ipv6 pref 32761 not fwmark 0x7774 table 30580",
 	}
 	if got := describeAll(ops); !reflect.DeepEqual(got, want) {
 		t.Fatalf("ops =\n%s\nwant\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
 	}
 	wantUndo := []string{
-		"delete rule ipv6 pref 32765 not fwmark 0x7774 table 30580",
-		"delete rule ipv6 pref 32764 table 254 suppress_prefixlength 0",
-		"delete rule ipv4 pref 32765 not fwmark 0x7774 table 30580",
-		"delete rule ipv4 pref 32764 table 254 suppress_prefixlength 0",
+		"delete rule ipv6 pref 32761 not fwmark 0x7774 table 30580",
+		"delete rule ipv6 pref 32760 table 254 suppress_prefixlength 0",
+		"delete rule ipv4 pref 32761 not fwmark 0x7774 table 30580",
+		"delete rule ipv4 pref 32760 table 254 suppress_prefixlength 0",
 		"delete route ::/0 dev wst0 table 30580",
 		"delete route 0.0.0.0/0 dev wst0 table 30580",
 	}

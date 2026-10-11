@@ -861,7 +861,7 @@ func TestTunNetnsFullDriver(t *testing.T) {
 		if got := try("ip", "link", "show", "wst0"); strings.Contains(got, "wst0:") {
 			t.Errorf("a device was created before the refusal:\n%s", got)
 		}
-		if n := countRules("32764") + countRules("32765"); n != 0 {
+		if n := countRules("32760") + countRules("32761"); n != 0 {
 			t.Errorf("%d rules installed before the refusal:\n%s", n, rulesText())
 		}
 
@@ -910,7 +910,7 @@ func TestTunNetnsFullDriver(t *testing.T) {
 		waitEchoOK("before SIGKILL", 20*time.Second)
 		cli.kill()
 		// The device is gone with the process, the rules are not.
-		if n := countRules("32765"); n == 0 {
+		if n := countRules("32761"); n == 0 {
 			t.Fatalf("expected stale rules after SIGKILL, found none:\n%s", rulesText())
 		}
 		if got := try("ip", "link", "show", "wst0"); strings.Contains(got, "wst0:") {
@@ -924,7 +924,7 @@ func TestTunNetnsFullDriver(t *testing.T) {
 		cli = startClient()
 		defer cli.kill()
 		waitEchoOK("after restart", 20*time.Second)
-		for _, sub := range []string{"32764:", "32765:"} {
+		for _, sub := range []string{"32760:", "32761:"} {
 			// one rule per priority and family, not an accumulation
 			if n := countRules(sub); n != 2 {
 				t.Errorf("%d rules at priority %s after the restart, want 2 (IPv4 and IPv6):\n%s", n, sub, rulesText())
@@ -979,7 +979,7 @@ func checkInstalled(t *testing.T, mode, rules, table, routes string) {
 	t.Helper()
 	switch mode {
 	case "fwmark":
-		for _, want := range []string{"32764:", "32765:", "not from all fwmark " + fullDefaultMrk} {
+		for _, want := range []string{"32760:", "32761:", "not from all fwmark " + fullDefaultMrk} {
 			if !strings.Contains(rules, want) {
 				t.Errorf("fwmark mode: rules lack %q:\n%s", want, rules)
 			}
@@ -993,7 +993,7 @@ func checkInstalled(t *testing.T, mode, rules, table, routes string) {
 				t.Errorf("pin mode: routes lack %q:\n%s", want, routes)
 			}
 		}
-		if strings.Contains(rules, "32765:") {
+		if strings.Contains(rules, "32761:") {
 			t.Errorf("pin mode installed policy rules:\n%s", rules)
 		}
 	}
@@ -1002,7 +1002,7 @@ func checkInstalled(t *testing.T, mode, rules, table, routes string) {
 // checkClean asserts a stopped full tunnel left nothing behind.
 func checkClean(t *testing.T, rules, table, routes, routes6 string) {
 	t.Helper()
-	for _, bad := range []string{"32764:", "32765:", "fwmark"} {
+	for _, bad := range []string{"32760:", "32761:", "fwmark"} {
 		if strings.Contains(rules, bad) {
 			t.Errorf("rules left behind (%q):\n%s", bad, rules)
 		}
