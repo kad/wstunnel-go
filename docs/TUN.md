@@ -209,7 +209,10 @@ rule at 32760 and the `not fwmark <mark>` rule at 32761 for its own mark; rules 
 any other priority, including the 32764/32765 pair that wg-quick installs, are never
 touched. If a different rule sits at 32760 or 32761 (a stale rule of another fwmark,
 or another full tunnel), the client refuses to start and tells you to remove it with
-`ip rule del`. Pin mode installs no rules and never reads or deletes any. Nothing is
+`ip rule del`. A rule at those priorities that also matches on a source, destination,
+interface, port, partial mask or anything else our rules never use is treated as
+someone else's, even if its mark and table are ours: the client refuses and never
+deletes it. Pin mode installs no rules and never reads or deletes any. Nothing is
 stored on disk.
 
 Only one fwmark full-tunnel client can run per host. A second one refuses to start
