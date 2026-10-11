@@ -16,10 +16,13 @@ const (
 	// table id.
 	defaultTunMark uint32 = 0x7774
 
-	// The two rules of fwmark routing. Both sit just below the default rules of
-	// the main table (32766) and above nothing a distribution normally adds.
-	rulePrioSuppress = 32764 // lookup main suppress_prefixlength 0
-	rulePrioMark     = 32765 // not fwmark M lookup M
+	// The two rules of fwmark routing. They sit below the default rules of the
+	// main table (32766) but at priorities of their own, because wg-quick uses
+	// 32764 and 32765 for the same shape of rule and the startup purge must
+	// never touch another program's rules. Only these two priorities are ever
+	// removed by the purge.
+	rulePrioSuppress = 32760 // lookup main suppress_prefixlength 0
+	rulePrioMark     = 32761 // not fwmark M lookup M
 )
 
 // rpFilterStrict is the value of the rp_filter sysctl for strict reverse-path

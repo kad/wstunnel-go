@@ -107,7 +107,7 @@ func TestFullTunnelFwmarkRuntime(t *testing.T) {
 		t.Error("no marked resolver in fwmark mode")
 	}
 	calls := f.nl.snapshot()
-	order := []string{"routeget " + host, "listrules 4", "listrules 6", "mtu wst0", "up wst0", "tableroute wst0 0.0.0.0/0 table 30580", "rule add ipv4 pref 32764", "rule add ipv4 pref 32765"}
+	order := []string{"routeget " + host, "listrules 4", "listrules 6", "mtu wst0", "up wst0", "tableroute wst0 0.0.0.0/0 table 30580", "rule add ipv4 pref 32760", "rule add ipv4 pref 32761"}
 	prev := -1
 	for _, want := range order {
 		i := indexOf(calls, want)
@@ -131,7 +131,7 @@ func TestFullTunnelFwmarkRuntime(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := f.nl.snapshot()[len(calls):]
-	for _, want := range []string{"rule del ipv6 pref 32765", "rule del ipv6 pref 32764", "rule del ipv4 pref 32765", "rule del ipv4 pref 32764", "deltableroute wst0 ::/0", "deltableroute wst0 0.0.0.0/0"} {
+	for _, want := range []string{"rule del ipv6 pref 32761", "rule del ipv6 pref 32760", "rule del ipv4 pref 32761", "rule del ipv4 pref 32760", "deltableroute wst0 ::/0", "deltableroute wst0 0.0.0.0/0"} {
 		if indexOf(after, want) < 0 {
 			t.Errorf("Close did not run %q; calls after start:\n%s", want, strings.Join(after, "\n"))
 		}
@@ -305,7 +305,7 @@ func TestFullTunnelSetupFailureRollsBack(t *testing.T) {
 	srv := newTestTunServer(t, "rust", "")
 	host, _, _ := net.SplitHostPort(srv.addr)
 	f := newFakeHost(t, host)
-	f.nl.failOn = "rule add ipv4 pref 32765 not fwmark 0x7774 table 30580"
+	f.nl.failOn = "rule add ipv4 pref 32761 not fwmark 0x7774 table 30580"
 	f.nl.failErr = syscall.EPERM
 	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
 	if _, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry); err == nil {
@@ -321,15 +321,52 @@ func TestFullTunnelSetupFailureRollsBack(t *testing.T) {
 	}
 }
 
+// wgQuickRules are the rules wg-quick installs for a full-tunnel WireGuard
+// interface (fwmark 51820): they must survive our startup untouched.
+func wgQuickRules(family int) []ruleSpec {
+	return []ruleSpec{
+		{Family: family, Priority: 32764, Table: 254, Suppress: 0},
+		{Family: family, Priority: 32765, Table: 51820, Mark: 51820, NotMark: true, Suppress: -1},
+	}
+}
+
+func TestFullTunnelLeavesWgQuickRulesAlone(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	wg := slices.Concat(wgQuickRules(4), wgQuickRules(6))
+	f.nl.existingRules = slices.Clone(wg)
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	h, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry)
+	if err != nil {
+		t.Fatalf("startTun: %v", err)
+	}
+	f.nl.mu.Lock()
+	have := slices.Clone(f.nl.existingRules)
+	f.nl.mu.Unlock()
+	for _, r := range wg {
+		if !slices.Contains(have, r) {
+			t.Errorf("another program's rule was removed: %s", r)
+		}
+	}
+	if err := h.Close(); err != nil {
+		t.Fatal(err)
+	}
+	f.nl.mu.Lock()
+	defer f.nl.mu.Unlock()
+	if !slices.Equal(f.nl.existingRules, wg) {
+		t.Fatalf("rules after Close = %v, want exactly the other program's %v", f.nl.existingRules, wg)
+	}
+}
+
 func TestPurgeStaleRules(t *testing.T) {
 	ours := fullTunnelRules(4, 0x7774)
 	ours6 := fullTunnelRules(6, 0x7774)
-	foreign := []ruleSpec{
+	foreign := slices.Concat([]ruleSpec{
 		{Family: 4, Priority: 0, Table: 255, Suppress: -1},
 		{Family: 4, Priority: 32766, Table: 254, Suppress: -1},
-		{Family: 4, Priority: rulePrioMark, Table: 99, Mark: 99, NotMark: true, Suppress: -1}, // another mark's table
 		{Family: 4, Priority: 100, Table: 5, Suppress: -1},
-	}
+	}, wgQuickRules(4), wgQuickRules(6))
 	stale := slices.Concat(foreign, ours, ours6, []ruleSpec{ours[0]}) // one duplicated
 	nl := &recordingConfigurer{existingRules: stale}
 	if err := purgeStaleRules(nl, 0x7774); err != nil {
@@ -340,22 +377,60 @@ func TestPurgeStaleRules(t *testing.T) {
 	}
 }
 
-func TestStaleRulesMatchesOnlyOurPrioritiesAndTable(t *testing.T) {
-	r := func(prio, table int, mark uint32, not bool, suppress int) ruleSpec {
-		return ruleSpec{Family: 4, Priority: prio, Table: table, Mark: mark, NotMark: not, Suppress: suppress}
+func TestPurgeRefusesRulesOfAnotherMark(t *testing.T) {
+	for name, other := range map[string]ruleSpec{
+		"another mark at our catch-all priority": {Family: 4, Priority: rulePrioMark, Table: 99, Mark: 99, NotMark: true, Suppress: -1},
+		"foreign rule at our suppress priority":  {Family: 6, Priority: rulePrioSuppress, Table: 100, Suppress: -1},
+		"foreign rule at our catch-all priority": {Family: 4, Priority: rulePrioMark, Table: 254, Suppress: -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			before := slices.Concat(fullTunnelRules(4, 0x7774), []ruleSpec{other})
+			nl := &recordingConfigurer{existingRules: slices.Clone(before)}
+			err := purgeStaleRules(nl, 0x7774)
+			if err == nil {
+				t.Fatal("purge accepted a rule of another mark")
+			}
+			for _, want := range []string{"ip rule del", "another full tunnel"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q lacks %q", err, want)
+				}
+			}
+			if !slices.Equal(nl.existingRules, before) {
+				t.Errorf("refusal must not delete anything: %v", nl.existingRules)
+			}
+		})
 	}
-	existing := []ruleSpec{
-		r(32764, 254, 0, false, 0),     // ours
-		r(32764, 254, 0, false, -1),    // not a suppress rule
-		r(32764, 100, 0, false, 0),     // another table
-		r(32765, 7000, 7000, true, -1), // ours for mark 7000
-		r(32765, 7001, 7001, true, -1),
-		r(32765, 7000, 0, false, -1), // no fwmark
+}
+
+func TestFullTunnelRefusesWhenAnotherFullTunnelIsActive(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.nl.existingRules = []ruleSpec{{Family: 4, Priority: rulePrioMark, Table: 99, Mark: 99, NotMark: true, Suppress: -1}}
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	_, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry)
+	if err == nil || !strings.Contains(err.Error(), "ip rule del") {
+		t.Fatalf("err = %v, want an actionable refusal", err)
 	}
-	got := staleRules(existing, 7000)
-	want := []ruleSpec{existing[0], existing[3]}
-	if !slices.Equal(got, want) {
-		t.Fatalf("staleRules = %v, want %v", got, want)
+	if f.opened != 0 {
+		t.Error("a device was created before the refusal")
+	}
+}
+
+func TestFullTunnelPinModeNeverTouchesRules(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	stale := fullTunnelRules(4, 0x7774)
+	f.nl.existingRules = slices.Clone(stale)
+	_, _ = startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"}, "tun://wst0?route=default&routing=pin")
+	if i := indexOf(f.nl.snapshot(), "listrules"); i >= 0 {
+		t.Errorf("pin mode looked at the rules: %s", f.nl.snapshot()[i])
+	}
+	f.nl.mu.Lock()
+	defer f.nl.mu.Unlock()
+	if !slices.Equal(f.nl.existingRules, stale) {
+		t.Errorf("pin mode changed the rules: %v", f.nl.existingRules)
 	}
 }
 

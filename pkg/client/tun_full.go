@@ -102,49 +102,61 @@ func (c *Client) resolveUDPAddr(ctx context.Context, addr string) (*net.UDPAddr,
 	return net.UDPAddrFromAddrPort(netip.AddrPortFrom(ips[0], uint16(port))), nil
 }
 
-// staleRules selects, from the rules that exist, the ones a crashed full
-// tunnel may have left: the suppress rule at our priority whatever the mark, and
-// the catch-all rule at our priority for our mark.
-func staleRules(existing []ruleSpec, mark uint32) []ruleSpec {
-	var stale []ruleSpec
+// classifyRules looks at the rules that sit at our two priorities. stale are
+// the leftovers of a crashed run of this client: the suppress rule, and the
+// catch-all rule for our own mark. conflict is a rule at one of our priorities
+// that is not ours (another mark, or something else entirely): another full
+// tunnel is active or a stale rule of another mark remains, and it is not ours
+// to delete. Rules at any other priority are never looked at.
+func classifyRules(existing []ruleSpec, mark uint32) (stale []ruleSpec, conflict []ruleSpec) {
 	for _, r := range existing {
 		switch {
 		case r.Priority == rulePrioSuppress && r.Suppress == 0 && r.Table == 254 && !r.NotMark:
 			stale = append(stale, r)
 		case r.Priority == rulePrioMark && r.NotMark && r.Table == int(mark) && r.Mark == mark:
 			stale = append(stale, r)
+		case r.Priority == rulePrioSuppress || r.Priority == rulePrioMark:
+			conflict = append(conflict, r)
 		}
 	}
-	return stale
+	return stale, conflict
 }
 
-// purgeStaleRules deletes leftovers of a previous full tunnel, so installing
-// ours does not collide with them. A stale rule is harmless on its own (its
-// table is empty, lookups fall through to main), which is why a crash cannot
-// black-hole the host; this keeps the rule list from growing.
+// purgeStaleRules deletes leftovers of a previous full tunnel of ours, so
+// installing ours does not collide with them. A stale rule is harmless on its
+// own (its table is empty, lookups fall through to main), which is why a crash
+// cannot black-hole the host; this keeps the rule list from growing. It only
+// ever removes rules at priorities 32760 and 32761. If a rule is there that is
+// not ours, nothing is deleted and the start is refused.
 func purgeStaleRules(nl netConfigurer, mark uint32) error {
-	var errs []error
+	var all []ruleSpec
 	for _, family := range []int{4, 6} {
 		existing, err := nl.ListRules(family)
 		if err != nil {
 			if isUnsupportedError(err) {
 				continue
 			}
-			errs = append(errs, fmt.Errorf("list ipv%d rules: %w", family, err))
-			continue
+			return fmt.Errorf("list ipv%d rules: %w", family, err)
 		}
-		for _, r := range staleRules(existing, mark) {
-			// A duplicate can exist; delete until the kernel says none is left.
-			for range 16 {
-				err := nl.DelRule(r)
-				if err != nil {
-					if !isGoneError(err) {
-						errs = append(errs, fmt.Errorf("delete stale rule %s: %w", r, err))
-					}
-					break
+		stale, conflict := classifyRules(existing, mark)
+		if len(conflict) > 0 {
+			return fmt.Errorf("a policy rule at priority %d or %d that this client did not install is present (%s): another full tunnel is active on this host (only one is supported), or a stale rule of a different fwmark was left behind; remove it with `ip rule del pref %d` (`ip -6 rule del ...` for IPv6) and start again",
+				rulePrioSuppress, rulePrioMark, conflict[0], conflict[0].Priority)
+		}
+		all = append(all, stale...)
+	}
+	var errs []error
+	for _, r := range all {
+		// A duplicate can exist; delete until the kernel says none is left.
+		for range 16 {
+			err := nl.DelRule(r)
+			if err != nil {
+				if !isGoneError(err) {
+					errs = append(errs, fmt.Errorf("delete stale rule %s: %w", r, err))
 				}
-				slog.Warn("Removed a stale rule left by an earlier run", "rule", r.String())
+				break
 			}
+			slog.Warn("Removed a stale rule left by an earlier run", "rule", r.String())
 		}
 	}
 	return errors.Join(errs...)
@@ -257,8 +269,11 @@ func (c *Client) prepareFullTunnel(spec *TunSpec, servers []netip.Addr, deps tun
 	if choice.Warning != "" {
 		slog.Warn(choice.Warning)
 	}
-	if err := purgeStaleRules(deps.nl, mark); err != nil {
-		return nil, fmt.Errorf("clear rules left by an earlier run: %w", err)
+	if choice.Mode == tunRoutingFwmark {
+		// Only the fwmark mode installs rules; pin mode never reads or deletes any.
+		if err := purgeStaleRules(deps.nl, mark); err != nil {
+			return nil, fmt.Errorf("clear rules left by an earlier run: %w", err)
+		}
 	}
 
 	ft := &fullTunnel{rc: routingConfig{Mode: choice.Mode, Mark: mark}, servers: servers, choice: choice}
