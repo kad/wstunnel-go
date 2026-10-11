@@ -69,7 +69,7 @@ func TestRunTunDropsSilentPeer(t *testing.T) {
 			})
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
-			go func() { done <- c.runTun(ctx, devEnd, 1500, fastRetry) }()
+			go func() { done <- c.runTun(ctx, devEnd, 1500, fastRetry, nil) }()
 
 			deadline := time.Now().Add(5 * time.Second)
 			for accepted.Load() < 2 && time.Now().Before(deadline) {
@@ -159,7 +159,7 @@ func TestRunTunDropsSilentPeerUnderUploadLoad(t *testing.T) {
 			})
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
-			go func() { done <- c.runTun(ctx, devEnd, 1500, fastRetry) }()
+			go func() { done <- c.runTun(ctx, devEnd, 1500, fastRetry, nil) }()
 
 			stopFlood := make(chan struct{})
 			floodDone := make(chan struct{})

@@ -165,7 +165,7 @@ func startTunClient(t *testing.T, cfg Config, retry tunRetry) (*tuntest.Host, fu
 	c := NewClient(cfg)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- c.runTun(ctx, devEnd, 1500, retry) }()
+	go func() { done <- c.runTun(ctx, devEnd, 1500, retry, nil) }()
 	stop := func() error {
 		cancel()
 		select {
@@ -306,7 +306,7 @@ func TestRunTunReturnsWhenDeviceFails(t *testing.T) {
 	devEnd, hostEnd := tuntest.Pipe()
 	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
 	done := make(chan error, 1)
-	go func() { done <- c.runTun(context.Background(), devEnd, 1500, fastRetry) }()
+	go func() { done <- c.runTun(context.Background(), devEnd, 1500, fastRetry, nil) }()
 
 	time.Sleep(100 * time.Millisecond)
 	_ = hostEnd.Close() // the device disappears

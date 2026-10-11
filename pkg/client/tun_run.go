@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"net/url"
 	"os"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,6 +26,49 @@ type tunRetry struct {
 	min    time.Duration // first delay
 	max    time.Duration // delay ceiling
 	stable time.Duration // a session this old resets the delay to min
+
+	// sleep waits for d or until ctx ends; now reads the clock. Both are nil in
+	// production and let tests observe the delays without waiting for them.
+	sleep func(ctx context.Context, d time.Duration)
+	now   func() time.Time
+}
+
+func (r tunRetry) wait(ctx context.Context, d time.Duration) {
+	if r.sleep != nil {
+		r.sleep(ctx, d)
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+	case <-t.C:
+	}
+}
+
+func (r tunRetry) clock() time.Time {
+	if r.now != nil {
+		return r.now()
+	}
+	return time.Now()
+}
+
+// backoff yields the delays between session attempts: min, doubling up to max,
+// back to min after a session that lasted at least stable.
+type backoff struct {
+	retry tunRetry
+	delay time.Duration
+}
+
+func newBackoff(r tunRetry) *backoff { return &backoff{retry: r, delay: r.min} }
+
+func (b *backoff) next(sessionAge time.Duration) time.Duration {
+	if sessionAge >= b.retry.stable {
+		b.delay = b.retry.min
+	}
+	d := b.delay
+	b.delay = min(b.delay*2, b.retry.max)
+	return d
 }
 
 var defaultTunRetry = tunRetry{min: time.Second, max: 30 * time.Second, stable: 30 * time.Second}
@@ -110,17 +154,17 @@ func (c *Client) StartTun(ctx context.Context, spec *TunSpec) (*TunHandle, error
 	}
 
 	slog.Info("Tun device ready", "interface", dev.Name(), "mtu", mtu, "configured", spec.Configure)
-	return c.startTunHandle(ctx, dev, dev.Name(), mtu, defaultTunRetry, nil), nil
+	return c.startTunHandle(ctx, dev, dev.Name(), mtu, defaultTunRetry, c.newTunGuard(spec, serverAddrs), nil), nil
 }
 
 // startTunHandle runs the session loop for dev in the background. cleanups run
 // in reverse order after the loop and the device are gone, whatever the reason
 // it stopped.
-func (c *Client) startTunHandle(ctx context.Context, dev tun.PacketConn, name string, mtu uint16, retry tunRetry, cleanups []func() error) *TunHandle {
+func (c *Client) startTunHandle(ctx context.Context, dev tun.PacketConn, name string, mtu uint16, retry tunRetry, preConnect func(context.Context) error, cleanups []func() error) *TunHandle {
 	ctx, cancel := context.WithCancel(ctx)
 	h := &TunHandle{name: name, cancel: cancel, done: make(chan struct{})}
 	go func() {
-		err := c.runTun(ctx, dev, mtu, retry)
+		err := c.runTun(ctx, dev, mtu, retry, preConnect)
 		if err != nil {
 			slog.Error("Tun device failed; tun tunnel stopped", "interface", name, "err", err)
 		}
@@ -154,6 +198,10 @@ func tunMTUError(name string, current int, err error) error {
 
 // resolveServerAddrs returns the addresses the tunnel server name resolves to.
 func (c *Client) resolveServerAddrs() ([]netip.Addr, error) {
+	return c.resolveServerAddrsCtx(context.Background())
+}
+
+func (c *Client) resolveServerAddrsCtx(ctx context.Context) ([]netip.Addr, error) {
 	u, err := url.Parse(c.Config.ServerURL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid server url: %w", err)
@@ -165,7 +213,7 @@ func (c *Client) resolveServerAddrs() ([]netip.Addr, error) {
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return []netip.Addr{ip}, nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), tunResolveTimeout)
+	ctx, cancel := context.WithTimeout(ctx, tunResolveTimeout)
 	defer cancel()
 	addrs, err := lookupNetIP(ctx, host)
 	if err != nil {
@@ -176,6 +224,54 @@ func (c *Client) resolveServerAddrs() ([]netip.Addr, error) {
 		return nil, fmt.Errorf("resolve tunnel server %q: no addresses", host)
 	}
 	return addrs, nil
+}
+
+// newTunGuard returns the loop guard to run before every session attempt. The
+// server name is resolved again each time, because the answer can change while
+// the client runs, and the loop checks are repeated against the new answer.
+// When resolution fails or returns nothing the last addresses that passed the
+// checks are used, so a reconnect works while DNS is unreachable; if there never
+// were any, the guard fails closed. A refusal leaves those addresses unchanged.
+func (c *Client) newTunGuard(spec *TunSpec, initial []netip.Addr) func(context.Context) error {
+	var mu sync.Mutex
+	last := slices.Clone(initial)
+	return func(ctx context.Context) error {
+		mu.Lock()
+		defer mu.Unlock()
+		servers, err := c.resolveServerAddrsCtx(ctx)
+		if err != nil {
+			if len(last) == 0 {
+				return fmt.Errorf("tunnel server address never resolved: %w", err)
+			}
+			slog.Warn("Cannot re-resolve the tunnel server; using the last known addresses", "err", err, "addresses", last)
+			servers = last
+		}
+		if err := checkTunLoops(spec, servers); err != nil {
+			return err
+		}
+		last = slices.Clone(servers)
+		return nil
+	}
+}
+
+// connectWithContext runs dial, which cannot be interrupted, in the background
+// and returns as soon as it finishes or ctx ends. A stream that completes after
+// ctx ended is closed, so cancelling never leaks a connection. The abandoned
+// dial itself runs until the transport's own timeouts end it.
+func connectWithContext(ctx context.Context, dial func() *tunnelStream) *tunnelStream {
+	result := make(chan *tunnelStream, 1)
+	go func() { result <- dial() }()
+	select {
+	case ts := <-result:
+		return ts
+	case <-ctx.Done():
+		go func() {
+			if ts := <-result; ts.err == nil {
+				ts.Close()
+			}
+		}()
+		return &tunnelStream{err: fmt.Errorf("connect aborted: %w", ctx.Err())}
+	}
 }
 
 // tunUplink is the packet path of one established session.
@@ -189,7 +285,7 @@ type tunUplink struct {
 // A single goroutine reads dev for the whole run and hands packets to the
 // current session, so a session can end and be replaced without having to
 // interrupt a blocked device read. With no session the packets are dropped.
-func (c *Client) runTun(ctx context.Context, dev tun.PacketConn, mtu uint16, retry tunRetry) error {
+func (c *Client) runTun(ctx context.Context, dev tun.PacketConn, mtu uint16, retry tunRetry, preConnect func(context.Context) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -219,22 +315,24 @@ func (c *Client) runTun(ctx context.Context, dev tun.PacketConn, mtu uint16, ret
 		}
 	}()
 
-	delay := retry.min
+	backoff := newBackoff(retry)
 	for ctx.Err() == nil {
-		started := time.Now()
-		err := c.tunSession(ctx, dev, mtu, &current)
+		started := retry.clock()
+		var err error
+		if preConnect != nil {
+			if perr := preConnect(ctx); perr != nil {
+				err = fmt.Errorf("before connecting: %w", perr)
+			}
+		}
+		if err == nil {
+			err = c.tunSession(ctx, dev, mtu, &current)
+		}
 		if ctx.Err() != nil {
 			break
 		}
-		if time.Since(started) >= retry.stable {
-			delay = retry.min
-		}
+		delay := backoff.next(retry.clock().Sub(started))
 		slog.Warn("Tun session ended; reconnecting", "err", err, "retry_in", delay)
-		select {
-		case <-ctx.Done():
-		case <-time.After(delay):
-		}
-		delay = min(delay*2, retry.max)
+		retry.wait(ctx, delay)
 	}
 
 	// Closing the device unblocks the reader; wait for it so nothing outlives
@@ -259,7 +357,9 @@ func (c *Client) tunSession(ctx context.Context, dev tun.PacketConn, mtu uint16,
 	var keepers sync.WaitGroup
 	defer keepers.Wait()
 
-	ts := c.connectToTransport(protocol.LocalProtocol{Tun: &protocol.TunProtocol{Mtu: mtu}}, "0.0.0.0", 0)
+	ts := connectWithContext(ctx, func() *tunnelStream {
+		return c.connectToTransport(protocol.LocalProtocol{Tun: &protocol.TunProtocol{Mtu: mtu}}, "0.0.0.0", 0)
+	})
 	if ts.err != nil {
 		return describeTunConnectError(ts)
 	}
