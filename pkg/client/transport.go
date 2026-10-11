@@ -66,7 +66,7 @@ func (c *Client) dialRawTransport(ctx context.Context, network, addr string) (ne
 	}
 	d.Resolver = c.resolver.Load()
 
-	conn, err := d.DialContext(ctx, network, addr)
+	conn, err := c.dialPinned(ctx, &d, network, addr)
 	if err != nil {
 		return nil, nil, "", err
 	}

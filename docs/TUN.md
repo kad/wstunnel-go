@@ -174,13 +174,19 @@ away; the client also runs `resolvectl revert <tun>` on exit, which only matters
 for a device that outlives it.
 
 Resolving the tunnel server's own name is a chicken-and-egg problem while the
-tunnel is down. In `fwmark` mode the client resolves it through a resolver whose
-sockets carry the mark, and in every mode it falls back to the last addresses it
-knew when the lookup fails, so a reconnect works without DNS. A server given by
-IP address avoids the question. If the resolver on the host is a local stub
-(systemd-resolved at `127.0.0.53`) that `~.` now sends through the tunnel, the
-name lookup depends on the tunnel being up; prefer an IP address or accept the
-fallback.
+tunnel is down. Before every connect a full tunnel resolves the name again (in
+`fwmark` mode through a resolver whose sockets carry the mark). If that fails, the
+last addresses that passed the loop check are used, and if there never were any the
+client does not connect. Whichever addresses result are what the connection is
+actually made to, on every transport (the Rust-compatible and RFC 6455 websockets,
+HTTP/2 over TCP, and WebTransport over QUIC): the addresses are tried in order and
+the first that connects wins, while the host name from the server URL is still what
+TLS sends as SNI and verifies, what the HTTP `Host` and websocket URL carry. So a
+reconnect works while DNS is unreachable. This applies to `route=default` only; a
+partial-route tun tunnel re-resolves for the loop check but dials by name. A server
+given by IP address avoids the question. If the resolver on the host is a local stub
+(systemd-resolved at `127.0.0.53`) that `~.` now sends through the tunnel, the name
+lookup depends on the tunnel being up and the cached addresses carry the reconnects.
 
 ### Cleanup and crash recovery
 
