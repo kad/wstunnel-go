@@ -225,3 +225,24 @@ func TestPlanTunNetConfigRejectsWholeHostRoutes(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestCheckNotWholeHostComparesMaskedPrefix(t *testing.T) {
+	// Hand-built specs are not masked by the parser.
+	for _, route := range []string{"200.0.0.1/1", "1.2.3.4/0", "7f00::1/1", "::1/0", "0.0.0.0/1", "128.0.0.0/1"} {
+		spec := &TunSpec{Configure: true, Routes: []netip.Prefix{netip.MustParsePrefix(route)}}
+		if err := checkTunLoops(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")}); err == nil || !strings.Contains(err.Error(), "capture all") {
+			t.Errorf("route %s = %v, want a whole-host refusal", route, err)
+		}
+	}
+	spec := &TunSpec{Configure: true, Routes: []netip.Prefix{netip.MustParsePrefix("64.0.0.1/2")}}
+	if err := checkTunLoops(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")}); err != nil {
+		t.Errorf("a /2 is not the whole host: %v", err)
+	}
+}
+
+func TestPlannerRefusesAddrWithZeroLength(t *testing.T) {
+	spec := &TunSpec{Configure: true, MTU: 1500, Addrs: []netip.Prefix{netip.MustParsePrefix("10.0.0.1/0")}}
+	if _, err := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")}); err == nil || !strings.Contains(err.Error(), "loop") {
+		t.Fatalf("addr /0 = %v, want a loop refusal", err)
+	}
+}

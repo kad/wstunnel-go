@@ -42,7 +42,9 @@ type TunSpec struct {
 	Configure bool
 }
 
-// IsTunArg reports whether a -L argument is a tun:// packet tunnel.
+// IsTunArg reports whether a -L argument is a tun:// packet tunnel. The scheme
+// match is case-sensitive, like the other tunnel schemes: TUN://x is not a tun
+// tunnel.
 func IsTunArg(arg string) bool {
 	return strings.HasPrefix(arg, tunScheme)
 }
@@ -63,6 +65,14 @@ func ParseTunArg(arg string) (*TunSpec, error) {
 		case "mtu", "addr", "route", "configure":
 		default:
 			return nil, fmt.Errorf("unknown tun:// option %q (supported: mtu, addr, route, configure)", key)
+		}
+	}
+	for _, key := range []string{"mtu", "configure"} {
+		if len(values[key]) > 1 {
+			return nil, fmt.Errorf("tun:// option %q given more than once", key)
+		}
+		if values.Has(key) && values.Get(key) == "" {
+			return nil, fmt.Errorf("tun:// option %q is empty; give a value or leave it out", key)
 		}
 	}
 	if err := validateTunName(name); err != nil {
@@ -90,12 +100,21 @@ func ParseTunArg(arg string) (*TunSpec, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid tun:// addr %q: %w", v, err)
 		}
+		if err := checkNotMapped("addr", v, p); err != nil {
+			return nil, err
+		}
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("invalid tun:// addr %q: a /0 would route every address into the device; use a host prefix (/32 or /128)", v)
+		}
 		spec.Addrs = append(spec.Addrs, p)
 	}
 	for _, v := range values["route"] {
 		p, err := netip.ParsePrefix(v)
 		if err != nil {
 			return nil, fmt.Errorf("invalid tun:// route %q: %w", v, err)
+		}
+		if err := checkNotMapped("route", v, p); err != nil {
+			return nil, err
 		}
 		spec.Routes = append(spec.Routes, p.Masked())
 	}
@@ -116,11 +135,25 @@ func ParseTunArg(arg string) (*TunSpec, error) {
 	return spec, nil
 }
 
+// checkNotMapped refuses IPv4-mapped IPv6 prefixes (::ffff:a.b.c.d/N). The
+// kernel does not route them as IPv4, so they would not do what they appear to.
+func checkNotMapped(kind, raw string, p netip.Prefix) error {
+	if p.Addr().Is4In6() {
+		return fmt.Errorf("invalid tun:// %s %q: IPv4-mapped IPv6 prefixes are not supported; write the IPv4 prefix instead", kind, raw)
+	}
+	return nil
+}
+
 func validateTunName(name string) error {
 	if len(name) > tunMaxNameLen {
 		return fmt.Errorf("tun:// device name %q is longer than %d characters", name, tunMaxNameLen)
 	}
-	if name == "." || name == ".." || strings.ContainsAny(name, "/ \t\n") {
+	for _, r := range name {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf("invalid tun:// device name %q: control character %U", name, r)
+		}
+	}
+	if name == "." || name == ".." || strings.ContainsAny(name, "/ ") {
 		return fmt.Errorf("invalid tun:// device name %q", name)
 	}
 	return nil
