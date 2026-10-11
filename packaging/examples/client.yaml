@@ -1,7 +1,7 @@
 mode: client
 log_lvl: INFO
 client:
-  server_url: "ws://myserver:8080"
+  remote_addr: "ws://myserver:8080"
   local_to_remote:
     - "tcp://127.0.0.1:2222:127.0.0.1:22"
   remote_to_local:

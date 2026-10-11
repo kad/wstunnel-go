@@ -1,0 +1,23 @@
+[Unit]
+Description=wstunnel-go tun client - %I
+Documentation=https://github.com/kad/wstunnel-go/blob/main/docs/TUN.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/wstunnel-go --config /etc/wstunnel-go/%i.yaml client
+Restart=always
+RestartSec=5
+# Creating the tun device, its addresses and its routes needs CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_ADMIN
+# Security Hardening
+ReadOnlyPaths=/etc/wstunnel-go
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

@@ -5,7 +5,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/wstunnel-go server --config /etc/wstunnel-go/%i.yaml
+ExecStart=/usr/bin/wstunnel-go --config /etc/wstunnel-go/%i.yaml server
 Restart=always
 RestartSec=5
 # Allow binding to privileged ports
