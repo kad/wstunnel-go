@@ -222,9 +222,14 @@ stored on disk.
 
 Only one fwmark full-tunnel client can run per host. A second one refuses to start
 in two ways: with the same mark it cannot take the lock file
-`/run/wstunnel-go-tun-<mark>.lock` (in the temp directory when `/run` is not
-writable), which a running client holds with an exclusive `flock` for its whole
-life (`another full tunnel with mark ... is running (pid N)`); with another mark it
+`/run/wstunnel-go-tun-<mark>-<network namespace id>.lock` (created in the temp
+directory when `/run` is not writable), which a running client holds with an
+exclusive `flock` for its whole life (`another full tunnel with mark ... is running
+(pid N)`). Every client looks at both directories, so a client that could use
+`/run` still sees one that had to fall back to the temp directory. A lock file
+that exists but cannot be opened (a more privileged client started it) also
+refuses the start, naming the file; run both clients as the same user. With
+another mark it
 finds the first one's rules at 32760/32761 and refuses as described above. The
 lock is released when the client stops, and also when it is killed, which is why
 the rules a crashed client left behind are known to be stale and are purged. The

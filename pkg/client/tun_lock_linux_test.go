@@ -178,3 +178,67 @@ func TestFailedStartReleasesTheLock(t *testing.T) {
 	}
 	release()
 }
+
+// A process that could not use the primary lock directory holds its lock in the
+// temp dir. A process that can use the primary directory must still see it:
+// two lock domains for one mark would let the second purge the first's rules.
+func TestTunLockSeesALockHeldInTheFallbackDir(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	orig := tunLockDir
+	t.Cleanup(func() { tunLockDir = orig })
+
+	tunLockDir = "/nonexistent-dir-for-test/none"
+	first, err := acquireTunLock(0x7777)
+	if err != nil {
+		t.Fatalf("first lock: %v", err)
+	}
+	defer first()
+
+	tunLockDir = t.TempDir() // the process that can write the primary directory
+	if _, err := acquireTunLock(0x7777); err == nil || !strings.Contains(err.Error(), "another full tunnel") {
+		t.Fatalf("err = %v, want a refusal: the first client holds the mark in the temp dir", err)
+	}
+	// ...and the other way round.
+	first()
+	second, err := acquireTunLock(0x7777)
+	if err != nil {
+		t.Fatalf("lock after release: %v", err)
+	}
+	defer second()
+	tunLockDir = "/nonexistent-dir-for-test/none"
+	if _, err := acquireTunLock(0x7777); err == nil || !strings.Contains(err.Error(), "another full tunnel") {
+		t.Fatalf("err = %v, want a refusal: the other client holds the mark in the primary dir", err)
+	}
+}
+
+// A lock file that exists but cannot be opened belongs to someone we cannot
+// coordinate with (a more privileged client): refuse instead of switching to
+// another directory and a second lock domain.
+func TestTunLockFailsClosedWhenTheLockFileCannotBeOpened(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root bypasses file permissions")
+	}
+	useLockDir(t)
+	t.Setenv("TMPDIR", t.TempDir())
+	path := tunLockPath(tunLockDir, 0x7778)
+	if err := os.WriteFile(path, nil, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	_, err := acquireTunLock(0x7778)
+	if err == nil || !strings.Contains(err.Error(), path) {
+		t.Fatalf("err = %v, want a refusal naming %s", err, path)
+	}
+}
+
+// The routing rules the lock protects belong to a network namespace, so the
+// lock must not be shared between namespaces.
+func TestTunLockNameIncludesTheNetworkNamespace(t *testing.T) {
+	id, err := os.Readlink("/proc/self/ns/net")
+	if err != nil {
+		t.Skip("no /proc/self/ns/net")
+	}
+	digits := strings.Trim(id, "net:[]")
+	if got := tunLockPath("/run", 0x7774); !strings.Contains(got, digits) {
+		t.Errorf("lock path %q does not contain the namespace id %q", got, digits)
+	}
+}
