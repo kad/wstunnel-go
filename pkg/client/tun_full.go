@@ -196,14 +196,19 @@ type pinSet struct {
 
 // refresh removes the previous pins, looks the real route up again for every
 // server address (ignoring the tunnel's own routes, which would otherwise
-// answer) and installs new pins. If it fails the pins stay removed: the
+// answer) and installs new pins. If removing the old ones fails they stay
+// recorded and the error is returned, so the next attempt retries. If looking up
+// or installing the new ones fails the pins stay removed: the
 // server is then reachable only through the tunnel, so nothing leaks, and the
 // next attempt tries again.
 func (p *pinSet) refresh(servers []netip.Addr) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if err := runUndo(p.undo, p.nl); err != nil {
-		slog.Warn("Could not remove the previous server route pins", "err", err)
+		// The pins are still installed and still ours: keep the undo list so the
+		// next attempt (or Close) removes them. Looking the route up now would
+		// find the stale pin and mistake it for the operator's own host route.
+		return fmt.Errorf("remove the previous server route pins: %w", err)
 	}
 	p.undo = nil
 
