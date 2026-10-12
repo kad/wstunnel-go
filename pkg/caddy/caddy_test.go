@@ -162,12 +162,13 @@ func TestValidate(t *testing.T) {
 		w       Wstunnel
 		wantErr string
 	}{
-		"empty config":    {Wstunnel{}, ""},
-		"mode rust":       {Wstunnel{Config: cfg(func(c *serverConfig) { c.WebsocketProtocol = "rust" })}, ""},
-		"mode ws":         {Wstunnel{Config: cfg(func(c *serverConfig) { c.WebsocketProtocol = "ws" })}, ""},
-		"mode typo":       {Wstunnel{Config: cfg(func(c *serverConfig) { c.WebsocketProtocol = "wss" })}, "unknown mode"},
-		"tun_allow ok":    {Wstunnel{Config: cfg(func(c *serverConfig) { c.TunAllow = []string{"10.0.0.0/8"} })}, ""},
-		"tun_allow wrong": {Wstunnel{Config: cfg(func(c *serverConfig) { c.TunAllow = []string{"10.0.0.0/99"} })}, "tun_allow"},
+		"empty config":            {Wstunnel{}, ""},
+		"mode rust":               {Wstunnel{Config: cfg(func(c *serverConfig) { c.WebsocketProtocol = "rust" })}, ""},
+		"mode ws":                 {Wstunnel{Config: cfg(func(c *serverConfig) { c.WebsocketProtocol = "ws" })}, ""},
+		"mode typo":               {Wstunnel{Config: cfg(func(c *serverConfig) { c.WebsocketProtocol = "wss" })}, "unknown mode"},
+		"tun_allow ok":            {Wstunnel{Config: cfg(func(c *serverConfig) { c.TunAllow = []string{"10.0.0.0/8"} })}, ""},
+		"tun_allow wrong":         {Wstunnel{Config: cfg(func(c *serverConfig) { c.TunAllow = []string{"10.0.0.0/99"} })}, "tun_allow"},
+		"restrict_config missing": {Wstunnel{Config: cfg(func(c *serverConfig) { c.RestrictConfig = "/nonexistent/rules.yaml" })}, "restrict_config"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := tc.w.Validate()

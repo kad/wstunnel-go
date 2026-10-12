@@ -193,7 +193,7 @@ server:
 - `dns_resolver_prefer_ipv4`: currently a no-op; reserved for preferring IPv4 DNS results when both families are present.
 - `restrict_to`: allow-list of destinations that clients may request.
 - `restrict_http_upgrade_path_prefix_list`: allow-list of accepted path prefixes.
-- `restrict_config`: path to restriction rules file.
+- `restrict_config`: path to restriction rules file. A file that is missing or cannot be parsed stops the server (and makes Caddy reject the configuration) instead of starting without restrictions.
 - `tls_certificate`: PEM certificate used by the server.
 - `tls_private_key`: PEM private key matching `tls_certificate`.
 - `tls_client_ca_certs`: CA bundle for client-certificate verification (mTLS).

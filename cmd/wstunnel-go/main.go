@@ -711,7 +711,7 @@ func runServer(c *cli.Context) error {
 }
 
 func startServer(c *cli.Context, config *server.Config) error {
-	if _, err := server.ParseTunAllow(config.TunAllow); err != nil {
+	if err := server.ValidateConfig(*config); err != nil {
 		return err
 	}
 	srv := server.NewServer(*config)
