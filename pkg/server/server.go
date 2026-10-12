@@ -126,9 +126,18 @@ func ValidateConfig(config Config) error {
 		}
 	}
 	for _, r := range config.RestrictTo {
-		if _, _, err := net.SplitHostPort(r); err != nil {
+		_, port, err := net.SplitHostPort(r)
+		if err != nil {
 			return fmt.Errorf("restrict_to %q: want host:port: %w", r, err)
 		}
+		// NewServer turns the port into a number; anything that is not one
+		// would silently become a rule for port 0.
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return fmt.Errorf("restrict_to %q: the port must be a number from 0 to 65535: %w", r, err)
+		}
+	}
+	if config.TunUdpTimeout < 0 {
+		return fmt.Errorf("tun_udp_timeout %v is negative: every UDP flow would expire at once", config.TunUdpTimeout)
 	}
 	if _, err := ParseTunAllow(config.TunAllow); err != nil {
 		return err
