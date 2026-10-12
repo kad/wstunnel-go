@@ -5,7 +5,7 @@ go 1.27.2
 replace github.com/kad/wstunnel-go => ../../
 
 require (
-	github.com/caddyserver/caddy/v2 v2.11.6
+	github.com/caddyserver/caddy/v2 v2.11.7
 	github.com/golang-jwt/jwt/v5 v5.3.1
 	github.com/kad/wstunnel-go v0.0.1
 	go.uber.org/zap v1.28.0
