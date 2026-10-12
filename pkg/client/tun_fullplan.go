@@ -55,6 +55,10 @@ type routeInfo struct {
 	Link string
 	// Src is the preferred source address of the route, if any.
 	Src netip.Addr
+	// ExactHost is set when the route found is itself a host route (/32 or
+	// /128) for the address. It already keeps that address off the tunnel, and
+	// it is not ours, so it is neither re-added nor removed.
+	ExactHost bool
 }
 
 // routeGetter answers "how does this host reach ip". Tests use a table; the
@@ -194,6 +198,10 @@ func planPins(servers []netip.Addr, rg routeGetter) (ops, undo []netOp, err erro
 		}
 		if info.Link == "" {
 			return nil, nil, fmt.Errorf("find the route to tunnel server %s: no egress interface", s)
+		}
+		if info.ExactHost {
+			slog.Debug("Server already has a host route; leaving it alone", "server", s, "interface", info.Link)
+			continue
 		}
 		ops = append(ops, netOp{
 			Kind:    opAddHostRoute,

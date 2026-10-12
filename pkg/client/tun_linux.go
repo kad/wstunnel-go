@@ -396,7 +396,7 @@ func (netlinkConfigurer) RouteGet(ip netip.Addr, avoidLink string) (routeInfo, e
 	if err != nil {
 		return routeInfo{}, err
 	}
-	info := routeInfo{Link: link.Attrs().Name}
+	info := routeInfo{Link: link.Attrs().Name, ExactHost: bestBits == ip.BitLen()}
 	if gw, ok := netip.AddrFromSlice(bestGw); ok {
 		info.Gateway = gw.Unmap()
 	}
