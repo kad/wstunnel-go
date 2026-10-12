@@ -103,9 +103,9 @@ func (c *Client) resolveUDPAddr(ctx context.Context, addr string) (*net.UDPAddr,
 	if err != nil {
 		return nil, err
 	}
-	port, err := strconv.Atoi(portStr)
+	port, err := strconv.ParseUint(portStr, 10, 16)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("invalid port %q in %q: %w", portStr, addr, err)
 	}
 	if ip, err := netip.ParseAddr(host); err == nil {
 		return net.UDPAddrFromAddrPort(netip.AddrPortFrom(ip, uint16(port))), nil

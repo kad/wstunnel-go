@@ -1036,3 +1036,17 @@ func TestFullTunnelCloseResetsClientState(t *testing.T) {
 		})
 	}
 }
+
+func TestResolveUDPAddrRejectsOutOfRangePorts(t *testing.T) {
+	c := NewClient(Config{})
+	c.resolver.Store(&net.Resolver{})
+	for _, addr := range []string{"192.0.2.1:99999", "192.0.2.1:65536", "server.invalid:70000", "192.0.2.1:-1", "192.0.2.1:http"} {
+		if got, err := c.resolveUDPAddr(context.Background(), addr); err == nil {
+			t.Errorf("resolveUDPAddr(%q) = %v, want an error (a port must fit in 16 bits, not wrap around)", addr, got)
+		}
+	}
+	got, err := c.resolveUDPAddr(context.Background(), "192.0.2.1:65535")
+	if err != nil || got.Port != 65535 {
+		t.Errorf("resolveUDPAddr(:65535) = %v, %v", got, err)
+	}
+}
