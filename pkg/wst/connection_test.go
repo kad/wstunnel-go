@@ -150,3 +150,25 @@ func TestConn_ReadLimitAllowsMessagesWithinTheLimit(t *testing.T) {
 		t.Fatalf("ReadMessage() = %d bytes, %v; want 100, nil", len(p), err)
 	}
 }
+
+// ErrReadLimit is the one error for an oversized frame, whether the limit was
+// set by SetReadLimit or is the built-in 10 MiB ceiling.
+func TestConn_OversizedFrameAlwaysReportsErrReadLimit(t *testing.T) {
+	for name, limit := range map[string]int64{"default ceiling": 0, "configured limit": 100} {
+		t.Run(name, func(t *testing.T) {
+			client, server := net.Pipe()
+			defer func() { _ = client.Close() }()
+			defer func() { _ = server.Close() }()
+			s := NewConn(server, false)
+			s.SetReadLimit(limit)
+			go func() {
+				// announces 1 GiB
+				_, _ = client.Write([]byte{0x82, 127, 0, 0, 0, 0, 0x40, 0, 0, 0})
+			}()
+			_, _, err := s.ReadMessage()
+			if !errors.Is(err, ErrReadLimit) {
+				t.Fatalf("ReadMessage() error = %v, want ErrReadLimit", err)
+			}
+		})
+	}
+}

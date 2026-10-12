@@ -241,11 +241,11 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 		}
 
 		// Read payload
-		if length < 0 || length > maxMessageSize {
+		if length < 0 {
 			return 0, nil, fmt.Errorf("payload length %d is out of bounds", length)
 		}
-		if length > c.maxPayload() {
-			return 0, nil, fmt.Errorf("%w: payload length %d, limit %d", ErrReadLimit, length, c.maxPayload())
+		if limit := c.maxPayload(); length > limit {
+			return 0, nil, fmt.Errorf("%w: payload length %d, limit %d", ErrReadLimit, length, limit)
 		}
 		payload := make([]byte, int(length))
 		if _, err := io.ReadFull(c.bufr, payload); err != nil {
