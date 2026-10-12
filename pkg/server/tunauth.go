@@ -202,7 +202,10 @@ func tunFlowAllowed(rule *RestrictionConfig, f tun.Flow) bool {
 }
 
 // namesExplicitly reports whether one of the CIDRs lifts the deny list for
-// ip: the CIDR must lie entirely inside a denied prefix that contains ip.
+// ip: the CIDR must contain ip and lie entirely inside a denied prefix that
+// contains ip. (Allows has already accepted some CIDR of the entry; without the
+// containment check an unrelated explicit CIDR next to a broad one would lift
+// the deny list for every address in the denied prefix.)
 // A broad CIDR such as 0.0.0.0/1, 128.0.0.0/1 or ::/0 therefore lifts nothing,
 // while 127.0.0.1/32 and 127.0.0.0/8 lift loopback.
 //
@@ -215,7 +218,7 @@ func (at *AllowTunnelConfig) namesExplicitly(ip netip.Addr) bool {
 		}
 		for _, c := range at.CIDR {
 			p, ok := ipNetPrefix(c.IPNet)
-			if ok && d.Contains(p.Addr()) && p.Bits() >= d.Bits() {
+			if ok && d.Contains(p.Addr()) && p.Bits() >= d.Bits() && p.Contains(ip) {
 				return true
 			}
 		}
@@ -251,8 +254,13 @@ func ipNetPrefix(n *net.IPNet) (netip.Prefix, bool) {
 // A tun session has no single destination, so the server evaluates restrictions
 // against the fixed placeholder 0.0.0.0:0 whatever the client put in r and rp;
 // each flow is authorized separately by tunFlowAllowed.
+//
+// A claim that names Tun together with another protocol is reduced to Tun only.
+// Every handler takes its Tun branch first, so matching the claim as the other
+// protocol would admit a packet session through a rule that never allowed Tun.
 func normalizeTunClaims(claims *protocol.JwtTunnelConfig) {
 	if claims.Protocol.Tun != nil {
+		claims.Protocol = protocol.LocalProtocol{Tun: claims.Protocol.Tun}
 		claims.Remote = "0.0.0.0"
 		claims.Port = 0
 	}
