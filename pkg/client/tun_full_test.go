@@ -1005,3 +1005,34 @@ func TestFullTunnelOpensTheDeviceExclusively(t *testing.T) {
 		}
 	}
 }
+
+// After a full tunnel stops, the client must not keep marking its sockets or
+// dialing the old server addresses: it may be reused, and the policy rules that
+// made the mark meaningful are gone.
+func TestFullTunnelCloseResetsClientState(t *testing.T) {
+	for _, routing := range []string{"fwmark", "pin"} {
+		t.Run(routing, func(t *testing.T) {
+			srv := newTestTunServer(t, "rust", "")
+			host, _, _ := net.SplitHostPort(srv.addr)
+			f := newFakeHost(t, host)
+			c, h := startFullTunnel(t, f, Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"},
+				"tun://wst0?route=default&routing="+routing)
+			waitEcho(t, f.host, "before close")
+			if routing == "fwmark" && (c.socketMark() == 0 || c.resolver.Load() == nil) {
+				t.Fatal("fwmark mode should have armed the mark and the marked resolver")
+			}
+			if err := h.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if c.socketMark() != 0 {
+				t.Errorf("socket mark %#x still set after Close", c.socketMark())
+			}
+			if c.resolver.Load() != nil {
+				t.Error("marked resolver still installed after Close")
+			}
+			if c.serverAddrs.Load() != nil {
+				t.Error("pinned server addresses still set after Close")
+			}
+		})
+	}
+}
