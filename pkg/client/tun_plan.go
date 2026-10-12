@@ -124,6 +124,16 @@ func checkTunLoops(spec *TunSpec, serverAddrs []netip.Addr) error {
 			return err
 		}
 	}
+	for _, addr := range spec.Addrs {
+		// A short addr installs a connected route for its network; the whole
+		// host or one of the two halves would capture all traffic of the family
+		// just as the same route= would.
+		if addr.Bits() < addr.Addr().BitLen() {
+			if family, whole := wholeHostFamily(normalizePrefix(addr)); whole {
+				return fmt.Errorf("tun:// addr %s would capture all %s traffic: an addr shorter than a host prefix also routes its whole network into the device; use a host prefix (/32 or /128)", addr, family)
+			}
+		}
+	}
 	servers := make([]netip.Addr, 0, len(serverAddrs))
 	for _, server := range serverAddrs {
 		servers = append(servers, server.WithZone("").Unmap())
@@ -159,23 +169,32 @@ func normalizePrefix(p netip.Prefix) netip.Prefix {
 // replies to inbound connections included; full-tunnel routing needs more than
 // a route; route=default does the extra work.
 func checkNotWholeHost(p netip.Prefix) error {
+	family, whole := wholeHostFamily(p)
+	if !whole {
+		return nil
+	}
+	return fmt.Errorf("tun:// route %s would capture all %s traffic; use route=default (tun://NAME?route=default) to route the whole host through the tunnel", p.Masked(), family)
+}
+
+// wholeHostFamily reports whether p is a default route or one of the two /1
+// halves of a family, and which family it is.
+func wholeHostFamily(p netip.Prefix) (family string, whole bool) {
 	p = p.Masked()
 	if p.Bits() > 1 {
-		return nil
+		return "", false
 	}
 	if p.Bits() == 1 {
 		switch p.Addr() {
 		case netip.AddrFrom4([4]byte{}), netip.AddrFrom4([4]byte{128}),
 			netip.IPv6Unspecified(), netip.MustParseAddr("8000::"):
 		default:
-			return nil
+			return "", false
 		}
 	}
-	family := "IPv4"
 	if p.Addr().Is6() {
-		family = "IPv6"
+		return "IPv6", true
 	}
-	return fmt.Errorf("tun:// route %s would capture all %s traffic; use route=default (tun://NAME?route=default) to route the whole host through the tunnel", p, family)
+	return "IPv4", true
 }
 
 // checkLoop refuses a network routed into the device that holds a tunnel server.
