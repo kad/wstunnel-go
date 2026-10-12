@@ -115,6 +115,27 @@ type Server struct {
 	tunAllowSet bool
 }
 
+// ValidateConfig reports configuration that would make NewServer start with
+// weaker protection than the operator asked for: a restriction file that cannot
+// be loaded, a malformed tun_allow or restrict_to entry. Command-line and
+// embedding callers use it to refuse to start instead of serving.
+func ValidateConfig(config Config) error {
+	if config.RestrictConfig != "" {
+		if _, err := LoadRestrictions(config.RestrictConfig); err != nil {
+			return fmt.Errorf("restrict_config %q: %w", config.RestrictConfig, err)
+		}
+	}
+	for _, r := range config.RestrictTo {
+		if _, _, err := net.SplitHostPort(r); err != nil {
+			return fmt.Errorf("restrict_to %q: want host:port: %w", r, err)
+		}
+	}
+	if _, err := ParseTunAllow(config.TunAllow); err != nil {
+		return err
+	}
+	return nil
+}
+
 func NewServer(config Config) *Server {
 	if config.TunMaxFlows <= 0 {
 		config.TunMaxFlows = DefaultTunMaxFlows
@@ -133,7 +154,11 @@ func NewServer(config Config) *Server {
 		var err error
 		rules, err = LoadRestrictions(config.RestrictConfig)
 		if err != nil {
-			slog.Error("Failed to load restrictions", "path", config.RestrictConfig, "err", err)
+			// Never fall back to "no restrictions": a server built in code
+			// from a restriction file that cannot be read refuses every
+			// tunnel. ValidateConfig lets callers refuse to start instead.
+			slog.Error("Failed to load restrictions; refusing every tunnel", "path", config.RestrictConfig, "err", err)
+			rules = &RestrictionsRules{Restrictions: []RestrictionConfig{{Name: "restrict_config failed to load (denying all)"}}}
 		}
 	}
 

@@ -63,6 +63,12 @@ func (w *Wstunnel) Provision(ctx caddy.Context) error {
 		w.Config.WebsocketProtocol = "rust"
 	}
 
+	// Validate has normally refused a bad configuration already; check again
+	// because a restriction file can change between validation and provisioning,
+	// and NewServer would otherwise carry on with a deny-all placeholder.
+	if err := server.ValidateConfig(w.Config); err != nil {
+		return fmt.Errorf("wstunnel: %w", err)
+	}
 	w.server = server.NewServer(w.Config)
 
 	// Merge inline restrictions into the server
@@ -86,7 +92,7 @@ func (w *Wstunnel) Validate() error {
 	default:
 		return fmt.Errorf("wstunnel: unknown mode %q (want rust or ws)", w.Config.WebsocketProtocol)
 	}
-	if _, err := server.ParseTunAllow(w.Config.TunAllow); err != nil {
+	if err := server.ValidateConfig(w.Config); err != nil {
 		return fmt.Errorf("wstunnel: %w", err)
 	}
 	return nil

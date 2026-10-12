@@ -211,3 +211,15 @@ func TestRunRejectsUnreadableConfigFile(t *testing.T) {
 		}
 	}
 }
+
+func TestStartServerRefusesAnUnloadableRestrictConfig(t *testing.T) {
+	cfg := &server.Config{
+		ListenAddr:     "ws://127.0.0.1:0",
+		EnableTun:      true,
+		RestrictConfig: filepath.Join(t.TempDir(), "missing.yaml"),
+	}
+	err := startServer(nil, cfg)
+	if err == nil || !strings.Contains(err.Error(), "restrict_config") {
+		t.Fatalf("startServer = %v, want a restrict_config error before anything is served", err)
+	}
+}
