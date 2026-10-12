@@ -68,6 +68,9 @@ func (o Options) withDefaults() (Options, error) {
 	if o.MTU < MinMTU || o.MTU > MaxPacketSize {
 		return o, fmt.Errorf("tun: MTU %d outside %d..%d", o.MTU, MinMTU, MaxPacketSize)
 	}
+	if o.MaxFlows < 0 || o.MaxInFlightSYN < 0 {
+		return o, fmt.Errorf("tun: negative limit (max flows %d, max in-flight SYN %d)", o.MaxFlows, o.MaxInFlightSYN)
+	}
 	if o.DialTimeout < 0 || o.UDPIdleTimeout < 0 {
 		return o, fmt.Errorf("tun: negative timeout (dial %v, UDP idle %v): flows could never be forwarded", o.DialTimeout, o.UDPIdleTimeout)
 	}
