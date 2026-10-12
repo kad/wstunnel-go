@@ -118,7 +118,7 @@ two ways around it, chosen by `routing=`.
 | `routing` | How the tunnel's own traffic bypasses the TUN |
 |---|---|
 | `fwmark` | The client marks its own sockets (and its own DNS lookups of the server name) with a firewall mark. The mark is `--socket-so-mark` if you set it, otherwise `0x7774` (30580). The same number is the routing table id. Table 30580 holds `default dev <tun>` for IPv4 and IPv6. Two rules per family: priority 32760 `lookup main suppress_prefixlength 0` (so more specific main-table routes still win) and priority 32761 `not fwmark <mark> lookup <mark>`. |
-| `pin` | A host route (`/32` or `/128`) to every address of the server through the real gateway and device, found with a route lookup that ignores the tunnel's own routes, plus the four halves `0.0.0.0/1`, `128.0.0.0/1`, `::/1` and `8000::/1` through the TUN, which override the default route without removing it. The pins are deleted and looked up again before every reconnect, so a changed gateway or a changed DNS answer is followed. |
+| `pin` | A host route (`/32` or `/128`) to every address of the server through the real gateway and device, found with a route lookup that ignores the tunnel's own routes, plus the four halves `0.0.0.0/1`, `128.0.0.0/1`, `::/1` and `8000::/1` through the TUN, which override the default route without removing it. The pins are deleted and looked up again before every reconnect, so a changed gateway or a changed DNS answer is followed. A host route for the server that already exists (one you added) is used as it is and is never replaced or deleted. |
 | `auto` (default) | `fwmark`, unless the reverse-path filter would break it, then `pin`. |
 
 ### Why there are two modes: rp_filter

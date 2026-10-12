@@ -319,3 +319,24 @@ func TestUniqueAddrs(t *testing.T) {
 		t.Fatalf("uniqueAddrs = %v, want %v", got, want)
 	}
 }
+
+// An exact host route to the server that the operator already owns pins the
+// server on its own. Adding and later deleting it would remove the operator's
+// route when the tunnel stops.
+func TestPlanPinsLeavesAnExistingHostRouteAlone(t *testing.T) {
+	own := viaGW
+	own.ExactHost = true
+	rg := routes(map[string]routeInfo{"192.0.2.10": own, "192.0.2.11": onLink})
+	ops, undo, err := planPins([]netip.Addr{srv4, srv4b}, rg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"add route 192.0.2.11/32 dev eth1"}
+	if got := describeAll(ops); !reflect.DeepEqual(got, want) {
+		t.Errorf("ops = %v, want %v (the operator's /32 must not be re-added)", got, want)
+	}
+	wantUndo := []string{"delete route 192.0.2.11/32 dev eth1"}
+	if got := describeAll(undo); !reflect.DeepEqual(got, wantUndo) {
+		t.Errorf("undo = %v, want %v (the operator's /32 must not be deleted)", got, wantUndo)
+	}
+}

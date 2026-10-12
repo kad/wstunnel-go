@@ -521,6 +521,7 @@ var fullCases = []fullCase{
 	{"Go-Go-Tun-Full-Inbound-Pin", "pin", 2, "inbound", "pin"},
 	{"Go-Go-Tun-Full-ForeignSelectorRule-Refused", "fwmark", 2, "refuse-selector", ""},
 	{"Go-Go-Tun-Full-PersistentDevice-Refused", "fwmark", 2, "refuse-persistent", ""},
+	{"Go-Go-Tun-Full-Pin-OwnHostRoute", "pin", 2, "ownroute", "pin"},
 	{"Go-Go-Tun-Full-Cleanup-Fwmark", "fwmark", 2, "cleanup", "fwmark"},
 	{"Go-Go-Tun-Full-Cleanup-Pin", "pin", 2, "cleanup", "pin"},
 	{"Go-Go-Tun-Full-Crash-Fwmark", "fwmark", 2, "crash", "fwmark"},
@@ -979,6 +980,26 @@ print("CONNECTED" if s.recv(2)==b"hi" else "NO")`, src)...)
 		time.Sleep(3 * time.Second)
 		waitEchoOK("after idle "+name, 10*time.Second)
 		checkInstalled(t, tc.wantMode, rulesText(), table(), try("ip", "route", "show"))
+
+	case "ownroute":
+		// The operator already pins the server with a host route of their own.
+		// The client must use it as it is and leave it in place when it exits.
+		if out := try("ip", "route", "add", fullServerIP+"/32", "via", "10.200.0.2", "dev", "vAB"); strings.Contains(out, "Error") {
+			t.Fatalf("cannot add the operator's host route: %s", out)
+		}
+		own := func() bool { return strings.Contains(try("ip", "route", "show", fullServerIP+"/32"), "via 10.200.0.2") }
+		cli := startClient()
+		defer cli.kill()
+		waitEchoOK("with the operator's host route", 20*time.Second)
+		if !own() {
+			t.Fatalf("the operator's host route disappeared while the tunnel ran:\n%s", try("ip", "route", "show"))
+		}
+		if err := cli.terminate(syscall.SIGTERM, 10*time.Second); err != nil {
+			t.Fatalf("client after SIGTERM: %v\n%s", err, cli.output())
+		}
+		if !own() {
+			t.Errorf("stopping the tunnel deleted the operator's host route:\n%s", try("ip", "route", "show"))
+		}
 
 	case "cleanup":
 		cli := startClient()
