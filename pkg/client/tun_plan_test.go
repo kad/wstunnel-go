@@ -322,8 +322,8 @@ func TestCheckNotWholeHostComparesMaskedPrefix(t *testing.T) {
 
 func TestPlannerRefusesAddrWithZeroLength(t *testing.T) {
 	spec := &TunSpec{Configure: true, MTU: 1500, Addrs: []netip.Prefix{netip.MustParsePrefix("10.0.0.1/0")}}
-	if _, err := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")}); err == nil || !strings.Contains(err.Error(), "loop") {
-		t.Fatalf("addr /0 = %v, want a loop refusal", err)
+	if _, err := planTunNetConfig(spec, []netip.Addr{netip.MustParseAddr("203.0.113.5")}); err == nil || !strings.Contains(err.Error(), "capture all") {
+		t.Fatalf("addr /0 = %v, want a whole-host refusal", err)
 	}
 }
 
@@ -345,5 +345,25 @@ func TestFullTunnelSpecSkipsRouteLoopGuardButKeepsAddrCheck(t *testing.T) {
 	spec = mustSpec(t, "tun://wst0?route=default&addr=203.0.113.9/24")
 	if err := checkTunLoops(spec, servers); err == nil || !strings.Contains(err.Error(), "loop") {
 		t.Fatalf("addr covering the server = %v, want a loop error", err)
+	}
+}
+
+// An addr shorter than a host prefix makes the kernel install a connected route
+// for its whole network. A /0 or one of the two /1 halves of a family would
+// capture all of that family's traffic exactly as route= of the same prefix.
+func TestPlannerRefusesAddrThatWouldCaptureTheWholeHost(t *testing.T) {
+	servers := []netip.Addr{netip.MustParseAddr("203.0.113.5")}
+	for _, addr := range []string{"1.2.3.4/1", "200.0.0.1/1", "10.0.0.1/0", "7f00::1/1", "9000::1/1", "::1/0"} {
+		spec := &TunSpec{Configure: true, MTU: 1500, Addrs: []netip.Prefix{netip.MustParsePrefix(addr)}}
+		err := checkTunLoops(spec, servers)
+		if err == nil || !strings.Contains(err.Error(), "capture all") || !strings.Contains(err.Error(), "addr") {
+			t.Errorf("addr %s: error = %v, want a whole-host refusal naming addr", addr, err)
+		}
+	}
+	for _, addr := range []string{"10.0.0.1/8", "64.0.0.1/2", "fd00::1/64", "198.18.0.1/32"} {
+		spec := &TunSpec{Configure: true, MTU: 1500, Addrs: []netip.Prefix{netip.MustParsePrefix(addr)}}
+		if err := checkTunLoops(spec, servers); err != nil {
+			t.Errorf("addr %s must stay accepted: %v", addr, err)
+		}
 	}
 }
