@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kad/wstunnel-go/pkg/protocol"
 )
@@ -26,14 +27,19 @@ func TestValidateConfig(t *testing.T) {
 		cfg     Config
 		wantErr string
 	}{
-		"empty config":        {Config{}, ""},
-		"good rules file":     {Config{RestrictConfig: good}, ""},
-		"missing rules file":  {Config{RestrictConfig: missing}, "restrict_config"},
-		"malformed rules":     {Config{RestrictConfig: bad}, "restrict_config"},
-		"bad tun_allow":       {Config{TunAllow: []string{"10.0.0.0/99"}}, "tun_allow"},
-		"bad restrict-to":     {Config{RestrictTo: []string{"no-port"}}, "restrict_to"},
-		"good restrict-to":    {Config{RestrictTo: []string{"10.0.0.1:22"}}, ""},
-		"both rules and flag": {Config{RestrictConfig: missing, RestrictTo: []string{"10.0.0.1:22"}}, "restrict_config"},
+		"empty config":         {Config{}, ""},
+		"good rules file":      {Config{RestrictConfig: good}, ""},
+		"missing rules file":   {Config{RestrictConfig: missing}, "restrict_config"},
+		"malformed rules":      {Config{RestrictConfig: bad}, "restrict_config"},
+		"bad tun_allow":        {Config{TunAllow: []string{"10.0.0.0/99"}}, "tun_allow"},
+		"bad restrict-to":      {Config{RestrictTo: []string{"no-port"}}, "restrict_to"},
+		"good restrict-to":     {Config{RestrictTo: []string{"10.0.0.1:22"}}, ""},
+		"named port":           {Config{RestrictTo: []string{"10.0.0.1:http"}}, "restrict_to"},
+		"port out of range":    {Config{RestrictTo: []string{"10.0.0.1:99999"}}, "restrict_to"},
+		"port zero ok":         {Config{RestrictTo: []string{"10.0.0.1:0"}}, ""},
+		"negative udp timeout": {Config{TunUdpTimeout: -time.Second}, "tun_udp_timeout"},
+		"zero udp timeout":     {Config{}, ""},
+		"both rules and flag":  {Config{RestrictConfig: missing, RestrictTo: []string{"10.0.0.1:22"}}, "restrict_config"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			err := ValidateConfig(tc.cfg)
