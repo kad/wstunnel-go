@@ -228,7 +228,7 @@ func validateTunName(name string) error {
 		// (resolvectl, ip), and the kernel does not give such names a meaning.
 		return fmt.Errorf("invalid tun:// device name %q: must not start with '-'", name)
 	}
-	if name == "." || name == ".." || strings.ContainsAny(name, "/ ") {
+	if name == "." || name == ".." || strings.ContainsAny(name, "/: ") {
 		return fmt.Errorf("invalid tun:// device name %q", name)
 	}
 	return nil

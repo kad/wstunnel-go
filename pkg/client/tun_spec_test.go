@@ -211,3 +211,11 @@ func TestParseTunArgFullTunnelErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestParseTunArgRejectsColonsInDeviceNames(t *testing.T) {
+	for _, arg := range []string{"tun://wst:0", "tun://a:b?mtu=1500", "tun://:x"} {
+		if _, err := ParseTunArg(arg); err == nil {
+			t.Errorf("ParseTunArg(%q) succeeded; the kernel refuses ':' in interface names", arg)
+		}
+	}
+}
