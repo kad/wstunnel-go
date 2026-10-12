@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -22,6 +23,8 @@ type WebTransportClient struct {
 	client *Client
 	mu     sync.Mutex
 	sess   *webtransport.Session
+	// sessPinKey records the pinned server addresses sess was dialed for.
+	sessPinKey string
 }
 
 func NewWebTransportClient(client *Client) *WebTransportClient {
@@ -59,9 +62,15 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 
 	w.mu.Lock()
 	sess := w.sess
-	if sess != nil && sessionDead(sess) {
+	pinKey := strings.Join(w.client.pinnedTargets(u.Host), ",")
+	if sess != nil && !sessionReusable(sess, w.sessPinKey, pinKey) {
 		// A session whose QUIC connection is gone would fail the first stream
-		// open; dial a fresh one instead.
+		// open; one dialed for server addresses that are no longer pinned still
+		// talks to an address whose packets now follow the tunnel's own routes.
+		// Dial a fresh one.
+		if !sessionDead(sess) {
+			_ = sess.CloseWithError(0, "server addresses changed")
+		}
 		w.sess = nil
 		sess = nil
 	}
@@ -108,6 +117,7 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 			return nil, resp, fmt.Errorf("failed to dial WebTransport session: %w", err)
 		}
 		w.sess = sess
+		w.sessPinKey = pinKey
 	}
 	w.mu.Unlock()
 
@@ -148,6 +158,12 @@ func newWebTransportQUICConfig() *quic.Config {
 }
 
 // sessionDead reports whether a cached session has ended.
+// sessionReusable reports whether a cached session can carry a new stream: it
+// is alive and was dialed for the server addresses that are pinned now.
+func sessionReusable(s interface{ Context() context.Context }, dialedFor, now string) bool {
+	return !sessionDead(s) && dialedFor == now
+}
+
 func sessionDead(s interface{ Context() context.Context }) bool {
 	return s.Context().Err() != nil
 }
