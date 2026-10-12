@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -15,6 +16,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -27,8 +29,15 @@ import (
 )
 
 type WebTransportServer struct {
-	server   *Server
+	server *Server
+
+	// mu guards wtServer and closed: Close can run while Start is still
+	// bringing the listener up (a shutdown during startup, a Caddy reload).
+	mu       sync.Mutex
 	wtServer *webtransport.Server
+	udpConn  net.PacketConn
+	served   chan struct{} // closed when wtServer.Serve has returned
+	closed   bool
 }
 
 type webTransportRequest struct {
@@ -38,6 +47,9 @@ type webTransportRequest struct {
 }
 
 const webTransportAuthTimeout = 10 * time.Second
+
+// webTransportCloseWait bounds how long Close waits for Serve to return.
+const webTransportCloseWait = 5 * time.Second
 
 func NewWebTransportServer(server *Server) *WebTransportServer {
 	return &WebTransportServer{server: server}
@@ -74,6 +86,11 @@ func generateDummyTLSConfig() (*tls.Config, error) {
 }
 
 func (w *WebTransportServer) Start(bindAddr string, tlsConfig *tls.Config) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return errors.New("WebTransport server is closed")
+	}
 	if tlsConfig == nil {
 		dummyConfig, err := generateDummyTLSConfig()
 		if err != nil {
@@ -135,7 +152,9 @@ func (w *WebTransportServer) Start(bindAddr string, tlsConfig *tls.Config) error
 		return fmt.Errorf("listen for WebTransport: %w", err)
 	}
 
+	served := make(chan struct{})
 	go func() {
+		defer close(served)
 		if err := wtServer.Serve(udpConn); err != nil {
 			_ = udpConn.Close()
 			slog.Debug("WebTransport server stopped", "err", err)
@@ -143,14 +162,33 @@ func (w *WebTransportServer) Start(bindAddr string, tlsConfig *tls.Config) error
 	}()
 
 	w.wtServer = wtServer
+	w.udpConn = udpConn
+	w.served = served
 	return nil
 }
 
+// Close stops the listener, if one was started, and keeps a later Start from
+// bringing one up. It is safe to call more than once.
 func (w *WebTransportServer) Close() error {
-	if w.wtServer != nil {
-		return w.wtServer.Close()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.closed {
+		return nil
 	}
-	return nil
+	w.closed = true
+	if w.wtServer == nil {
+		return nil
+	}
+	// webtransport.Server.Close races with a Serve that has only just started
+	// (both touch the server's internal state). Closing the socket first makes
+	// Serve return; closing the server after that is ordered behind it.
+	_ = w.udpConn.Close()
+	select {
+	case <-w.served:
+	case <-time.After(webTransportCloseWait):
+		slog.Warn("WebTransport Serve did not return after its socket was closed")
+	}
+	return w.wtServer.Close()
 }
 
 func (w *WebTransportServer) handleSession(sess *webtransport.Session, request webTransportRequest) {
