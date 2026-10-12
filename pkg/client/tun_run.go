@@ -181,9 +181,13 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 				_ = dev.Close()
 				return nil, err
 			}
-			// Cleanups run in reverse: the routing goes first, DNS last.
-			// The lock is released last.
-			cleanups = append(cleanups, func() error { full.release(); return nil }, revertDNS, cleanup)
+			// Cleanups run in reverse: the routing goes first, then DNS, then
+			// the client forgets the mark, the marked resolver and the pinned
+			// addresses (it may be reused), and the lock is released last.
+			cleanups = append(cleanups,
+				func() error { full.release(); return nil },
+				func() error { c.resetFullTunnel(); return nil },
+				revertDNS, cleanup)
 		}
 	} else {
 		current, err := deps.deviceMTU(dev.Name())
