@@ -136,6 +136,14 @@ func ValidateConfig(config Config) error {
 			return fmt.Errorf("restrict_to %q: the port must be a number from 0 to 65535: %w", r, err)
 		}
 	}
+	// NewServer treats zero as "use the default"; a negative value is a typo,
+	// and must not quietly become the (much larger) default capacity.
+	if config.TunMaxFlows < 0 {
+		return fmt.Errorf("tun_max_flows %d is negative", config.TunMaxFlows)
+	}
+	if config.TunMaxSessions < 0 {
+		return fmt.Errorf("tun_max_sessions %d is negative", config.TunMaxSessions)
+	}
 	if config.TunUdpTimeout < 0 {
 		return fmt.Errorf("tun_udp_timeout %v is negative: every UDP flow would expire at once", config.TunUdpTimeout)
 	}
