@@ -40,7 +40,12 @@ type wstPacketConn struct {
 
 // NewWSTPacketConn carries one IP packet per binary message on a custom
 // (--mode rust) WebSocket connection.
+//
+// Messages over MaxPacketSize make ReadPacket fail with wst.ErrReadLimit, before
+// the payload is read: the limit is enforced from the frame header, so a peer
+// cannot make the server allocate more than MaxPacketSize per message.
 func NewWSTPacketConn(c *wst.Conn) PacketConn {
+	c.SetReadLimit(MaxPacketSize)
 	return &wstPacketConn{c: c}
 }
 

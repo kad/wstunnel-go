@@ -140,3 +140,31 @@ func TestGorillaPacketConnEnforcesReadLimit(t *testing.T) {
 		t.Fatal("connection still readable after oversized message")
 	}
 }
+
+// The custom WebSocket reader must refuse an oversized frame from its header,
+// as the gorilla adapter does with SetReadLimit: with only the header sent, a
+// reader that allocated the announced payload (up to 10 MiB) would block.
+func TestWSTPacketConnRefusesOversizedFrameFromTheHeader(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+	pc := tun.NewWSTPacketConn(wst.NewConn(server, false))
+
+	go func() {
+		// binary frame announcing 5 MiB, payload never sent
+		_, _ = client.Write([]byte{0x82, 127, 0, 0, 0, 0, 0, 0x50, 0, 0})
+	}()
+	done := make(chan error, 1)
+	go func() {
+		_, err := pc.ReadPacket()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, wst.ErrReadLimit) {
+			t.Fatalf("ReadPacket error = %v, want wst.ErrReadLimit", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadPacket waited for the payload of an oversized frame")
+	}
+}

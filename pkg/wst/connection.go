@@ -3,10 +3,12 @@ package wst
 import (
 	"bufio"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -19,7 +21,15 @@ const (
 	PongMessage   = 10
 )
 
+// maxMessageSize is the default ceiling for one incoming message payload.
+const maxMessageSize = 10 * 1024 * 1024
+
+// ErrReadLimit is returned by ReadMessage when a frame announces a payload
+// larger than the read limit. It mirrors gorilla's websocket.ErrReadLimit.
+var ErrReadLimit = errors.New("wst: read limit exceeded")
+
 type Conn struct {
+	readLimit   atomic.Int64 // 0 means maxMessageSize
 	rwc         net.Conn
 	bufr        *bufio.Reader
 	bufw        *bufio.Writer
@@ -48,6 +58,18 @@ func NewConnWithReader(conn net.Conn, masking bool, br *bufio.Reader) *Conn {
 
 func (c *Conn) Close() error {
 	return c.rwc.Close()
+}
+
+// SetReadLimit sets the largest message payload ReadMessage accepts; a frame
+// announcing more fails with ErrReadLimit before any memory is allocated for
+// it. Zero restores the default of 10 MiB, and the limit never exceeds it.
+func (c *Conn) SetReadLimit(n int64) { c.readLimit.Store(n) }
+
+func (c *Conn) maxPayload() int64 {
+	if n := c.readLimit.Load(); n > 0 && n < maxMessageSize {
+		return n
+	}
+	return maxMessageSize
 }
 
 func (c *Conn) SetPingHandler(h func(string) error) {
@@ -219,8 +241,11 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 		}
 
 		// Read payload
-		if length < 0 || length > 1024*1024*10 { // Max 10MB to prevent OOM
+		if length < 0 || length > maxMessageSize {
 			return 0, nil, fmt.Errorf("payload length %d is out of bounds", length)
+		}
+		if length > c.maxPayload() {
+			return 0, nil, fmt.Errorf("%w: payload length %d, limit %d", ErrReadLimit, length, c.maxPayload())
 		}
 		payload := make([]byte, int(length))
 		if _, err := io.ReadFull(c.bufr, payload); err != nil {
