@@ -32,26 +32,48 @@ var tunDeniedPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("168.63.129.16/32"),   // Azure WireServer
 }
 
-// embeddedIPv4 returns the IPv4 address carried inside an IPv6 address in one
-// of the forms a NAT64 gateway or a transition mechanism would translate back
-// to IPv4: the NAT64 well-known prefix 64:ff9b::/96, 6to4 (2002::/16) and the
-// deprecated IPv4-compatible form ::/96.
-func embeddedIPv4(ip netip.Addr) (netip.Addr, bool) {
-	if !ip.Is6() {
-		return netip.Addr{}, false
+// embeddedIPv4s returns the IPv4 addresses an IPv6 address could carry in one
+// of the forms a NAT64 gateway or a transition mechanism translates back to
+// IPv4: the NAT64 well-known prefix 64:ff9b::/96, the local-use NAT64 prefix
+// 64:ff9b:1::/48 (RFC 8215), 6to4 (2002::/16), ISATAP (an interface identifier
+// of 0000:5efe or 0200:5efe followed by the IPv4 address) and the deprecated
+// IPv4-compatible form ::/96.
+//
+// A local-use NAT64 prefix can have any length from /48 to /96, and the length
+// decides where RFC 6052 puts the IPv4 address, so every reading is returned.
+// The caller denies the address if any of them is denied.
+func embeddedIPv4s(ip netip.Addr) []netip.Addr {
+	if !ip.Is6() || ip.Is4In6() {
+		return nil // IPv4-mapped is handled by Unmap
 	}
 	b := ip.As16()
-	switch {
-	case ip.Is4In6():
-		return netip.Addr{}, false // handled by Unmap
-	case b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && allZero(b[4:12]):
-		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
-	case b[0] == 0x20 && b[1] == 0x02:
-		return netip.AddrFrom4([4]byte{b[2], b[3], b[4], b[5]}), true
-	case allZero(b[:12]):
-		return netip.AddrFrom4([4]byte{b[12], b[13], b[14], b[15]}), true
+	v4 := func(o ...int) netip.Addr {
+		return netip.AddrFrom4([4]byte{b[o[0]], b[o[1]], b[o[2]], b[o[3]]})
 	}
-	return netip.Addr{}, false
+	var out []netip.Addr
+	switch {
+	case b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && allZero(b[4:12]):
+		out = append(out, v4(12, 13, 14, 15))
+	case b[0] == 0x00 && b[1] == 0x64 && b[2] == 0xff && b[3] == 0x9b && b[4] == 0x00 && b[5] == 0x01:
+		// RFC 6052 section 2.2: /48, /56, /64 and /96 prefixes (octet 8 is the
+		// reserved "u" octet and is skipped).
+		// A reading in 0.0.0.0/8 is not a destination anyone can translate to:
+		// those octets are the zero padding of a longer prefix. Skipping it
+		// keeps ordinary /96 addresses from being denied as 0.x.y.z.
+		for _, c := range []netip.Addr{v4(6, 7, 9, 10), v4(7, 9, 10, 11), v4(9, 10, 11, 12), v4(12, 13, 14, 15)} {
+			if c.As4()[0] != 0 {
+				out = append(out, c)
+			}
+		}
+	case b[0] == 0x20 && b[1] == 0x02:
+		out = append(out, v4(2, 3, 4, 5))
+	case allZero(b[:12]):
+		out = append(out, v4(12, 13, 14, 15))
+	}
+	if b[10] == 0x5e && b[11] == 0xfe && b[9] == 0x00 && b[8]&0xfd == 0x00 {
+		out = append(out, v4(12, 13, 14, 15))
+	}
+	return out
 }
 
 func allZero(b []byte) bool {
@@ -74,8 +96,10 @@ func tunDestinationDenied(ip netip.Addr) bool {
 	if deniedPrefixContains(ip) {
 		return true
 	}
-	if v4, ok := embeddedIPv4(ip); ok && deniedPrefixContains(v4) {
-		return true
+	for _, v4 := range embeddedIPv4s(ip) {
+		if deniedPrefixContains(v4) {
+			return true
+		}
 	}
 	return false
 }
