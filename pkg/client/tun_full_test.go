@@ -1050,3 +1050,24 @@ func TestResolveUDPAddrRejectsOutOfRangePorts(t *testing.T) {
 		t.Errorf("resolveUDPAddr(:65535) = %v, %v", got, err)
 	}
 }
+
+// A start that is refused before this call armed anything must not wipe the
+// state of a tunnel that is already running on the same client.
+func TestRefusedFullTunnelStartKeepsARunningTunnelsState(t *testing.T) {
+	srv := newTestTunServer(t, "rust", "")
+	host, _, _ := net.SplitHostPort(srv.addr)
+	f := newFakeHost(t, host)
+	f.deps.ifaceExists = func(string) bool { return true } // refuses before anything is armed
+	c := NewClient(Config{ServerURL: "ws://" + srv.addr, PathPrefix: "v1", WebsocketProtocol: "rust"})
+	c.fullTunnelMark.Store(0x7774)
+	c.resolver.Store(&net.Resolver{})
+	addrs := []netip.Addr{netip.MustParseAddr("192.0.2.1")}
+	c.serverAddrs.Store(&addrs)
+
+	if _, err := c.startTun(context.Background(), mustSpec(t, "tun://wst0?route=default&routing=fwmark"), f.deps, fastRetry); err == nil {
+		t.Fatal("startTun succeeded although the device already exists")
+	}
+	if c.fullTunnelMark.Load() != 0x7774 || c.resolver.Load() == nil || c.serverAddrs.Load() == nil {
+		t.Error("a refused second start cleared the state of the running tunnel")
+	}
+}
