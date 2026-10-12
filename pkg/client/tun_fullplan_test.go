@@ -340,3 +340,35 @@ func TestPlanPinsLeavesAnExistingHostRouteAlone(t *testing.T) {
 		t.Errorf("undo = %v, want %v (the operator's /32 must not be deleted)", got, wantUndo)
 	}
 }
+
+// If removing the previous pins fails, the pin set still owns them: it must
+// keep its undo list, report the failure and try again, or the stale pin would
+// be left behind for good (the next route lookup would even mistake it for the
+// operator's own host route and leave it alone).
+func TestPinSetRetainsOwnershipWhenRemovalFails(t *testing.T) {
+	rec := &recordingConfigurer{routes: routes(map[string]routeInfo{"192.0.2.10": viaGW})}
+	p := &pinSet{nl: rec, tun: "wst0"}
+	if err := p.refresh([]netip.Addr{srv4}); err != nil {
+		t.Fatal(err)
+	}
+	del := "delhostroute 192.0.2.10/32 via 10.200.0.2 dev eth0"
+	rec.mu.Lock()
+	rec.failOn, rec.failErr = del, errors.New("busy")
+	rec.mu.Unlock()
+	if err := p.refresh([]netip.Addr{srv4}); err == nil {
+		t.Fatal("refresh succeeded although the old pin could not be removed")
+	}
+	if len(p.undo) == 0 {
+		t.Fatal("the pin set forgot a pin it failed to remove")
+	}
+	rec.mu.Lock()
+	rec.failOn = ""
+	rec.mu.Unlock()
+	if err := p.refresh([]netip.Addr{srv4}); err != nil {
+		t.Fatalf("retry after the failure cleared: %v", err)
+	}
+	calls := strings.Join(rec.snapshot(), "\n")
+	if strings.Count(calls, del) < 2 {
+		t.Errorf("the removal was not retried:\n%s", calls)
+	}
+}
