@@ -133,10 +133,12 @@ func (c *Client) startTun(ctx context.Context, spec *TunSpec, deps tunDeps, retr
 		if err != nil && full != nil {
 			full.release()
 		}
-		if err != nil && spec.FullTunnel {
+		if err != nil && full != nil {
 			// A failed start must not leave the client's sockets marked or its
 			// lookups on the marked resolver: it may still be used for other
-			// tunnels.
+			// tunnels. Only a start that got as far as arming them resets them;
+			// one refused earlier must not clear the state of a tunnel that is
+			// already running on this client.
 			c.resetFullTunnel()
 		}
 	}()
