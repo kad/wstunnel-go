@@ -270,6 +270,13 @@ func TestTunDenyListLiftRequiresCIDRInsideDeniedPrefix(t *testing.T) {
 		{"v6 loopback /128", "::1/128", "[::1]:80", true},
 		{"v6 loopback not link-local", "::1/128", "[fe80::1]:80", false},
 		{"mapped destination", "127.0.0.1/32", "[::ffff:127.0.0.1]:80", true},
+		// The lifting CIDR has to contain the destination itself; an unrelated
+		// explicit CIDR next to a broad one must not lift anything.
+		{"broad plus unrelated loopback /32", "0.0.0.0/0, 127.0.0.1/32", "127.0.0.2:80", false},
+		{"unrelated loopback /32 plus broad", "127.0.0.1/32, 0.0.0.0/0", "127.0.0.2:80", false},
+		{"broad plus the matching /32", "0.0.0.0/0, 127.0.0.1/32", "127.0.0.1:80", true},
+		{"broad plus unrelated metadata /32", "0.0.0.0/0, 169.254.169.254/32", "169.254.169.253:80", false},
+		{"v6 broad plus unrelated ::1", "::/0, ::1/128", "[::2]:80", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rule := &tunRules(t, "restrictions:\n  - name: r\n    match: [Any]\n    allow:\n      - !Tunnel\n        protocol: [Tcp]\n        cidr: [\""+strings.ReplaceAll(tc.cidr, ", ", "\", \"")+"\"]\n").Restrictions[0]
@@ -277,5 +284,34 @@ func TestTunDenyListLiftRequiresCIDRInsideDeniedPrefix(t *testing.T) {
 				t.Fatalf("cidr %s, dst %s: allowed = %v, want %v", tc.cidr, tc.dst, got, tc.want)
 			}
 		})
+	}
+}
+
+// A claim naming Tun and another protocol must be judged as a Tun claim only:
+// the handlers take the Tun branch first, so matching it as the other protocol
+// would admit a packet session through a rule that never allowed Tun.
+func TestMixedTunClaimIsJudgedAsTunOnly(t *testing.T) {
+	s := &Server{rules: tunRules(t, `
+restrictions:
+  - name: tcp-only
+    match: [Any]
+    allow:
+      - !Tunnel
+        protocol: [Tcp]
+`)}
+	c := &protocol.JwtTunnelConfig{
+		Protocol: protocol.LocalProtocol{
+			Tcp: &protocol.TcpProtocol{},
+			Tun: &protocol.TunProtocol{Mtu: 1500},
+		},
+		Remote: "10.0.0.1",
+		Port:   22,
+	}
+	if admitted, _ := admitAndAuthorize(t, s, c, "tcp", "10.0.0.1:22"); admitted {
+		t.Fatal("a claim with Tcp and Tun was admitted by a Tcp-only rule")
+	}
+	normalizeTunClaims(c)
+	if c.Protocol.Tcp != nil || c.Protocol.Tun == nil {
+		t.Fatalf("normalized protocol = %+v, want Tun only", c.Protocol)
 	}
 }
