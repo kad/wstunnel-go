@@ -76,3 +76,28 @@ func TestWebTransportDialsPinnedAddressesInOrder(t *testing.T) {
 		t.Fatal("no error although every address failed")
 	}
 }
+
+// A cached session is only reusable while it is alive and was dialed for the
+// server addresses that are pinned now: after the pins move, the old session
+// still talks to the old address, whose packets would follow the tunnel's own
+// routes back into the device.
+func TestCachedSessionIsReusedOnlyForTheSamePinnedAddresses(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	live := fakeSession{ctx}
+	if !sessionReusable(live, "192.0.2.1:443", "192.0.2.1:443") {
+		t.Error("a live session for the same addresses should be reused")
+	}
+	if sessionReusable(live, "192.0.2.1:443", "192.0.2.9:443") {
+		t.Error("a session dialed for the old pinned address was reused after the pins changed")
+	}
+	if sessionReusable(live, "192.0.2.1:443", "") {
+		t.Error("a pinned session was reused after the pins were cleared")
+	}
+	if !sessionReusable(live, "", "") {
+		t.Error("an unpinned session should keep being reused")
+	}
+	cancel()
+	if sessionReusable(live, "", "") {
+		t.Error("a dead session was reused")
+	}
+}
