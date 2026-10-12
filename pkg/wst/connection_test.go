@@ -2,6 +2,7 @@ package wst
 
 import (
 	"bytes"
+	"errors"
 	"net"
 	"testing"
 	"time"
@@ -100,5 +101,52 @@ func TestConn_LargeMessage(t *testing.T) {
 	}
 	if !bytes.Equal(payload, data) {
 		t.Errorf("payload mismatch")
+	}
+}
+
+// A peer announcing a payload over the read limit must be refused from the
+// frame header alone, before any buffer for the payload is allocated: here the
+// payload is never sent, so an implementation that allocates and waits for it
+// would block instead of failing.
+func TestConn_ReadLimitRefusesOversizedFrameFromTheHeader(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	s := NewConn(server, false)
+	s.SetReadLimit(100)
+
+	go func() {
+		// FIN+binary, 8-byte length form announcing 5 MiB, no payload.
+		hdr := []byte{0x82, 127, 0, 0, 0, 0, 0, 0x50, 0, 0}
+		_, _ = client.Write(hdr)
+	}()
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := s.ReadMessage()
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if !errors.Is(err, ErrReadLimit) {
+			t.Fatalf("ReadMessage() error = %v, want ErrReadLimit", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadMessage waited for the payload of an oversized frame")
+	}
+}
+
+func TestConn_ReadLimitAllowsMessagesWithinTheLimit(t *testing.T) {
+	client, server := net.Pipe()
+	defer func() { _ = client.Close() }()
+	defer func() { _ = server.Close() }()
+
+	c := NewConn(client, false)
+	s := NewConn(server, false)
+	s.SetReadLimit(100)
+	go func() { _ = c.WriteMessage(BinaryMessage, make([]byte, 100)) }()
+	if _, p, err := s.ReadMessage(); err != nil || len(p) != 100 {
+		t.Fatalf("ReadMessage() = %d bytes, %v; want 100, nil", len(p), err)
 	}
 }
