@@ -23,6 +23,7 @@ type ReverseTunnelManager struct {
 	mu           sync.Mutex
 	socketSoMark uint32
 	idleTimeout  time.Duration
+	pingInterval time.Duration
 	stop         chan struct{}
 	stopOnce     sync.Once
 }
@@ -62,6 +63,12 @@ func NewReverseTunnelManager(socketSoMark uint32, idleTimeout time.Duration) *Re
 	if idleTimeout > 0 {
 		go m.reapIdleListeners()
 	}
+	return m
+}
+
+// withPingInterval enables the liveness watchdog on forwarded connections.
+func (m *ReverseTunnelManager) withPingInterval(d time.Duration) *ReverseTunnelManager {
+	m.pingInterval = d
 	return m
 }
 
@@ -545,9 +552,13 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 		slog.Info("Reverse tunnel: forwarded connection closed", "addr", tl.addr, "peer", conn.RemoteAddr().String(), "duration", time.Since(start).Round(time.Millisecond))
 	}()
 	if wait.wsConn != nil {
+		stop := watchWst(wait.wsConn, m.pingInterval, "addr", tl.addr)
 		tunnel.Pipe(conn, wait.wsConn)
+		stop()
 	} else if wait.gorillaConn != nil {
+		stop := watchGorilla(wait.gorillaConn, m.pingInterval, "addr", tl.addr)
 		tunnel.PipeGorilla(conn, wait.gorillaConn)
+		stop()
 	} else {
 		tunnel.PipeBiDir(conn, wait.h2Conn)
 	}

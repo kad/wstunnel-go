@@ -232,7 +232,7 @@ func NewServer(config Config) *Server {
 	s := &Server{
 		Config: config,
 		mux:    http.NewServeMux(),
-		rvMgr:  NewReverseTunnelManager(config.SocketSoMark, config.RemoteToLocalServerIdleTimeout),
+		rvMgr:  NewReverseTunnelManager(config.SocketSoMark, config.RemoteToLocalServerIdleTimeout).withPingInterval(config.WebsocketPingFrequency),
 		rules:  rules,
 
 		tunFlowSlots:    make(chan struct{}, config.TunMaxFlows),
@@ -576,7 +576,9 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 		}
 		defer func() { _ = conn.Close() }()
 
+		stop := watchWst(wsConn, s.Config.WebsocketPingFrequency, "id", claims.ID)
 		tunnel.Pipe(conn, wsConn)
+		stop()
 		return
 	}
 
@@ -630,7 +632,9 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 		}
 		defer func() { _ = conn.Close() }()
 
+		stop := watchGorilla(wsConn, s.Config.WebsocketPingFrequency, "id", claims.ID)
 		tunnel.PipeGorilla(conn, wsConn)
+		stop()
 		return
 	}
 

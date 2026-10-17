@@ -68,6 +68,12 @@ func (w *Wstunnel) Provision(ctx caddy.Context) error {
 		w.Config.WebsocketProtocol = "rust"
 	}
 
+	// Without pings a client that vanished without closing its connection is
+	// never noticed and keeps its tunnel (and any reverse listener) open.
+	if w.Config.WebsocketPingFrequency == 0 {
+		w.Config.WebsocketPingFrequency = 30 * time.Second
+	}
+
 	// Without a timeout reverse listeners are never reaped and stay bound after
 	// their client is gone; match the CLI default.
 	if w.Config.RemoteToLocalServerIdleTimeout == 0 {
