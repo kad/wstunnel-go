@@ -551,6 +551,13 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	defer func() {
 		slog.Info("Reverse tunnel: forwarded connection closed", "addr", tl.addr, "peer", conn.RemoteAddr().String(), "duration", time.Since(start).Round(time.Millisecond))
 	}()
+	// Wake-up frame: tells a Go client to dial its local target now. Rust
+	// clients treat it as an empty payload.
+	if wait.wsConn != nil {
+		_ = wait.wsConn.WriteMessage(wst.BinaryMessage, nil)
+	} else if wait.gorillaConn != nil {
+		_ = wait.gorillaConn.WriteMessage(websocket.BinaryMessage, nil)
+	}
 	if wait.wsConn != nil {
 		stop := watchWst(wait.wsConn, m.pingInterval, "addr", tl.addr)
 		tunnel.Pipe(conn, wait.wsConn)

@@ -969,31 +969,96 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 			}
 		}
 
-		var localConn net.Conn
-		var err error
-		if targetProto.Unix != nil || targetProto.ReverseUnix != nil {
-			path := ""
-			if targetProto.Unix != nil {
-				path = targetProto.Unix.Path
-			} else {
-				path = targetProto.ReverseUnix.Path
-			}
-			localConn, err = net.Dial("unix", path)
-		} else {
-			localConn, err = net.Dial("tcp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
-		}
-
+		// Wait until the server has a connection to hand us, so the local
+		// target is only dialed on demand. Only websocket streams carry the
+		// wake-up frame; HTTP/2 and WebTransport dial eagerly.
+		firstData, lazy, err := c.awaitReverseTrigger(ts)
 		if err != nil {
-			slog.Error("Reverse tunnel: failed to connect to local destination", "host", targetHost, "port", targetPort, "err", err)
+			slog.Debug("Reverse tunnel: parked connection ended before use", "err", err)
 			ts.Close()
-			time.Sleep(1 * time.Second)
 			continue
 		}
 
-		slog.Info("Reverse tunnel established", "target_host", targetHost, "target_port", targetPort)
-		c.startPipe(localConn, ts)
-		slog.Info("Reverse tunnel closed")
+		serve := func() {
+			var (
+				localConn net.Conn
+				err       error
+			)
+			if targetProto.Unix != nil || targetProto.ReverseUnix != nil {
+				path := ""
+				if targetProto.Unix != nil {
+					path = targetProto.Unix.Path
+				} else {
+					path = targetProto.ReverseUnix.Path
+				}
+				localConn, err = net.Dial("unix", path)
+			} else {
+				localConn, err = net.Dial("tcp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
+			}
+
+			if err != nil {
+				slog.Error("Reverse tunnel: failed to connect to local destination", "host", targetHost, "port", targetPort, "err", err)
+				ts.Close()
+				return
+			}
+
+			if len(firstData) > 0 {
+				if _, err := localConn.Write(firstData); err != nil {
+					slog.Error("Reverse tunnel: failed to write to local destination", "err", err)
+					_ = localConn.Close()
+					ts.Close()
+					return
+				}
+			}
+
+			slog.Info("Reverse tunnel established", "target_host", targetHost, "target_port", targetPort)
+			c.startPipe(localConn, ts)
+			slog.Info("Reverse tunnel closed")
+		}
+		if lazy {
+			// Park the next connection right away so parallel inbound
+			// connections each get their own tunnel.
+			go serve()
+		} else {
+			serve()
+		}
 	}
+}
+
+// awaitReverseTrigger blocks until the server starts using a parked reverse
+// connection. The first binary frame is the trigger; the Go server sends an
+// empty one when it accepts a connection, and any payload is returned so it
+// can be forwarded to the target.
+func (c *Client) awaitReverseTrigger(ts *tunnelStream) (data []byte, lazy bool, err error) {
+	switch {
+	case ts.ws != nil:
+		ts.ws.SetPingHandler(func(appData string) error {
+			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
+		})
+		for {
+			mt, p, err := ts.ws.ReadMessage()
+			if err != nil {
+				return nil, true, err
+			}
+			if mt == wst.BinaryMessage {
+				return p, true, nil
+			}
+		}
+	case ts.gorilla != nil:
+		ts.gorilla.SetPingHandler(func(appData string) error {
+			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+		})
+		for {
+			mt, p, err := ts.gorilla.ReadMessage()
+			if err != nil {
+				return nil, true, err
+			}
+			if mt == websocket.BinaryMessage {
+				return p, true, nil
+			}
+		}
+	}
+	return nil, false, nil
 }
 
 func (c *Client) runTcpTunnel(ltr *protocol.LocalToRemote) {
