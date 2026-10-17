@@ -499,7 +499,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		wsConn, err := upgrader.Upgrade(w, r, nil)
+		wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims))
 		if err != nil {
 			slog.Error("Gorilla upgrade failed", "err", err)
 			return
@@ -523,7 +523,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	wsConn, err := upgrader.Upgrade(w, r, nil)
+	wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims))
 	if err != nil {
 		slog.Error("Upgrade failed", "err", err)
 		return
@@ -820,3 +820,16 @@ func (h *http2ReadWriteCloser) Close() error {
 	}
 	return h.ReadCloser.Close()
 }
+
+// reverseWakeHeader tells a Go client that this server sends a wake-up frame
+// when it uses a parked reverse connection. Older servers do not, and clients
+// must dial their target eagerly against them.
+func reverseWakeHeader(claims *protocol.JwtTunnelConfig) http.Header {
+	if claims.Protocol.ReverseTcp == nil && claims.Protocol.ReverseUnix == nil {
+		return nil
+	}
+	return http.Header{ReverseWakeHeader: []string{"1"}}
+}
+
+// ReverseWakeHeader is the response header advertising the wake-up frame.
+const ReverseWakeHeader = "X-Wstunnel-Reverse-Wake"

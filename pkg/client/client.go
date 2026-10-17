@@ -970,8 +970,8 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 		}
 
 		// Wait until the server has a connection to hand us, so the local
-		// target is only dialed on demand. Only websocket streams carry the
-		// wake-up frame; HTTP/2 and WebTransport dial eagerly.
+		// target is only dialed on demand. Only websocket streams from a
+		// server that advertises the wake-up frame are lazy; others dial eagerly.
 		firstData, lazy, err := c.awaitReverseTrigger(ts)
 		if err != nil {
 			slog.Debug("Reverse tunnel: parked connection ended before use", "err", err)
@@ -1030,6 +1030,9 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 // empty one when it accepts a connection, and any payload is returned so it
 // can be forwarded to the target.
 func (c *Client) awaitReverseTrigger(ts *tunnelStream) (data []byte, lazy bool, err error) {
+	if ts.r == nil || ts.r.Header.Get("X-Wstunnel-Reverse-Wake") == "" {
+		return nil, false, nil
+	}
 	switch {
 	case ts.ws != nil:
 		ts.ws.SetPingHandler(func(appData string) error {
