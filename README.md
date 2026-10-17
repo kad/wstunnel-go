@@ -118,6 +118,21 @@ Use the provided PowerShell scripts in the `packaging/windows` directory to regi
 (`mode rust` and `mode ws`) and HTTP/2 transports, including tun sessions;
 WebTransport is not served through Caddy.
 
+The Caddy module is released separately with matching Go module tags:
+`v0.0.4` for the root module and `pkg/caddy/v0.0.4` for Caddy. Maintainers can
+prepare both annotated tags locally with:
+
+```bash
+make tag VERSION=0.0.4
+git push --atomic origin refs/tags/v0.0.4 refs/tags/pkg/caddy/v0.0.4
+```
+
+`VERSION` accepts stable v0/v1 versions, with or without the leading `v`.
+For a new release, both tags point to `HEAD`. To backfill a missing Caddy tag,
+run the same command with an existing root release version: it uses that
+release's commit, even if `HEAD` has moved on. Existing tags are never moved;
+conflicting tags cause an error. The command does not push automatically.
+
 1.  Build Caddy with the `wstunnel-go` module:
     ```bash
     xcaddy build --with github.com/kad/wstunnel-go/pkg/caddy

@@ -98,12 +98,39 @@ test-caddy-interop: build build-caddy ## Run the tun namespace tests against a r
 	WST_CADDY_BIN=$(CURDIR)/pkg/caddy/caddy go test -count=1 -v -run 'TestTunNetns/Go-Caddy' ./tests/tester/
 
 .PHONY: tag
-tag: ## Create annotated tags (e.g., make tag VERSION=0.0.1)
-	@if [ -z "$(VERSION)" ]; then echo "Error: VERSION is required (e.g., make tag VERSION=0.0.1)"; exit 1; fi
-	$(eval CADDY_VER=$(shell grep "github.com/caddyserver/caddy/v2" pkg/caddy/go.mod | awk '{print $$2}' | sed 's/^v//'))
-	git tag -a v$(VERSION) -m "Release v$(VERSION)"
-	git tag -a pkg/caddy/v$(CADDY_VER)-$(VERSION) -m "Release pkg/caddy v$(CADDY_VER)-$(VERSION) (Caddy $(CADDY_VER))"
-	@echo "Created tags v$(VERSION) and pkg/caddy/v$(CADDY_VER)-$(VERSION)"
+tag: export VERSION := $(VERSION)
+tag: ## Prepare matching root and Caddy tags (e.g., make tag VERSION=0.0.4)
+	@set -eu; \
+	version="$${VERSION#v}"; \
+	if ! printf '%s\n' "$$version" | grep -Eq '^(0|1)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$$'; then \
+		echo "Error: VERSION must be a stable v0 or v1 release (e.g., 0.0.4 or v0.0.4)" >&2; \
+		exit 1; \
+	fi; \
+	root="v$$version"; \
+	caddy="pkg/caddy/v$$version"; \
+	if git show-ref --verify --quiet "refs/tags/$$root"; then \
+		commit=$$(git rev-parse --verify "refs/tags/$$root^{commit}"); \
+	else \
+		commit=$$(git rev-parse --verify HEAD); \
+	fi; \
+	for tag in "$$root" "$$caddy"; do \
+		if git show-ref --verify --quiet "refs/tags/$$tag"; then \
+			existing=$$(git rev-parse --verify "refs/tags/$$tag^{commit}"); \
+			if [ "$$existing" != "$$commit" ]; then \
+				echo "Error: $$tag points to a different commit; no tags changed" >&2; \
+				exit 1; \
+			fi; \
+		fi; \
+	done; \
+	for tag in "$$root" "$$caddy"; do \
+		if git show-ref --verify --quiet "refs/tags/$$tag"; then \
+			echo "Keeping existing tag $$tag"; \
+		else \
+			git tag -a "$$tag" "$$commit" -m "Release $$tag"; \
+		fi; \
+	done; \
+	echo "Prepared $$root and $$caddy at $$commit"; \
+	echo "To publish: git push --atomic origin refs/tags/$$root refs/tags/$$caddy"
 
 .PHONY: clean
 clean: ## Clean build artifacts
