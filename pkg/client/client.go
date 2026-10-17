@@ -477,6 +477,9 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 	}
 
 	conn, resp, err := dialer.Dial(u.String(), header)
+	if err != nil && resp != nil {
+		err = fmt.Errorf("%w (server replied %s)", err, resp.Status)
+	}
 	return conn, resp, err
 }
 
@@ -924,8 +927,21 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 	}
 	delay := 1 * time.Second
 
+	// The server listens on the address carried in the JWT, so for reverse TCP
+	// that is the bind side of the argument; the target is dialed locally.
+	listenHost, listenPort := ltr.Remote, ltr.Port
+	if ltr.Protocol.ReverseTcp != nil {
+		h, ps, err := net.SplitHostPort(ltr.Local)
+		pn, perr := strconv.ParseUint(ps, 10, 16)
+		if err != nil || perr != nil {
+			slog.Error("Reverse tunnel: invalid listen address", "local", ltr.Local)
+			return
+		}
+		listenHost, listenPort = h, uint16(pn)
+	}
+
 	for {
-		ts := c.connectToTransport(ltr.Protocol, ltr.Remote, ltr.Port)
+		ts := c.connectToTransport(ltr.Protocol, listenHost, listenPort)
 		if ts.err != nil {
 			slog.Error("Reverse tunnel: failed to connect to transport", "err", ts.err, "retry_in", delay)
 			time.Sleep(delay)
