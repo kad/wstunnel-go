@@ -203,6 +203,13 @@ func (w *Wstunnel) UnmarshalCaddyfile(d *caddyfile.Dispenser) error {
 					return d.ArgErr()
 				}
 				w.Config.PathPrefix = strings.TrimPrefix(d.Val(), "/")
+			case "jwt_secret":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+				w.Config.JWTSecret = d.Val()
+			case "insecure_no_jwt_validation":
+				w.Config.InsecureNoJWTValidation = true
 			case "restrict_config":
 				if !d.NextArg() {
 					return d.ArgErr()

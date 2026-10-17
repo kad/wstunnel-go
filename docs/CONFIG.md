@@ -285,6 +285,8 @@ The Caddy module (`http.handlers.wstunnel`, built with `xcaddy build --with gith
 wstunnel {
     mode rust                      # or ws
     prefix wstunnel                # path prefix, without the leading slash
+    jwt_secret {env.WST_JWT_SECRET}  # mode ws: verify tunnel JWTs; clients need the same secret
+    insecure_no_jwt_validation     # mode ws: accept unverified JWTs after a failed check
     restrict_config /etc/wstunnel/rules.yaml
     restrict_to 10.0.0.5:22        # repeatable
     ping_interval 30s
@@ -298,6 +300,7 @@ wstunnel {
 }
 ```
 
+- `jwt_secret` is what `mode ws` verifies tunnel JWTs against. Read it from the environment (`{env.NAME}`) so it stays out of the Caddyfile. `mode rust` never checks the signature.
 - Values are validated when the configuration loads: an unknown `mode` or a `tun_allow` entry that does not parse fails the load instead of starting a handler that does something else.
 - On a configuration reload Caddy discards the old handler. Its tun sessions and reverse-tunnel listeners are closed, so clients reconnect and are subject to the new rules.
 - The module's JSON form (`caddy adapt` output) uses the Go field names of the server configuration under `config` (for example `EnableTun`, `TunAllow`), with durations in nanoseconds. Prefer the Caddyfile. The inline `restrictions` field cannot express host patterns or CIDRs in JSON; use `restrict_config` for rules.
