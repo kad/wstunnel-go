@@ -225,6 +225,8 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 		return
 	}
 	normalizeTunClaims(claims)
+	slog.Info("Accepted WebTransport tunnel", "id", claims.ID, "proto", getProtoName(claims.Protocol), "remote", claims.Remote, "port", claims.Port)
+	defer logTunnelClosed(claims, "webtransport", time.Now())
 
 	destAddr := claims.Remote
 	destPort := claims.Port

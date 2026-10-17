@@ -79,6 +79,7 @@ func (m *ReverseTunnelManager) Close() {
 	m.mu.Unlock()
 
 	for _, tl := range listeners {
+		slog.Info("Reverse tunnel listener closed", "addr", tl.addr, "reason", "shutdown")
 		m.closeTunnelListener(tl, true)
 	}
 }
@@ -182,6 +183,7 @@ func (m *ReverseTunnelManager) reapIdleListenersOnce(now time.Time) {
 	m.mu.Unlock()
 
 	for _, tl := range stale {
+		slog.Info("Reverse tunnel listener closed", "addr", tl.addr, "reason", "idle", "idle_timeout", m.idleTimeout)
 		m.closeTunnelListener(tl, true)
 	}
 }
@@ -486,12 +488,17 @@ func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims 
 
 func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 	defer func() { _ = tl.ln.Close() }()
-	slog.Info("Reverse tunnel listener started", "addr", tl.addr, "proto", tl.protocol)
+	slog.Info("Reverse tunnel listener started", "addr", tl.addr, "proto", getProtoName(tl.protocol))
 
 	for {
 		conn, err := tl.ln.Accept()
 		if err != nil {
-			slog.Warn("Reverse tunnel listener error", "addr", tl.addr, "err", err)
+			select {
+			case <-tl.quit:
+				// Closed on purpose by the reaper or shutdown, already logged.
+			default:
+				slog.Warn("Reverse tunnel listener error", "addr", tl.addr, "err", err)
+			}
 			m.closeTunnelListener(tl, false)
 			m.mu.Lock()
 			if current, ok := m.listeners[tl.addr]; ok && current == tl {
@@ -532,7 +539,11 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	defer wait.finish(false)
 	m.touchListener(tl)
 
-	slog.Info("Reverse tunnel: forwarding connection to client", "addr", tl.addr, "target_host", targetHost, "target_port", targetPort)
+	start := time.Now()
+	slog.Info("Reverse tunnel: forwarding connection to client", "addr", tl.addr, "peer", conn.RemoteAddr().String(), "target_host", targetHost, "target_port", targetPort)
+	defer func() {
+		slog.Info("Reverse tunnel: forwarded connection closed", "addr", tl.addr, "peer", conn.RemoteAddr().String(), "duration", time.Since(start).Round(time.Millisecond))
+	}()
 	if wait.wsConn != nil {
 		tunnel.Pipe(conn, wait.wsConn)
 	} else if wait.gorillaConn != nil {

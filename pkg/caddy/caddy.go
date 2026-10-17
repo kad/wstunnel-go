@@ -3,6 +3,7 @@ package caddy
 import (
 	"bufio"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
@@ -58,6 +59,9 @@ func (Wstunnel) CaddyModule() caddy.ModuleInfo {
 // Provision sets up the module.
 func (w *Wstunnel) Provision(ctx caddy.Context) error {
 	w.log = ctx.Logger()
+	// The server logs through slog's default logger; send that to Caddy's log
+	// so levels, format and outputs follow the Caddy configuration.
+	slog.SetDefault(ctx.Slogger())
 
 	// If no mode is specified, default to rust for compatibility
 	if w.Config.WebsocketProtocol == "" {

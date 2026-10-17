@@ -445,6 +445,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if tokenStr == "" {
+		slog.Warn("Missing authorization token", "path", r.URL.Path, "client", r.RemoteAddr)
 		http.Error(w, "Missing authorization token", http.StatusUnauthorized)
 		return
 	}
@@ -452,7 +453,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Decode JWT
 	claims, err := s.parseJWTClaims(tokenStr)
 	if err != nil {
-		slog.Warn("Invalid token", "err", err)
+		slog.Warn("Invalid token", "err", err, "path", r.URL.Path, "client", r.RemoteAddr)
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
 	}
@@ -469,7 +470,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		var ok bool
 		rule, ok = s.rules.ValidateMatch(claims, r.URL.Path, auth, commonName)
 		if !ok {
-			slog.Warn("Tunnel rejected by restrictions", "tunnel_id", claims.ID)
+			slog.Warn("Tunnel rejected by restrictions", "tunnel_id", claims.ID, "proto", getProtoName(claims.Protocol), "remote", claims.Remote, "port", claims.Port, "path", r.URL.Path, "client", r.RemoteAddr)
 			http.Error(w, "Forbidden by restrictions", http.StatusForbidden)
 			return
 		}
@@ -504,7 +505,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		slog.Info("Accepted gorilla tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port, "subprotocol", wsConn.Subprotocol())
+		slog.Info("Accepted gorilla tunnel", "id", claims.ID, "proto", getProtoName(claims.Protocol), "remote", claims.Remote, "port", claims.Port, "client", r.RemoteAddr, "subprotocol", wsConn.Subprotocol())
 		go s.handleGorillaConnection(wsConn, claims, rule)
 		return
 	}
@@ -528,11 +529,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Info("Accepted tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port, "subprotocol", wsConn.Subprotocol())
+	slog.Info("Accepted tunnel", "id", claims.ID, "proto", getProtoName(claims.Protocol), "remote", claims.Remote, "port", claims.Port, "client", r.RemoteAddr, "subprotocol", wsConn.Subprotocol())
 	go s.handleConnection(wsConn, claims, rule)
 }
 
+// logTunnelClosed is deferred by each transport handler; the handler runs for
+// the whole life of the tunnel, so this marks its end.
+func logTunnelClosed(claims *protocol.JwtTunnelConfig, transport string, start time.Time) {
+	slog.Info("Tunnel closed", "id", claims.ID, "transport", transport, "proto", getProtoName(claims.Protocol),
+		"remote", claims.Remote, "port", claims.Port, "duration", time.Since(start).Round(time.Millisecond))
+}
+
 func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
+	defer logTunnelClosed(claims, "websocket", time.Now())
 	defer func() { _ = wsConn.Close() }()
 
 	// Handle PING from client
@@ -585,6 +594,7 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 }
 
 func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
+	defer logTunnelClosed(claims, "websocket-rfc6455", time.Now())
 	defer func() { _ = wsConn.Close() }()
 
 	wsConn.SetPingHandler(func(appData string) error {
@@ -643,7 +653,8 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 		f.Flush()
 	}
 
-	slog.Info("Accepted HTTP/2 tunnel", "id", claims.ID, "remote", claims.Remote, "port", claims.Port)
+	defer logTunnelClosed(claims, "http2", time.Now())
+	slog.Info("Accepted HTTP/2 tunnel", "id", claims.ID, "proto", getProtoName(claims.Protocol), "remote", claims.Remote, "port", claims.Port, "client", r.RemoteAddr)
 	var flusher http.Flusher
 	if f, ok := w.(http.Flusher); ok {
 		flusher = f
