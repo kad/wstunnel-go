@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/caddyserver/caddy/v2"
 	"github.com/caddyserver/caddy/v2/caddyconfig/caddyfile"
@@ -61,6 +62,12 @@ func (w *Wstunnel) Provision(ctx caddy.Context) error {
 	// If no mode is specified, default to rust for compatibility
 	if w.Config.WebsocketProtocol == "" {
 		w.Config.WebsocketProtocol = "rust"
+	}
+
+	// Without a timeout reverse listeners are never reaped and stay bound after
+	// their client is gone; match the CLI default.
+	if w.Config.RemoteToLocalServerIdleTimeout == 0 {
+		w.Config.RemoteToLocalServerIdleTimeout = 3 * time.Minute
 	}
 
 	// Validate has normally refused a bad configuration already; check again
