@@ -544,6 +544,9 @@ func setupLogging(level string) {
 }
 
 func runClient(c *cli.Context) error {
+	if c.Args().Len() > 1 {
+		return fmt.Errorf("unexpected arguments after the server URL (%q): put all flags before the server URL", c.Args().Slice()[1:])
+	}
 	var serverURL string
 	if c.Args().Len() >= 1 {
 		serverURL = c.Args().Get(c.Args().Len() - 1) // Get the last argument

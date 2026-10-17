@@ -1,10 +1,13 @@
 package client
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
 	"net"
+	"net/http"
 	"net/url"
 	"syscall"
 	"time"
@@ -94,6 +97,14 @@ func (c *Client) dialRawTransport(ctx context.Context, network, addr string) (ne
 	d.Control = c.markControl()
 	d.Resolver = c.resolver.Load()
 
+	if proxyURL := c.httpProxyFor(u, addr); proxyURL != "" {
+		conn, err := c.dialViaHTTPProxy(ctx, &d, network, addr, proxyURL)
+		if err != nil {
+			return nil, nil, "", err
+		}
+		return conn, u, host, nil
+	}
+
 	conn, err := c.dialPinned(ctx, &d, network, addr)
 	if err != nil {
 		return nil, nil, "", err
@@ -140,4 +151,91 @@ func (c *Client) dialTransport(ctx context.Context, network, addr string, nextPr
 	}
 
 	return conn, nil
+}
+
+// dialViaHTTPProxy connects to addr through the configured HTTP proxy using CONNECT.
+func (c *Client) dialViaHTTPProxy(ctx context.Context, d *net.Dialer, network, addr, proxyURL string) (net.Conn, error) {
+	pu, err := url.Parse(proxyURL)
+	if err != nil || pu.Host == "" {
+		return nil, fmt.Errorf("invalid http proxy %q", proxyURL)
+	}
+	if pu.Scheme != "" && pu.Scheme != "http" {
+		return nil, fmt.Errorf("unsupported http proxy scheme %q", pu.Scheme)
+	}
+	proxyAddr := pu.Host
+	if pu.Port() == "" {
+		proxyAddr = net.JoinHostPort(pu.Hostname(), "80")
+	}
+
+	conn, err := d.DialContext(ctx, network, proxyAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to http proxy: %w", err)
+	}
+
+	user, pass := c.Config.HttpProxyLogin, c.Config.HttpProxyPassword
+	if user == "" && pu.User != nil {
+		user = pu.User.Username()
+		pass, _ = pu.User.Password()
+	}
+
+	req := &http.Request{
+		Method: http.MethodConnect,
+		URL:    &url.URL{Opaque: addr},
+		Host:   addr,
+		Header: make(http.Header),
+	}
+	if user != "" || pass != "" {
+		req.Header.Set("Proxy-Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte(user+":"+pass)))
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
+	_ = conn.SetDeadline(deadline)
+	if err := req.Write(conn); err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("http proxy CONNECT write failed: %w", err)
+	}
+	br := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(br, req)
+	if err != nil {
+		_ = conn.Close()
+		return nil, fmt.Errorf("http proxy CONNECT failed: %w", err)
+	}
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		_ = conn.Close()
+		return nil, fmt.Errorf("http proxy CONNECT to %s refused: %s", addr, resp.Status)
+	}
+	_ = conn.SetDeadline(time.Time{})
+
+	if br.Buffered() > 0 {
+		return &bufferedConn{Conn: conn, r: br}, nil
+	}
+	return conn, nil
+}
+
+type bufferedConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (b *bufferedConn) Read(p []byte) (int, error) { return b.r.Read(p) }
+
+// httpProxyFor returns the proxy to reach the server: the configured one, else
+// the HTTP(S)_PROXY / NO_PROXY environment.
+func (c *Client) httpProxyFor(u *url.URL, addr string) string {
+	if c.Config.HttpProxy != "" {
+		return c.Config.HttpProxy
+	}
+	scheme := "http"
+	if u.Scheme == "wss" || u.Scheme == "https" {
+		scheme = "https"
+	}
+	pu, err := http.ProxyFromEnvironment(&http.Request{URL: &url.URL{Scheme: scheme, Host: addr}})
+	if err != nil || pu == nil {
+		return ""
+	}
+	return pu.String()
 }
