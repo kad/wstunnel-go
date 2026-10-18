@@ -277,7 +277,7 @@ func main() {
 					&cli.DurationFlag{
 						Name:    "reverse-tunnel-connection-retry-max-backoff",
 						Aliases: []string{"reverse-tunnel-connection-retry-max-backoff-sec"},
-						Value:   1 * time.Second,
+						Value:   10 * time.Second,
 						Usage:   "Maximum retry backoff for reverse tunnels",
 					},
 					&cli.StringFlag{

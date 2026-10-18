@@ -63,6 +63,8 @@ type Client struct {
 	pool     *ConnectionPool
 	wtClient *WebTransportClient
 
+	reverseBackoff sharedBackoff
+
 	// fullTunnelMark is the fwmark a full tunnel (route=default, fwmark mode)
 	// forces onto the client's own sockets; 0 means use Config.SocketSoMark. It
 	// is set after the client is built, so it cannot live in Config.
@@ -925,7 +927,6 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 	if maxDelay == 0 {
 		maxDelay = 10 * time.Second
 	}
-	delay := 1 * time.Second
 
 	// The server listens on the address carried in the JWT, so for reverse TCP
 	// that is the bind side of the argument; the target is dialed locally.
@@ -941,17 +942,19 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 	}
 
 	for {
+		c.reverseBackoff.wait()
+		started := time.Now()
 		ts := c.connectToTransport(ltr.Protocol, listenHost, listenPort)
 		if ts.err != nil {
-			slog.Error("Reverse tunnel: failed to connect to transport", "err", ts.err, "retry_in", delay)
-			time.Sleep(delay)
-			delay *= 2
-			if delay > maxDelay {
-				delay = maxDelay
+			// All reverse tunnels share one backoff; only the first failure of
+			// a round is logged.
+			wait, escalated := c.reverseBackoff.fail(started, maxDelay)
+			if escalated {
+				slog.Error("Reverse tunnel: failed to connect to transport", "err", ts.err, "retry_in", wait.Round(10*time.Millisecond))
 			}
 			continue
 		}
-		delay = 1 * time.Second
+		c.reverseBackoff.success()
 
 		// Check for target in cookies (for dynamic reverse tunnels)
 		targetHost := ltr.Remote
