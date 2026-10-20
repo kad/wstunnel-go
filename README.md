@@ -225,7 +225,7 @@ For a comprehensive YAML guide with annotated client/server examples and option 
 -   `--config`: Path to YAML configuration file.
 -   `--log-lvl`: Log verbosity (TRACE, DEBUG, INFO, WARN, ERROR, OFF). Default: INFO.
 -   `--no-color`: Disable color output.
--   `--nb-worker-threads`: Number of worker threads (environment variable: `TOKIO_WORKER_THREADS`).
+-   `--nb-worker-threads`: Number of OS threads that run Go code at once (sets GOMAXPROCS; 0 keeps the default) (environment variable: `TOKIO_WORKER_THREADS`).
 
 #### Client Flags
 -   `-L, --local-to-remote`: Define a local-to-remote tunnel.

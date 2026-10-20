@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -229,7 +230,7 @@ func main() {
 			},
 			&cli.IntFlag{
 				Name:    "nb-worker-threads",
-				Usage:   "Number of worker threads",
+				Usage:   "Number of OS threads that run Go code at once (GOMAXPROCS); 0 keeps the default",
 				EnvVars: []string{"TOKIO_WORKER_THREADS"},
 			},
 			&cli.StringFlag{
@@ -241,7 +242,7 @@ func main() {
 		},
 		Before: func(c *cli.Context) error {
 			setupLogging(c.String("log-lvl"))
-			return nil
+			return applyWorkerThreads(c.Int("nb-worker-threads"))
 		},
 		Commands: []*cli.Command{
 			{
@@ -518,6 +519,19 @@ func main() {
 		slog.Error("Application error", "err", err)
 		os.Exit(1)
 	}
+}
+
+// applyWorkerThreads caps the number of OS threads running Go code at n, the
+// Go counterpart of the Rust tokio worker thread count. Zero leaves the runtime
+// default (every CPU, or GOMAXPROCS from the environment).
+func applyWorkerThreads(n int) error {
+	switch {
+	case n < 0:
+		return fmt.Errorf("nb-worker-threads must not be negative, got %d", n)
+	case n > 0:
+		runtime.GOMAXPROCS(n)
+	}
+	return nil
 }
 
 func setupLogging(level string) {
