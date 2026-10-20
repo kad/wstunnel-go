@@ -213,7 +213,16 @@ func applyServerFlagOverrides(c *cli.Context, config *server.Config, listenAddr 
 
 func main() {
 	rlimit.RaiseFdLimit()
-	app := &cli.App{
+	app := newApp()
+	if err := app.Run(os.Args); err != nil {
+		slog.Error("Application error", "err", err)
+		os.Exit(1)
+	}
+}
+
+// newApp builds the command line application.
+func newApp() *cli.App {
+	return &cli.App{
 		Name:                   "wstunnel-go",
 		Usage:                  "A Go client/server for wstunnel",
 		UseShortOptionHandling: true,
@@ -223,10 +232,12 @@ func main() {
 				Usage:   "Path to config file (YAML)",
 				EnvVars: []string{"WSTUNNEL_CONFIG"},
 			},
-			&cli.StringFlag{
-				Name:    "no-color",
-				Usage:   "Disable color output",
-				EnvVars: []string{"NO_COLOR"},
+			// A bool, so `--no-color client ...` does not take "client" as its value
+			// (the bug Rust fixed in #517). Log output is never colored here, so
+			// the flag is accepted for compatibility with the Rust CLI.
+			&cli.BoolFlag{
+				Name:  "no-color",
+				Usage: "Disable color output (accepted for compatibility; output is never colored)",
 			},
 			&cli.IntFlag{
 				Name:    "nb-worker-threads",
@@ -513,11 +524,6 @@ func main() {
 			}
 			return fmt.Errorf("invalid config file: mode and section mismatch")
 		},
-	}
-
-	if err := app.Run(os.Args); err != nil {
-		slog.Error("Application error", "err", err)
-		os.Exit(1)
 	}
 }
 

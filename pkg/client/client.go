@@ -657,6 +657,19 @@ func constantTimeEqualBytes(actual, expected []byte) bool {
 	return subtle.ConstantTimeEq(diff, 0) == 1
 }
 
+// socks5HandshakeTimeout is how long a SOCKS5 client has to finish its greeting
+// and request once connected, as in Rust (#515). A real client sends them at
+// once; a silent one would otherwise hold a goroutine and a descriptor forever.
+var socks5HandshakeTimeout = 10 * time.Second
+
+// handleSocks5Bounded is handleSocks5 under the handshake timeout. The deadline
+// is cleared again so the tunnel that follows is not bound by it.
+func (c *Client) handleSocks5Bounded(conn net.Conn, credentials *protocol.Credentials) (string, uint16, func(byte) error, error) {
+	_ = conn.SetDeadline(time.Now().Add(socks5HandshakeTimeout))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
+	return c.handleSocks5(conn, credentials)
+}
+
 func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) (string, uint16, func(byte) error, error) {
 	buf := make([]byte, 256)
 
@@ -794,7 +807,7 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 			if ltr.Protocol.Socks5 != nil {
 				credentials = ltr.Protocol.Socks5.Credentials
 			}
-			targetHost, targetPort, replyFunc, err := c.handleSocks5(netConn, credentials)
+			targetHost, targetPort, replyFunc, err := c.handleSocks5Bounded(netConn, credentials)
 			if err != nil {
 				slog.Warn("SOCKS5 handshake failed", "err", err)
 				return
