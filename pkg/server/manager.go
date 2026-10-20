@@ -214,6 +214,58 @@ func (m *ReverseTunnelManager) closeTunnelListener(tl *tunnelListener, closeList
 	}
 }
 
+// pingParked keeps a connection pinged from the moment it is accepted until it
+// is used, so the client can tell a dead server from a quiet one. It starts
+// before the connection is admitted to the pool: the response already promised
+// pings, and a connection stuck behind a full pool would otherwise look dead.
+// The client does not answer these pings (nothing here reads the connection
+// while it is parked), so no replies pile up. A write that fails outright means
+// the peer is gone: the slot is freed and a handler still waiting for a place in
+// the pool is woken to give up.
+func (m *ReverseTunnelManager) pingParked(tl *tunnelListener, wait *waitingConn) {
+	if m.pingInterval <= 0 {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(m.pingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-wait.done:
+				return
+			case <-wait.acquired:
+				return
+			case <-tl.quit:
+				return
+			case <-ticker.C:
+			}
+			deadline := time.Now().Add(m.pingInterval)
+			var err error
+			switch {
+			case wait.wsConn != nil:
+				err = wait.wsConn.WriteControl(wst.PingMessage, nil, deadline)
+			case wait.gorillaConn != nil:
+				err = wait.gorillaConn.WriteControl(websocket.PingMessage, nil, deadline)
+			default:
+				return
+			}
+			// A ping that only timed out is skipped; any other error, including
+			// a cached fatal socket timeout, means the connection is gone.
+			if err != nil && !tunnel.IsTransientWriteTimeout(err) {
+				slog.Debug("Reverse tunnel: parked client connection lost", "addr", tl.addr, "err", err)
+				wait.finish(true)
+				tl.queueMu.Lock()
+				m.purgeDoneWaitersLocked(tl)
+				if tl.queueCond != nil {
+					tl.queueCond.Broadcast()
+				}
+				tl.queueMu.Unlock()
+				return
+			}
+		}
+	}()
+}
+
 func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *waitingConn) {
 	if m.idleTimeout <= 0 {
 		select {
@@ -303,6 +355,8 @@ func (m *ReverseTunnelManager) enqueueWaitingConn(tl *tunnelListener, wait *wait
 		select {
 		case <-tl.quit:
 			return false
+		case <-wait.done:
+			return false // the client went away while waiting for a place
 		default:
 		}
 
@@ -438,6 +492,7 @@ func (m *ReverseTunnelManager) HandleClient(wsConn *wst.Conn, claims *protocol.J
 		done:     make(chan struct{}),
 	}
 
+	m.pingParked(tl, wait)
 	if m.enqueueWaitingConn(tl, wait) {
 		m.touchListener(tl)
 		slog.Info("Reverse tunnel: client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
@@ -461,6 +516,7 @@ func (m *ReverseTunnelManager) HandleGorillaClient(wsConn *websocket.Conn, claim
 		done:        make(chan struct{}),
 	}
 
+	m.pingParked(tl, wait)
 	if m.enqueueWaitingConn(tl, wait) {
 		m.touchListener(tl)
 		slog.Info("Reverse tunnel (gorilla): client connection added to pool", "tunnel_id", claims.ID, "addr", bindAddr)
@@ -551,20 +607,20 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	defer func() {
 		slog.Info("Reverse tunnel: forwarded connection closed", "addr", tl.addr, "peer", conn.RemoteAddr().String(), "duration", time.Since(start).Round(time.Millisecond))
 	}()
-	// Wake-up frame: tells a Go client to dial its local target now. Rust
-	// clients treat it as an empty payload.
+	// The watchdog starts before the wake-up frame (which tells a Go client to
+	// dial its local target now; Rust clients treat it as an empty payload).
+	// The frame can block on the write lock when the parked client stopped
+	// draining, and acquiring the connection ended the parked idle timeout, so
+	// without a watchdog the visitor would hang on it indefinitely.
 	if wait.wsConn != nil {
+		stop, live := tunnel.WatchWst(wait.wsConn, m.pingInterval, "addr", tl.addr)
 		_ = wait.wsConn.WriteMessage(wst.BinaryMessage, nil)
-	} else if wait.gorillaConn != nil {
-		_ = wait.gorillaConn.WriteMessage(websocket.BinaryMessage, nil)
-	}
-	if wait.wsConn != nil {
-		stop := watchWst(wait.wsConn, m.pingInterval, "addr", tl.addr)
-		tunnel.Pipe(conn, wait.wsConn)
+		tunnel.PipeLive(conn, wait.wsConn, live)
 		stop()
 	} else if wait.gorillaConn != nil {
-		stop := watchGorilla(wait.gorillaConn, m.pingInterval, "addr", tl.addr)
-		tunnel.PipeGorilla(conn, wait.gorillaConn)
+		stop, live := tunnel.WatchGorilla(wait.gorillaConn, m.pingInterval, "addr", tl.addr)
+		_ = wait.gorillaConn.WriteMessage(websocket.BinaryMessage, nil)
+		tunnel.PipeGorillaLive(conn, wait.gorillaConn, live)
 		stop()
 	} else {
 		tunnel.PipeBiDir(conn, wait.h2Conn)

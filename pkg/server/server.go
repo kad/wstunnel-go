@@ -499,7 +499,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims))
+		wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims, s.Config.WebsocketPingFrequency))
 		if err != nil {
 			slog.Error("Gorilla upgrade failed", "err", err)
 			return
@@ -523,7 +523,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims))
+	wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims, s.Config.WebsocketPingFrequency))
 	if err != nil {
 		slog.Error("Upgrade failed", "err", err)
 		return
@@ -543,11 +543,6 @@ func logTunnelClosed(claims *protocol.JwtTunnelConfig, transport string, start t
 func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
 	defer logTunnelClosed(claims, "websocket", time.Now())
 	defer func() { _ = wsConn.Close() }()
-
-	// Handle PING from client
-	wsConn.SetPingHandler(func(appData string) error {
-		return wsConn.WriteMessage(wst.PongMessage, []byte(appData))
-	})
 
 	if claims.Protocol.Tun != nil {
 		s.serveTun(tun.NewWSTPacketConn(wsConn), claims, rule)
@@ -576,8 +571,8 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 		}
 		defer func() { _ = conn.Close() }()
 
-		stop := watchWst(wsConn, s.Config.WebsocketPingFrequency, "id", claims.ID)
-		tunnel.Pipe(conn, wsConn)
+		stop, live := tunnel.WatchWst(wsConn, s.Config.WebsocketPingFrequency, "id", claims.ID)
+		tunnel.PipeLive(conn, wsConn, live)
 		stop()
 		return
 	}
@@ -599,13 +594,9 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 	defer logTunnelClosed(claims, "websocket-rfc6455", time.Now())
 	defer func() { _ = wsConn.Close() }()
 
-	wsConn.SetPingHandler(func(appData string) error {
-		return wsConn.WriteMessage(websocket.PongMessage, []byte(appData))
-	})
-
 	if claims.Protocol.Tun != nil {
-		// NewGorillaPacketConn replaces the ping handler above with one that is
-		// safe alongside the session's packet writer.
+		// NewGorillaPacketConn installs a ping handler that is safe alongside
+		// the session's packet writer.
 		s.serveTun(tun.NewGorillaPacketConn(wsConn), claims, rule)
 		return
 	}
@@ -632,8 +623,8 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 		}
 		defer func() { _ = conn.Close() }()
 
-		stop := watchGorilla(wsConn, s.Config.WebsocketPingFrequency, "id", claims.ID)
-		tunnel.PipeGorilla(conn, wsConn)
+		stop, live := tunnel.WatchGorilla(wsConn, s.Config.WebsocketPingFrequency, "id", claims.ID)
+		tunnel.PipeGorillaLive(conn, wsConn, live)
 		stop()
 		return
 	}
@@ -824,12 +815,22 @@ func (h *http2ReadWriteCloser) Close() error {
 // reverseWakeHeader tells a Go client that this server sends a wake-up frame
 // when it uses a parked reverse connection. Older servers do not, and clients
 // must dial their target eagerly against them.
-func reverseWakeHeader(claims *protocol.JwtTunnelConfig) http.Header {
+func reverseWakeHeader(claims *protocol.JwtTunnelConfig, ping time.Duration) http.Header {
 	if claims.Protocol.ReverseTcp == nil && claims.Protocol.ReverseUnix == nil {
 		return nil
 	}
-	return http.Header{ReverseWakeHeader: []string{"1"}}
+	h := http.Header{ReverseWakeHeader: []string{"1"}}
+	if ping > 0 {
+		// The server pings parked connections at this interval; a client that
+		// hears nothing for several intervals knows the connection is dead.
+		h.Set(ReversePingHeader, strconv.FormatInt(ping.Milliseconds(), 10))
+	}
+	return h
 }
 
 // ReverseWakeHeader is the response header advertising the wake-up frame.
 const ReverseWakeHeader = "X-Wstunnel-Reverse-Wake"
+
+// ReversePingHeader carries the interval, in milliseconds, at which the server
+// pings a parked reverse connection. It is absent when pings are disabled.
+const ReversePingHeader = "X-Wstunnel-Reverse-Ping"
