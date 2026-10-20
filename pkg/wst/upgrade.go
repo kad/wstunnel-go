@@ -42,6 +42,37 @@ func tokenContains(header, token string) bool {
 	return false
 }
 
+// handshakeHeaders are written by the upgrader itself; a caller cannot override
+// them through the response header.
+var handshakeHeaders = map[string]bool{
+	"Upgrade":                  true,
+	"Connection":               true,
+	"Sec-Websocket-Accept":     true,
+	"Sec-Websocket-Protocol":   true,
+	"Sec-Websocket-Extensions": true,
+	"Content-Length":           true,
+	"Transfer-Encoding":        true,
+}
+
+// formatResponseHeader renders the caller's extra headers for the 101 response.
+// A header or value containing a line break is dropped rather than allowed to
+// inject another header.
+func formatResponseHeader(h http.Header) string {
+	var b strings.Builder
+	for k, vs := range h {
+		if handshakeHeaders[http.CanonicalHeaderKey(k)] || strings.ContainsAny(k, "\r\n:") {
+			continue
+		}
+		for _, v := range vs {
+			if strings.ContainsAny(v, "\r\n") {
+				continue
+			}
+			fmt.Fprintf(&b, "%s: %s\r\n", k, v)
+		}
+	}
+	return b.String()
+}
+
 type Upgrader struct {
 	CheckOrigin  func(r *http.Request) bool
 	Subprotocols []string
@@ -87,6 +118,7 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 	if len(u.Subprotocols) > 0 {
 		resp += fmt.Sprintf("Sec-WebSocket-Protocol: %s\r\n", u.Subprotocols[0])
 	}
+	resp += formatResponseHeader(responseHeader)
 	resp += "\r\n"
 
 	if _, err := bufrw.WriteString(resp); err != nil {
