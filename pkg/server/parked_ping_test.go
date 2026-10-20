@@ -173,3 +173,31 @@ func TestWakeUpFrameBlockedOnStalledClientIsBounded(t *testing.T) {
 		t.Fatal("a visitor stayed stuck on the wake-up frame of a stalled parked client")
 	}
 }
+
+// A visitor to a reverse SOCKS5 listener that says nothing is dropped after the
+// handshake timeout instead of holding its handler (Rust #515).
+func TestReverseSocks5HandshakeIsBounded(t *testing.T) {
+	old := socks5HandshakeTimeout
+	socks5HandshakeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { socks5HandshakeTimeout = old })
+
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	m := NewReverseTunnelManager(0, time.Minute)
+	t.Cleanup(m.Close)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := m.handleSocks5Handshake(server)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a silent visitor completed the handshake")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("reverse SOCKS5 handshake was not bounded")
+	}
+}

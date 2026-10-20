@@ -239,3 +239,27 @@ func TestApplyWorkerThreads(t *testing.T) {
 		t.Fatal("negative value accepted")
 	}
 }
+
+// --no-color is a plain switch: the word after it is the command, not its value.
+func TestNoColorFlagTakesNoValue(t *testing.T) {
+	var gotCommand string
+	app := &cli.App{
+		Flags: []cli.Flag{&cli.BoolFlag{Name: "no-color"}},
+		Commands: []*cli.Command{{
+			Name:   "client",
+			Action: func(*cli.Context) error { gotCommand = "client"; return nil },
+		}},
+	}
+	// Mirror the real declaration rather than redeclaring it.
+	real := newApp()
+	for _, f := range real.Flags {
+		if f.Names()[0] == "no-color" {
+			if _, ok := f.(*cli.BoolFlag); !ok {
+				t.Fatalf("no-color is a %T, want *cli.BoolFlag", f)
+			}
+		}
+	}
+	if err := app.Run([]string{"wstunnel-go", "--no-color", "client"}); err != nil || gotCommand != "client" {
+		t.Fatalf("command = %q, err = %v", gotCommand, err)
+	}
+}

@@ -181,3 +181,29 @@ func TestStartPipeModeEnforcesSilenceOnlyWhenAsked(t *testing.T) {
 		t.Error("a ping-only pipe expired a silent server; legacy servers never answer pings on a parked connection")
 	}
 }
+
+// A SOCKS5 client that connects and says nothing must not hold its goroutine
+// and descriptor forever (Rust #515).
+func TestSocks5HandshakeIsBounded(t *testing.T) {
+	old := socks5HandshakeTimeout
+	socks5HandshakeTimeout = 100 * time.Millisecond
+	t.Cleanup(func() { socks5HandshakeTimeout = old })
+
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }() // never writes a greeting
+
+	done := make(chan error, 1)
+	go func() {
+		_, _, _, err := (&Client{}).handleSocks5Bounded(server, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a silent SOCKS5 client completed the handshake")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("handshake with a silent SOCKS5 client was not bounded")
+	}
+}

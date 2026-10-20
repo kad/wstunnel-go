@@ -627,7 +627,14 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	}
 }
 
+// socks5HandshakeTimeout is how long a visitor to a reverse SOCKS5 listener has
+// to send its greeting and request (Rust #515). The deadline is cleared once the
+// handshake is done.
+var socks5HandshakeTimeout = 10 * time.Second
+
 func (m *ReverseTunnelManager) handleSocks5Handshake(conn net.Conn) (string, uint16, error) {
+	_ = conn.SetDeadline(time.Now().Add(socks5HandshakeTimeout))
+	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 	buf := make([]byte, 256)
 
 	// 1. Version/Methods
