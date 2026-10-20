@@ -376,13 +376,13 @@ func (s *Server) Start() error {
 	}
 
 	if s.Config.TlsCertificate != "" && s.Config.TlsPrivateKey != "" {
-		certificate, err := tls.LoadX509KeyPair(s.Config.TlsCertificate, s.Config.TlsPrivateKey)
+		certs, err := newCertReloader(s.Config.TlsCertificate, s.Config.TlsPrivateKey, certReloadInterval)
 		if err != nil {
 			return fmt.Errorf("load TLS certificate: %w", err)
 		}
 		tlsConfig := &tls.Config{
-			MinVersion:   tls.VersionTLS12,
-			Certificates: []tls.Certificate{certificate},
+			MinVersion:     tls.VersionTLS12,
+			GetCertificate: certs.GetCertificate,
 		}
 
 		if s.Config.TlsClientCaCerts != "" {
@@ -403,7 +403,8 @@ func (s *Server) Start() error {
 			}
 			webTransportStarted = true
 		}
-		return srv.ServeTLS(ln, s.Config.TlsCertificate, s.Config.TlsPrivateKey)
+		// The certificate comes from tlsConfig.GetCertificate, so it can be reloaded.
+		return srv.ServeTLS(ln, "", "")
 	}
 
 	if strings.HasPrefix(s.Config.ListenAddr, "wt://") || strings.HasPrefix(s.Config.ListenAddr, "wts://") {
