@@ -13,6 +13,13 @@ import (
 // Pipe pipes data between a TCP connection and a WebSocket connection.
 // It closes both connections when done.
 func Pipe(tcpConn net.Conn, wsConn *wst.Conn) {
+	PipeLive(tcpConn, wsConn, nil)
+}
+
+// PipeLive is Pipe that reports to a watchdog (see WatchWst). The frame hook
+// installed there sees what arrives; l carries the time the pipe spends blocked
+// writing to tcpConn, which must not count against the peer.
+func PipeLive(tcpConn net.Conn, wsConn *wst.Conn, l *Liveness) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -47,7 +54,7 @@ func Pipe(tcpConn net.Conn, wsConn *wst.Conn) {
 				return
 			}
 			if messageType == wst.BinaryMessage || messageType == wst.TextMessage {
-				_, err = tcpConn.Write(p)
+				_, err = l.writer(tcpConn).Write(p)
 				if err != nil {
 					return
 				}
@@ -60,6 +67,14 @@ func Pipe(tcpConn net.Conn, wsConn *wst.Conn) {
 
 // PipeGorilla pipes data between a TCP connection and a Gorilla WebSocket connection.
 func PipeGorilla(tcpConn net.Conn, wsConn *websocket.Conn) {
+	PipeGorillaLive(tcpConn, wsConn, nil)
+}
+
+// PipeGorillaLive is PipeGorilla that reports to a watchdog (see WatchGorilla).
+// A message is forwarded as it arrives rather than after it is complete, so a
+// long fragmented message keeps the peer alive while it streams in, and time
+// spent blocked writing to tcpConn is not held against the peer.
+func PipeGorillaLive(tcpConn net.Conn, wsConn *websocket.Conn, l *Liveness) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -88,25 +103,59 @@ func PipeGorilla(tcpConn net.Conn, wsConn *websocket.Conn) {
 	go func() {
 		defer wg.Done()
 		defer func() { _ = tcpConn.Close() }()
-		for {
-			messageType, p, err := wsConn.ReadMessage()
-			if err != nil {
-				return
-			}
-			if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
-				_, err = tcpConn.Write(p)
-				if err != nil {
-					return
-				}
-			}
-		}
+		gorillaToWriter(wsConn, tcpConn, l)
 	}()
 
 	wg.Wait()
 }
 
+// gorillaToWriter forwards data messages from wsConn to dst until the
+// connection or dst fails. gorilla answers control frames itself while reading.
+//
+// A byte stream is copied as the message arrives. A packet destination, such as
+// the UDP socket of a UDP tunnel, gets exactly one Write per message, even an
+// empty one, because each Write is a datagram; the message is read whole first,
+// as before, with the read still reporting progress to the watchdog.
+func gorillaToWriter(wsConn *websocket.Conn, dst io.Writer, l *Liveness) {
+	_, packet := dst.(net.PacketConn)
+	// One buffer for the whole pipe. The wrappers below hide WriterTo and
+	// ReaderFrom, so io.CopyBuffer really uses it; io.Copy would allocate 32 KiB
+	// for every message, even a one byte one.
+	buf := make([]byte, 32*1024)
+	for {
+		messageType, r, err := wsConn.NextReader()
+		if err != nil {
+			return
+		}
+		l.Touch()
+		if messageType != websocket.BinaryMessage && messageType != websocket.TextMessage {
+			continue
+		}
+		if packet {
+			p, err := io.ReadAll(l.reader(r))
+			if err != nil {
+				return
+			}
+			if _, err := l.writer(dst).Write(p); err != nil {
+				return
+			}
+			continue
+		}
+		w := struct{ io.Writer }{l.writer(dst)}
+		rd := struct{ io.Reader }{l.reader(r)}
+		if _, err := io.CopyBuffer(w, rd, buf); err != nil {
+			return
+		}
+	}
+}
+
 // PipeRW pipes data between a ReadWriteCloser and a WebSocket connection.
 func PipeRW(rw io.ReadWriteCloser, wsConn *wst.Conn) {
+	PipeRWLive(rw, wsConn, nil)
+}
+
+// PipeRWLive is PipeRW that reports to a watchdog, like PipeLive.
+func PipeRWLive(rw io.ReadWriteCloser, wsConn *wst.Conn, l *Liveness) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -141,7 +190,7 @@ func PipeRW(rw io.ReadWriteCloser, wsConn *wst.Conn) {
 				return
 			}
 			if messageType == wst.BinaryMessage || messageType == wst.TextMessage {
-				_, err = rw.Write(p)
+				_, err = l.writer(rw).Write(p)
 				if err != nil {
 					return
 				}
@@ -154,6 +203,11 @@ func PipeRW(rw io.ReadWriteCloser, wsConn *wst.Conn) {
 
 // PipeGorillaRW pipes data between a ReadWriteCloser and a Gorilla WebSocket connection.
 func PipeGorillaRW(rw io.ReadWriteCloser, wsConn *websocket.Conn) {
+	PipeGorillaRWLive(rw, wsConn, nil)
+}
+
+// PipeGorillaRWLive is PipeGorillaRW that reports to a watchdog, like PipeGorillaLive.
+func PipeGorillaRWLive(rw io.ReadWriteCloser, wsConn *websocket.Conn, l *Liveness) {
 	var wg sync.WaitGroup
 	wg.Add(2)
 
@@ -182,18 +236,7 @@ func PipeGorillaRW(rw io.ReadWriteCloser, wsConn *websocket.Conn) {
 	go func() {
 		defer wg.Done()
 		defer func() { _ = rw.Close() }()
-		for {
-			messageType, p, err := wsConn.ReadMessage()
-			if err != nil {
-				return
-			}
-			if messageType == websocket.BinaryMessage || messageType == websocket.TextMessage {
-				_, err = rw.Write(p)
-				if err != nil {
-					return
-				}
-			}
-		}
+		gorillaToWriter(wsConn, rw, l)
 	}()
 
 	wg.Wait()

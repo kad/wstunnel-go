@@ -34,10 +34,11 @@ type Conn struct {
 	bufr        *bufio.Reader
 	bufw        *bufio.Writer
 	masking     bool
-	muw         sync.Mutex
+	muw         chan struct{} // write lock; a channel so WriteControl can give up waiting for it
 	mur         sync.Mutex
 	pingHandler func(string) error
 	pongHandler func(string) error
+	frameHook   atomic.Pointer[func()]
 }
 
 func NewConn(conn net.Conn, masking bool) *Conn {
@@ -50,11 +51,16 @@ func NewConnWithReader(conn net.Conn, masking bool, br *bufio.Reader) *Conn {
 		bufr:    br,
 		bufw:    bufio.NewWriter(conn),
 		masking: masking,
+		muw:     make(chan struct{}, 1),
 	}
+	c.muw <- struct{}{}
 	c.SetPingHandler(nil)
 	c.SetPongHandler(nil)
 	return c
 }
+
+// SetReadDeadline bounds the next ReadMessage calls; a zero time clears it.
+func (c *Conn) SetReadDeadline(t time.Time) error { return c.rwc.SetReadDeadline(t) }
 
 func (c *Conn) Close() error {
 	return c.rwc.Close()
@@ -76,7 +82,10 @@ func (c *Conn) SetPingHandler(h func(string) error) {
 	if h == nil {
 		h = func(message string) error {
 			err := c.WriteControl(PongMessage, []byte(message), time.Now().Add(time.Second))
-			if err == io.ErrClosedPipe || err == net.ErrClosed {
+			if err == io.ErrClosedPipe || err == net.ErrClosed || errors.Is(err, ErrControlTimeout) {
+				// A pong that cannot be written in time is dropped rather than
+				// stalling the reader: the peer is not draining us, and a reader
+				// stuck here would stop draining it in turn.
 				return nil
 			}
 			return err
@@ -92,41 +101,91 @@ func (c *Conn) SetPongHandler(h func(string) error) {
 	c.pongHandler = h
 }
 
+// SetFrameHook registers fn to be called for every frame ReadMessage receives,
+// data and control alike, and again each time payload bytes of a large frame
+// arrive. It is how a liveness watchdog learns the peer is alive
+// even when a pong is stuck behind its bulk data. Pass nil to remove it.
+func (c *Conn) SetFrameHook(fn func()) {
+	if fn == nil {
+		c.frameHook.Store(nil)
+		return
+	}
+	c.frameHook.Store(&fn)
+}
+
+// ErrControlTimeout is returned by WriteControl when the frame could not be
+// written before its deadline. The connection stays usable: either nothing of
+// the frame was sent, or it is still being sent whole by a goroutine that holds
+// the write lock until the peer drains.
+var ErrControlTimeout = errors.New("wst: control frame write timeout")
+
+// WriteControl sends a control frame, giving up with ErrControlTimeout when the
+// write lock (held by a WriteMessage stuck on a full send buffer) or the socket
+// does not free up before deadline. A zero deadline waits indefinitely. It
+// never sets a deadline on the socket, so it is safe on a tls.Conn.
 func (c *Conn) WriteControl(messageType int, data []byte, deadline time.Time) error {
-	c.muw.Lock()
-	defer c.muw.Unlock()
-
-	b0 := byte(0x80) | byte(messageType)
-	if err := c.bufw.WriteByte(b0); err != nil {
-		return err
+	if len(data) > 125 {
+		return fmt.Errorf("control frame length %d > 125", len(data))
 	}
 
-	length := len(data)
-	if length > 125 {
-		return fmt.Errorf("control frame length %d > 125", length)
-	}
-
-	maskBit := byte(0)
-	if c.masking {
-		maskBit = 0x80
-	}
-
-	if err := c.bufw.WriteByte(maskBit | byte(length)); err != nil {
-		return err
-	}
-
-	if c.masking {
-		maskKey := []byte{0, 0, 0, 0}
-		if _, err := c.bufw.Write(maskKey); err != nil {
-			return err
+	var expired <-chan time.Time
+	if !deadline.IsZero() {
+		d := time.Until(deadline)
+		if d <= 0 {
+			return ErrControlTimeout
 		}
+		t := time.NewTimer(d)
+		defer t.Stop()
+		expired = t.C
+	}
+	select {
+	case <-c.muw:
+	case <-expired:
+		return ErrControlTimeout
 	}
 
-	if _, err := c.bufw.Write(data); err != nil {
+	frame := make([]byte, 0, 2+4+len(data))
+	frame = append(frame, byte(0x80)|byte(messageType))
+	if c.masking {
+		// Zero mask key, like WriteMessage: a compliant header with unmasked data.
+		frame = append(frame, 0x80|byte(len(data)), 0, 0, 0, 0)
+	} else {
+		frame = append(frame, byte(len(data)))
+	}
+	frame = append(frame, data...)
+
+	// The previous WriteMessage flushed completely, so the frame goes straight
+	// to the socket. No write deadline is set on it: on a tls.Conn a write
+	// timeout is permanent, so every later write would fail even though no
+	// byte was sent. Instead the write runs on its own goroutine, which keeps
+	// the write lock until it finishes. Giving up at the deadline returns
+	// ErrControlTimeout, the frame still goes out whole once the peer drains,
+	// and meanwhile other control writes time out on the lock without
+	// spawning anything.
+	write := func() error {
+		n, err := c.rwc.Write(frame)
+		if err != nil && n > 0 && n < len(frame) {
+			// Half a frame is on the wire; the stream cannot be resynchronised.
+			_ = c.rwc.Close()
+		}
 		return err
 	}
-
-	return c.bufw.Flush()
+	if deadline.IsZero() {
+		defer func() { c.muw <- struct{}{} }()
+		return write()
+	}
+	res := make(chan error, 1)
+	go func() {
+		err := write()
+		c.muw <- struct{}{}
+		res <- err
+	}()
+	select {
+	case err := <-res:
+		return err
+	case <-expired:
+		return ErrControlTimeout
+	}
 }
 
 func (c *Conn) Subprotocol() string {
@@ -134,8 +193,8 @@ func (c *Conn) Subprotocol() string {
 }
 
 func (c *Conn) WriteMessage(messageType int, data []byte) error {
-	c.muw.Lock()
-	defer c.muw.Unlock()
+	<-c.muw
+	defer func() { c.muw <- struct{}{} }()
 
 	// Frame format:
 	// 0: FIN(1) | RSV(0) | Opcode(4)
@@ -215,6 +274,9 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 		if err != nil {
 			return 0, nil, err
 		}
+		if h := c.frameHook.Load(); h != nil {
+			(*h)()
+		}
 
 		mask := b1 & 0x80
 		length := int64(b1 & 0x7F)
@@ -248,8 +310,23 @@ func (c *Conn) ReadMessage() (int, []byte, error) {
 			return 0, nil, fmt.Errorf("%w: payload length %d, limit %d", ErrReadLimit, length, limit)
 		}
 		payload := make([]byte, int(length))
-		if _, err := io.ReadFull(c.bufr, payload); err != nil {
-			return 0, nil, err
+		// Report progress as bytes arrive, not once per full read, so a large
+		// frame trickling in over a slow link keeps a liveness watchdog
+		// satisfied until it is complete.
+		for off := 0; off < len(payload); {
+			n, err := c.bufr.Read(payload[off:])
+			if n > 0 {
+				off += n
+				if h := c.frameHook.Load(); h != nil {
+					(*h)()
+				}
+			}
+			if err != nil && off < len(payload) {
+				if err == io.EOF {
+					err = io.ErrUnexpectedEOF
+				}
+				return 0, nil, err
+			}
 		}
 
 		if mask != 0 {

@@ -511,56 +511,29 @@ func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string,
 }
 
 func (c *Client) startPipe(local net.Conn, ts *tunnelStream) {
+	c.startPipeMode(local, ts, true)
+}
+
+// startPipeMode pipes local and the tunnel. With enforce the client closes a
+// server that stays silent for three ping intervals. Without it the client only
+// keeps pinging, for a reverse connection dialed eagerly against a server that
+// does not announce the wake-up frame: such a server may be keeping it parked
+// without reading it, and so never answers a ping.
+func (c *Client) startPipeMode(local net.Conn, ts *tunnelStream, enforce bool) {
 	defer ts.Close()
 
+	watchWst, watchGorilla := tunnel.WatchWst, tunnel.WatchGorilla
+	if !enforce {
+		watchWst, watchGorilla = tunnel.PingWst, tunnel.PingGorilla
+	}
 	if ts.ws != nil {
-		ts.ws.SetPingHandler(func(appData string) error {
-			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
-		})
-		if c.Config.PingFrequency > 0 {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go func() {
-				ticker := time.NewTicker(c.Config.PingFrequency)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						if err := ts.ws.WriteMessage(wst.PingMessage, []byte{}); err != nil {
-							_ = ts.ws.Close()
-							return
-						}
-					}
-				}
-			}()
-		}
-		tunnel.Pipe(local, ts.ws)
+		stop, live := watchWst(ts.ws, c.Config.PingFrequency, "role", "client")
+		defer stop()
+		tunnel.PipeLive(local, ts.ws, live)
 	} else if ts.gorilla != nil {
-		ts.gorilla.SetPingHandler(func(appData string) error {
-			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
-		})
-		if c.Config.PingFrequency > 0 {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go func() {
-				ticker := time.NewTicker(c.Config.PingFrequency)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						if err := ts.gorilla.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-							_ = ts.gorilla.Close()
-							return
-						}
-					}
-				}
-			}()
-		}
-		tunnel.PipeGorilla(local, ts.gorilla)
+		stop, live := watchGorilla(ts.gorilla, c.Config.PingFrequency, "role", "client")
+		defer stop()
+		tunnel.PipeGorillaLive(local, ts.gorilla, live)
 	} else if ts.wt != nil {
 		tunnel.PipeBiDir(local, ts.wt)
 	} else {
@@ -1015,7 +988,8 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 			}
 
 			slog.Info("Reverse tunnel established", "target_host", targetHost, "target_port", targetPort)
-			c.startPipe(localConn, ts)
+			// Only a connection the server woke up is known to be read by it.
+			c.startPipeMode(localConn, ts, lazy)
 			slog.Info("Reverse tunnel closed")
 		}
 		if lazy {
@@ -1036,12 +1010,38 @@ func (c *Client) awaitReverseTrigger(ts *tunnelStream) (data []byte, lazy bool, 
 	if ts.r == nil || ts.r.Header.Get("X-Wstunnel-Reverse-Wake") == "" {
 		return nil, false, nil
 	}
+	// A server that advertises its ping interval pings the parked connection,
+	// so silence for several intervals means the path or the server is gone.
+	// Without this the read below would wait for TCP to notice, if it ever does.
+	var silence time.Duration
+	if ms, perr := strconv.ParseInt(ts.r.Header.Get("X-Wstunnel-Reverse-Ping"), 10, 64); perr == nil && ms > 0 {
+		silence = 3 * time.Duration(ms) * time.Millisecond
+	}
 	switch {
 	case ts.ws != nil:
-		ts.ws.SetPingHandler(func(appData string) error {
-			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
+		// ReadMessage answers pings itself and never returns for them, so the
+		// deadline is refreshed from the ping handler as well as per message.
+		arm := func() {
+			if silence > 0 {
+				_ = ts.ws.SetReadDeadline(time.Now().Add(silence))
+			}
+		}
+		// No pong: the server does not read a parked connection, so replies
+		// would only pile up in its receive buffer until a visitor arrives.
+		ts.ws.SetPingHandler(func(string) error {
+			arm()
+			return nil
 		})
+		// The pipe that follows must not inherit the parked-phase handler or
+		// the silence deadline.
+		defer func() {
+			ts.ws.SetPingHandler(nil)
+			if silence > 0 {
+				_ = ts.ws.SetReadDeadline(time.Time{})
+			}
+		}()
 		for {
+			arm()
 			mt, p, err := ts.ws.ReadMessage()
 			if err != nil {
 				return nil, true, err
@@ -1051,10 +1051,23 @@ func (c *Client) awaitReverseTrigger(ts *tunnelStream) (data []byte, lazy bool, 
 			}
 		}
 	case ts.gorilla != nil:
-		ts.gorilla.SetPingHandler(func(appData string) error {
-			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
+		arm := func() {
+			if silence > 0 {
+				_ = ts.gorilla.SetReadDeadline(time.Now().Add(silence))
+			}
+		}
+		ts.gorilla.SetPingHandler(func(string) error {
+			arm()
+			return nil
 		})
+		defer func() {
+			ts.gorilla.SetPingHandler(nil)
+			if silence > 0 {
+				_ = ts.gorilla.SetReadDeadline(time.Time{})
+			}
+		}()
 		for {
+			arm()
 			mt, p, err := ts.gorilla.ReadMessage()
 			if err != nil {
 				return nil, true, err
@@ -1236,53 +1249,13 @@ func (c *Client) startPipeRWC(rwc io.ReadWriteCloser, ts *tunnelStream) {
 	defer ts.Close()
 
 	if ts.ws != nil {
-		ts.ws.SetPingHandler(func(appData string) error {
-			return ts.ws.WriteMessage(wst.PongMessage, []byte(appData))
-		})
-		if c.Config.PingFrequency > 0 {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go func() {
-				ticker := time.NewTicker(c.Config.PingFrequency)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						if err := ts.ws.WriteMessage(wst.PingMessage, []byte{}); err != nil {
-							_ = ts.ws.Close()
-							return
-						}
-					}
-				}
-			}()
-		}
-		tunnel.PipeRW(rwc, ts.ws)
+		stop, live := tunnel.WatchWst(ts.ws, c.Config.PingFrequency, "role", "client")
+		defer stop()
+		tunnel.PipeRWLive(rwc, ts.ws, live)
 	} else if ts.gorilla != nil {
-		ts.gorilla.SetPingHandler(func(appData string) error {
-			return ts.gorilla.WriteMessage(websocket.PongMessage, []byte(appData))
-		})
-		if c.Config.PingFrequency > 0 {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go func() {
-				ticker := time.NewTicker(c.Config.PingFrequency)
-				defer ticker.Stop()
-				for {
-					select {
-					case <-ctx.Done():
-						return
-					case <-ticker.C:
-						if err := ts.gorilla.WriteMessage(websocket.PingMessage, []byte{}); err != nil {
-							_ = ts.gorilla.Close()
-							return
-						}
-					}
-				}
-			}()
-		}
-		tunnel.PipeGorillaRW(rwc, ts.gorilla)
+		stop, live := tunnel.WatchGorilla(ts.gorilla, c.Config.PingFrequency, "role", "client")
+		defer stop()
+		tunnel.PipeGorillaRWLive(rwc, ts.gorilla, live)
 	} else {
 		tunnel.PipeBiDir(rwc, ts.h2)
 	}
