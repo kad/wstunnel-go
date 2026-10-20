@@ -4,6 +4,7 @@ import (
 	"flag"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -221,5 +222,20 @@ func TestStartServerRefusesAnUnloadableRestrictConfig(t *testing.T) {
 	err := startServer(nil, cfg)
 	if err == nil || !strings.Contains(err.Error(), "restrict_config") {
 		t.Fatalf("startServer = %v, want a restrict_config error before anything is served", err)
+	}
+}
+
+func TestApplyWorkerThreads(t *testing.T) {
+	prev := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(prev) })
+
+	if err := applyWorkerThreads(0); err != nil || runtime.GOMAXPROCS(0) != prev {
+		t.Fatalf("0 must keep the default: err=%v procs=%d want %d", err, runtime.GOMAXPROCS(0), prev)
+	}
+	if err := applyWorkerThreads(1); err != nil || runtime.GOMAXPROCS(0) != 1 {
+		t.Fatalf("1: err=%v procs=%d, want 1", err, runtime.GOMAXPROCS(0))
+	}
+	if err := applyWorkerThreads(-1); err == nil {
+		t.Fatal("negative value accepted")
 	}
 }
