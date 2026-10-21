@@ -723,7 +723,7 @@ func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims 
 
 func (m *ReverseTunnelManager) runListener(tl *tunnelListener) {
 	defer func() { _ = tl.ln.Close() }()
-	slog.Info("Reverse tunnel listener started", "addr", tl.addr, "proto", getProtoName(tl.protocol))
+	slog.Info("Reverse tunnel listener started", "addr", tl.addr, "bound", tl.ln.Addr().String(), "proto", getProtoName(tl.protocol))
 
 	for {
 		conn, err := tl.ln.Accept()

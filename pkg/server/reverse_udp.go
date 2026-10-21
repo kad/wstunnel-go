@@ -157,7 +157,7 @@ func isClosed(c <-chan struct{}) bool {
 // session of their source address, starting one for a new peer.
 func (m *ReverseTunnelManager) runUDPListener(tl *tunnelListener) {
 	defer func() { _ = tl.pc.Close() }()
-	slog.Info("Reverse tunnel listener started", "addr", tl.addr, "proto", getProtoName(tl.protocol))
+	slog.Info("Reverse tunnel listener started", "addr", tl.addr, "bound", tl.pc.LocalAddr().String(), "proto", getProtoName(tl.protocol))
 
 	var mu sync.Mutex
 	peers := make(map[string]*udpPeer)

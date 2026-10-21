@@ -370,6 +370,8 @@ func (s *Server) Start() error {
 		return err
 	}
 	defer func() { _ = ln.Close() }()
+	// The bound address, which differs from the configured one for port 0.
+	slog.Info("Server listening", "addr", ln.Addr().String())
 	webTransportStarted := false
 	defer func() {
 		if webTransportStarted {
