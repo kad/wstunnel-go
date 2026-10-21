@@ -135,11 +135,44 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 	}
 
 	var rwc io.ReadWriteCloser = stream
-	if p.Udp != nil {
+	if p.Udp != nil || p.ReverseUdp != nil {
 		rwc = protocol.NewFramedUDPReadWriteCloser(stream)
 	}
 
-	return rwc, nil, nil
+	var resp *http.Response
+	if p.ReverseSocks5 != nil {
+		rwc = reverseStream{stream}
+		// The server answers once a visitor has asked for a target, and says
+		// which in a JWT preamble on the stream. Surface it as the Cookie header
+		// the other transports use, so the reverse loop reads it the same way.
+		_ = stream.SetReadDeadline(time.Now().Add(reverseReplyTimeout))
+		jwtStr, err := protocol.ReadJWTStreamPreamble(stream)
+		_ = stream.SetReadDeadline(time.Time{})
+		if err != nil {
+			// Abort the stream, both directions: closing only the send side would
+			// leave the server holding a request nobody is waiting for.
+			stream.CancelRead(0)
+			stream.CancelWrite(0)
+			// The stream is open, so a timeout here is the server waiting for a
+			// visitor.
+			return nil, nil, fmt.Errorf("failed to read the target from the server: %w", markReplyTimeout(err, true))
+		}
+		resp = &http.Response{Header: http.Header{"Cookie": []string{jwtStr}}}
+	}
+
+	return rwc, resp, nil
+}
+
+// reverseStream is a reverse SOCKS5 stream whose Close also gives up the
+// receive side and any blocked write. webtransport.Stream.Close only ends the
+// send side, so a stream dropped without being piped (its target could not be
+// dialed) would keep the visitor's data buffered on the shared session.
+type reverseStream struct{ *webtransport.Stream }
+
+func (s reverseStream) Close() error {
+	s.CancelRead(0)
+	_ = s.SetWriteDeadline(time.Now())
+	return s.Stream.Close()
 }
 
 // webTransportKeepAlive is how often an otherwise idle WebTransport connection

@@ -321,7 +321,7 @@ func TestReverseTunnelManagerReapsIdleListener(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		conn := &nopReadWriteCloser{closed: make(chan struct{})}
-		mgr.HandleClientH2(conn, claims)
+		mgr.HandleClientH2(conn, claims, nil)
 		close(done)
 	}()
 
@@ -380,6 +380,7 @@ func TestReverseTunnelManagerDoesNotTimeoutAcquiredConnection(t *testing.T) {
 	}
 
 	wait.finish(false)
+	wait.endPipe() // the forwarder that acquired the entry is done
 
 	select {
 	case <-done:
@@ -424,6 +425,7 @@ func TestReverseTunnelManagerTimeoutDoesNotCloseAlreadyAcquiredConnection(t *tes
 	}
 
 	wait.finish(false)
+	wait.endPipe() // the forwarder that acquired the entry is done
 
 	select {
 	case <-done:

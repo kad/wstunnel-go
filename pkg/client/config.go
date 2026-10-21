@@ -54,10 +54,16 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 		}
 	}
 
+	// As in Rust: no option or an unreadable one means 30 seconds, and 0 turns
+	// the timeout off, which is sent as no timeout at all.
 	getTimeout := func() *protocol.Duration {
-		if val, ok := options["timeout_sec"]; ok {
-			d, _ := parseDurationSec(val)
-			return d
+		if val, ok := options["timeout_sec"]; ok && val != "" {
+			if d, err := parseDurationSec(val); err == nil && d != nil {
+				if d.Secs == 0 && d.Nanos == 0 {
+					return nil
+				}
+				return d
+			}
 		}
 		return &protocol.Duration{Secs: 30}
 	}
@@ -187,13 +193,13 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 		}
 	case "udp":
 		if isReverse {
-			return nil, fmt.Errorf("reverse UDP tunnels are not implemented")
+			ltr.Protocol = protocol.LocalProtocol{ReverseUdp: &protocol.ReverseUdpProtocol{Timeout: getTimeout()}}
 		} else {
 			ltr.Protocol = protocol.LocalProtocol{Udp: &protocol.UdpProtocol{Timeout: getTimeout()}}
 		}
 	case "socks5":
 		if isReverse {
-			return nil, fmt.Errorf("reverse SOCKS5 tunnels are not implemented")
+			ltr.Protocol = protocol.LocalProtocol{ReverseSocks5: &protocol.ReverseSocks5Protocol{Timeout: getTimeout(), Credentials: getCredentials()}}
 		} else {
 			ltr.Protocol = protocol.LocalProtocol{Socks5: &protocol.Socks5Protocol{Timeout: getTimeout(), Credentials: getCredentials()}}
 		}

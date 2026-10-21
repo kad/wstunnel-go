@@ -1,10 +1,13 @@
 package wst
 
 import (
+	"bufio"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Headers given to Upgrade must reach the client in the 101 response. The
@@ -51,5 +54,43 @@ func TestUpgradeSendsResponseHeaders(t *testing.T) {
 	}
 	if resp.Header.Get("X-Smuggled") != "" || resp.Header.Get("X-Injected") != "" {
 		t.Errorf("a header with a line break got through: %v", resp.Header)
+	}
+}
+
+// stalledHijacker hands out one end of a pipe whose other end never reads.
+type stalledHijacker struct {
+	http.ResponseWriter
+	conn net.Conn
+}
+
+func (h stalledHijacker) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return h.conn, bufio.NewReadWriter(bufio.NewReader(h.conn), bufio.NewWriter(h.conn)), nil
+}
+
+// A client that never reads the 101 response must not hold Upgrade for good.
+func TestUpgradeGivesUpOnStalledClient(t *testing.T) {
+	server, client := net.Pipe()
+	defer func() { _ = server.Close() }()
+	defer func() { _ = client.Close() }()
+
+	r := httptest.NewRequest("GET", "/", nil)
+	r.Header.Set("Connection", "Upgrade")
+	r.Header.Set("Upgrade", "websocket")
+	r.Header.Set("Sec-WebSocket-Version", "13")
+	r.Header.Set("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+
+	done := make(chan error, 1)
+	go func() {
+		u := Upgrader{WriteTimeout: 100 * time.Millisecond}
+		_, err := u.Upgrade(stalledHijacker{httptest.NewRecorder(), server}, r, nil)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Upgrade succeeded although nobody read the response")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Upgrade is still blocked on a client that does not read")
 	}
 }

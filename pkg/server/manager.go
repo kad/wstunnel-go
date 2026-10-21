@@ -2,12 +2,14 @@ package server
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
+	"reflect"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,13 +28,15 @@ type ReverseTunnelManager struct {
 	pingInterval time.Duration
 	stop         chan struct{}
 	stopOnce     sync.Once
+	signCookie   func(protocol.JwtTunnelConfig) (string, error)
 }
 
 type tunnelListener struct {
 	addr      string
 	isUnix    bool
 	protocol  protocol.LocalProtocol
-	ln        net.Listener
+	ln        net.Listener   // reverse TCP and Unix
+	pc        net.PacketConn // reverse UDP
 	waiting   []*waitingConn
 	waitCap   int
 	queueMu   sync.Mutex
@@ -47,10 +51,23 @@ type waitingConn struct {
 	wsConn      *wst.Conn
 	gorillaConn *websocket.Conn
 	h2Conn      io.ReadWriteCloser
+	// lazy completes the upgrade of a request that was held without a reply, and
+	// fills in the connection. Nil for a connection that is already upgraded.
+	lazy        func(extra http.Header) error
+	connMu      sync.Mutex      // guards the connection fields while lazy may still set them
+	gone        <-chan struct{} // closes when the held request's client disconnects
 	acquired    chan struct{}
 	done        chan struct{}
 	once        sync.Once
 	acquireOnce sync.Once
+	// pipes counts the forwarders using the connection: one from the moment it
+	// is acquired until the visitor's pipe has returned. The handler that owns the
+	// connection (an HTTP/2 one writes through its response writer) must not
+	// return before then, however the request ended.
+	pipeMu   sync.Mutex
+	pipeCond *sync.Cond
+	pipes    int
+	aborting atomic.Bool // set by abort: the session is being cut short
 }
 
 func NewReverseTunnelManager(socketSoMark uint32, idleTimeout time.Duration) *ReverseTunnelManager {
@@ -91,9 +108,21 @@ func (m *ReverseTunnelManager) Close() {
 	}
 }
 
+// finish ends the entry and, when closeConn is set, closes its connection. It
+// waits for an upgrade in progress (see completeUpgrade), so a connection that
+// upgrade produces is closed here instead of being published after the cleanup,
+// and a handler that returns after finish has no upgrade still using its
+// response writer.
 func (w *waitingConn) finish(closeConn bool) {
 	w.once.Do(func() {
+		w.connMu.Lock()
+		defer w.connMu.Unlock()
 		if closeConn {
+			if w.aborting.Load() {
+				if a, ok := w.h2Conn.(interface{ Abort() }); ok {
+					a.Abort()
+				}
+			}
 			switch {
 			case w.wsConn != nil:
 				_ = w.wsConn.Close()
@@ -112,8 +141,44 @@ func (w *waitingConn) markAcquired() {
 		return
 	}
 	w.acquireOnce.Do(func() {
+		w.pipeMu.Lock()
+		w.pipes++
+		w.pipeMu.Unlock()
 		close(w.acquired)
 	})
+}
+
+// abort ends the entry like finish(true), for a session that is being cut short
+// (shutdown, the client went away, a peer expired). On top of closing the
+// connection it interrupts an HTTP/2 write blocked on the peer's flow-control
+// window, which a plain Close does not, so the forwarder can stop and the
+// handler, which waits for it, can return.
+func (w *waitingConn) abort() {
+	w.aborting.Store(true)
+	w.finish(true)
+}
+
+// endPipe says the forwarder that acquired the connection is done with it. The
+// forwarder defers it right after acquiring.
+func (w *waitingConn) endPipe() {
+	w.pipeMu.Lock()
+	w.pipes--
+	if w.pipeCond != nil {
+		w.pipeCond.Broadcast()
+	}
+	w.pipeMu.Unlock()
+}
+
+// waitPipes blocks until the forwarder, if one acquired the connection, is done.
+func (w *waitingConn) waitPipes() {
+	w.pipeMu.Lock()
+	defer w.pipeMu.Unlock()
+	if w.pipeCond == nil {
+		w.pipeCond = sync.NewCond(&w.pipeMu)
+	}
+	for w.pipes > 0 {
+		w.pipeCond.Wait()
+	}
 }
 
 func (w *waitingConn) isAcquired() bool {
@@ -212,6 +277,9 @@ func (m *ReverseTunnelManager) closeTunnelListener(tl *tunnelListener, closeList
 	if closeListener && tl.ln != nil {
 		_ = tl.ln.Close()
 	}
+	if closeListener && tl.pc != nil {
+		_ = tl.pc.Close()
+	}
 }
 
 // pingParked keeps a connection pinged from the moment it is accepted until it
@@ -266,12 +334,25 @@ func (m *ReverseTunnelManager) pingParked(tl *tunnelListener, wait *waitingConn)
 	}()
 }
 
+// waitForUseOrTimeout holds the handler of a pooled connection until the
+// connection has been used and finished, or dropped. It returns only once the
+// visitor's pipe, if there was one, has returned too: finish closes the
+// transport to stop it, but a handler that returned while the pipe still wrote
+// through its response writer would break the HTTP server's rules.
 func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *waitingConn) {
+	m.holdForUse(tl, wait)
+	wait.waitPipes()
+}
+
+func (m *ReverseTunnelManager) holdForUse(tl *tunnelListener, wait *waitingConn) {
 	if m.idleTimeout <= 0 {
 		select {
+		case <-wait.gone:
+			wait.abort()
+			m.purgeDoneWaiters(tl)
 		case <-wait.done:
 		case <-tl.quit:
-			wait.finish(true)
+			wait.abort()
 		}
 		return
 	}
@@ -281,9 +362,14 @@ func (m *ReverseTunnelManager) waitForUseOrTimeout(tl *tunnelListener, wait *wai
 
 	acquired := wait.acquired
 	select {
+	case <-wait.gone:
+		// The client of a held request disconnected, or gave up and will send
+		// the request again. Either way it no longer takes a place in the pool.
+		wait.abort()
+		m.purgeDoneWaiters(tl)
 	case <-wait.done:
 	case <-tl.quit:
-		wait.finish(true)
+		wait.abort()
 	case <-acquired:
 		m.waitAfterAcquireOrShutdown(tl, wait)
 	case <-timer.C:
@@ -295,7 +381,7 @@ func (m *ReverseTunnelManager) waitAfterAcquireOrShutdown(tl *tunnelListener, wa
 	select {
 	case <-wait.done:
 	case <-tl.quit:
-		wait.finish(true)
+		wait.abort()
 	}
 }
 
@@ -376,6 +462,27 @@ func (m *ReverseTunnelManager) enqueueWaitingConn(tl *tunnelListener, wait *wait
 }
 
 func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingConn, bool) {
+	return m.acquireWaitingConnUntil(tl, nil)
+}
+
+// acquireWaitingConnUntil is acquireWaitingConn that gives up as soon as cancel
+// closes, instead of waiting out the ten seconds.
+func (m *ReverseTunnelManager) acquireWaitingConnUntil(tl *tunnelListener, cancel <-chan struct{}) (*waitingConn, bool) {
+	if cancel != nil {
+		stopWatching := make(chan struct{})
+		defer close(stopWatching)
+		go func() {
+			select {
+			case <-cancel:
+				tl.queueMu.Lock()
+				if tl.queueCond != nil {
+					tl.queueCond.Broadcast()
+				}
+				tl.queueMu.Unlock()
+			case <-stopWatching:
+			}
+		}()
+	}
 	timer := time.AfterFunc(10*time.Second, func() {
 		if tl.queueCond != nil {
 			tl.queueMu.Lock()
@@ -402,7 +509,19 @@ func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingC
 				tl.queueCond.Broadcast()
 			}
 			if wait != nil {
+				// Check that the entry is still live and count the forwarder under
+				// the entry's lock. finish takes it too, so either the entry was
+				// finished before and is skipped, or the count is in place before
+				// finish can wake a handler that is waiting for the pipes.
+				wait.connMu.Lock()
+				select {
+				case <-wait.done:
+					wait.connMu.Unlock()
+					continue
+				default:
+				}
 				wait.markAcquired()
+				wait.connMu.Unlock()
 				return wait, true
 			}
 			continue
@@ -414,6 +533,8 @@ func (m *ReverseTunnelManager) acquireWaitingConn(tl *tunnelListener) (*waitingC
 
 		select {
 		case <-tl.quit:
+			return nil, false
+		case <-cancel: // a nil channel never fires
 			return nil, false
 		default:
 		}
@@ -437,6 +558,10 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 		}
 		isUnix = true
 		network = "unix"
+	} else if claims.Protocol.ReverseUdp != nil {
+		// A different key from a TCP listener on the same address.
+		bindAddr = "udp:" + net.JoinHostPort(claims.Remote, fmt.Sprintf("%d", claims.Port))
+		network = "udp"
 	} else {
 		bindAddr = net.JoinHostPort(claims.Remote, fmt.Sprintf("%d", claims.Port))
 		isUnix = false
@@ -446,6 +571,20 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	tl, ok := m.listeners[bindAddr]
+	if ok && !reflect.DeepEqual(tl.protocol, claims.Protocol) {
+		// A listener keeps the protocol and credentials it was started with. A
+		// client that comes back with other ones (a password added or changed,
+		// another timeout) must not be served by the old settings. Replace an
+		// idle listener; refuse while visitors are being served, rather than
+		// cut them off.
+		if tl.active > 0 {
+			return nil, bindAddr, fmt.Errorf("a reverse listener on %s is serving visitors with a different configuration", bindAddr)
+		}
+		slog.Info("Reverse tunnel listener replaced: the client's settings changed", "addr", tl.addr)
+		delete(m.listeners, bindAddr)
+		m.closeTunnelListener(tl, true)
+		ok = false
+	}
 	if !ok {
 		// Start new listener
 		var lc net.ListenConfig
@@ -457,22 +596,34 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 			}
 		}
 
-		ln, err := lc.Listen(context.Background(), network, bindAddr)
-		if err != nil {
-			return nil, bindAddr, err
-		}
 		tl = &tunnelListener{
 			addr:     bindAddr,
 			isUnix:   isUnix,
 			protocol: claims.Protocol,
-			ln:       ln,
 			waitCap:  10,
 			quit:     make(chan struct{}),
 			lastUsed: time.Now(),
 		}
+		if network == "udp" {
+			pc, err := lc.ListenPacket(context.Background(), "udp", net.JoinHostPort(claims.Remote, fmt.Sprintf("%d", claims.Port)))
+			if err != nil {
+				return nil, bindAddr, err
+			}
+			tl.pc = pc
+		} else {
+			ln, err := lc.Listen(context.Background(), network, bindAddr)
+			if err != nil {
+				return nil, bindAddr, err
+			}
+			tl.ln = ln
+		}
 		tl.queueCond = sync.NewCond(&tl.queueMu)
 		m.listeners[bindAddr] = tl
-		go m.runListener(tl)
+		if tl.pc != nil {
+			go m.runUDPListener(tl)
+		} else {
+			go m.runListener(tl)
+		}
 	}
 	tl.lastUsed = time.Now()
 	return tl, bindAddr, nil
@@ -526,7 +677,10 @@ func (m *ReverseTunnelManager) HandleGorillaClient(wsConn *websocket.Conn, claim
 	wait.finish(true)
 }
 
-func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims *protocol.JwtTunnelConfig) {
+// gone, when set, is closed when the client goes away. A parked connection
+// nothing reads would otherwise stay in the pool as a dead entry, and the next
+// visitor could be given it and lose what it sent.
+func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims *protocol.JwtTunnelConfig, gone <-chan struct{}) {
 	tl, bindAddr, err := m.getOrCreateListener(claims)
 	if err != nil {
 		slog.Error("Reverse tunnel: failed to listen", "addr", bindAddr, "err", err)
@@ -538,6 +692,24 @@ func (m *ReverseTunnelManager) HandleClientH2(h2Conn io.ReadWriteCloser, claims 
 		h2Conn:   h2Conn,
 		acquired: make(chan struct{}),
 		done:     make(chan struct{}),
+		gone:     gone,
+	}
+	if gone != nil {
+		stopWatching := make(chan struct{})
+		defer close(stopWatching)
+		go func() {
+			select {
+			case <-gone:
+				wait.abort()
+				tl.queueMu.Lock()
+				if tl.queueCond != nil {
+					tl.queueCond.Broadcast()
+				}
+				tl.queueMu.Unlock()
+			case <-wait.done:
+			case <-stopWatching:
+			}
+		}()
 	}
 
 	if m.enqueueWaitingConn(tl, wait) {
@@ -584,8 +756,9 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	var targetPort uint16
 	var err error
 
-	if tl.protocol.ReverseSocks5 != nil {
-		targetHost, targetPort, err = m.handleSocks5Handshake(conn)
+	socks5 := tl.protocol.ReverseSocks5 != nil
+	if socks5 {
+		targetHost, targetPort, err = readSocks5Request(conn, tl.protocol.ReverseSocks5.Credentials)
 		if err != nil {
 			slog.Warn("Reverse SOCKS5 handshake failed", "err", err)
 			return
@@ -596,11 +769,47 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	wait, ok := m.acquireWaitingConn(tl)
 	if !ok {
 		slog.Error("Reverse tunnel: no client available to handle connection", "addr", tl.addr)
+		if socks5 {
+			_ = socks5Reply(conn, socks5GeneralFailure)
+		}
 		return
 	}
 
-	defer wait.finish(false)
+	// The handler waits for the pipe (see waitForUseOrTimeout), so endPipe must
+	// run after the finish below, and it is registered first.
+	defer wait.endPipe()
+	// The tunnel side of the pipe is closed when the entry ends, but a pump can
+	// be stuck on the visitor instead (it stopped reading, or has nothing to
+	// say), and closing the tunnel does not free that. Close the visitor too.
+	releaseVisitor := make(chan struct{})
+	defer close(releaseVisitor)
+	go func() {
+		select {
+		case <-wait.done:
+			_ = conn.Close()
+		case <-releaseVisitor:
+		}
+	}()
+	// A connection upgraded here, for a held request, has no handler of its own
+	// to close it afterwards, so close it. One that arrived upgraded is closed by
+	// the handler that received it.
+	defer func() { wait.finish(wait.lazy != nil) }()
 	m.touchListener(tl)
+
+	if socks5 {
+		// The client's request was held for this: answer it now, with the
+		// target the visitor asked for, then tell the visitor it is connected.
+		if err := m.answerHeldRequest(wait, targetHost, targetPort); err != nil {
+			slog.Warn("Reverse SOCKS5: cannot hand the connection to the client", "addr", tl.addr, "err", err)
+			_ = socks5Reply(conn, socks5GeneralFailure)
+			wait.finish(true)
+			return
+		}
+		if err := socks5Reply(conn, socks5Succeeded); err != nil {
+			wait.finish(true)
+			return
+		}
+	}
 
 	start := time.Now()
 	slog.Info("Reverse tunnel: forwarding connection to client", "addr", tl.addr, "peer", conn.RemoteAddr().String(), "target_host", targetHost, "target_port", targetPort)
@@ -614,12 +823,16 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	// without a watchdog the visitor would hang on it indefinitely.
 	if wait.wsConn != nil {
 		stop, live := tunnel.WatchWst(wait.wsConn, m.pingInterval, "addr", tl.addr)
-		_ = wait.wsConn.WriteMessage(wst.BinaryMessage, nil)
+		if !socks5 {
+			_ = wait.wsConn.WriteMessage(wst.BinaryMessage, nil)
+		}
 		tunnel.PipeLive(conn, wait.wsConn, live)
 		stop()
 	} else if wait.gorillaConn != nil {
 		stop, live := tunnel.WatchGorilla(wait.gorillaConn, m.pingInterval, "addr", tl.addr)
-		_ = wait.gorillaConn.WriteMessage(websocket.BinaryMessage, nil)
+		if !socks5 {
+			_ = wait.gorillaConn.WriteMessage(websocket.BinaryMessage, nil)
+		}
 		tunnel.PipeGorillaLive(conn, wait.gorillaConn, live)
 		stop()
 	} else {
@@ -631,71 +844,3 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 // to send its greeting and request (Rust #515). The deadline is cleared once the
 // handshake is done.
 var socks5HandshakeTimeout = 10 * time.Second
-
-func (m *ReverseTunnelManager) handleSocks5Handshake(conn net.Conn) (string, uint16, error) {
-	_ = conn.SetDeadline(time.Now().Add(socks5HandshakeTimeout))
-	defer func() { _ = conn.SetDeadline(time.Time{}) }()
-	buf := make([]byte, 256)
-
-	// 1. Version/Methods
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return "", 0, err
-	}
-	if buf[0] != 0x05 {
-		return "", 0, fmt.Errorf("invalid socks version: %d", buf[0])
-	}
-	nmethods := int(buf[1])
-	if _, err := io.ReadFull(conn, buf[:nmethods]); err != nil {
-		return "", 0, err
-	}
-	// Respond: No Authentication Required
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-		return "", 0, err
-	}
-
-	// 2. Request
-	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-		return "", 0, err
-	}
-	if buf[0] != 0x05 || buf[1] != 0x01 { // Only CONNECT supported
-		return "", 0, fmt.Errorf("unsupported socks command: %d", buf[1])
-	}
-
-	var host string
-	switch buf[3] {
-	case 0x01: // IPv4
-		if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-			return "", 0, err
-		}
-		host = net.IP(buf[:4]).String()
-	case 0x03: // Domain
-		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-			return "", 0, err
-		}
-		sz := int(buf[0])
-		if _, err := io.ReadFull(conn, buf[:sz]); err != nil {
-			return "", 0, err
-		}
-		host = string(buf[:sz])
-	case 0x04: // IPv6
-		if _, err := io.ReadFull(conn, buf[:16]); err != nil {
-			return "", 0, err
-		}
-		host = net.IP(buf[:16]).String()
-	default:
-		return "", 0, fmt.Errorf("unsupported address type: %d", buf[3])
-	}
-
-	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return "", 0, err
-	}
-	port := binary.BigEndian.Uint16(buf[:2])
-
-	// 3. Respond Success
-	resp := []byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
-	if _, err := conn.Write(resp); err != nil {
-		return "", 0, err
-	}
-
-	return host, port, nil
-}

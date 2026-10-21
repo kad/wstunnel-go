@@ -15,7 +15,7 @@ A feature-complete Go implementation of [wstunnel](https://github.com/erebe/wstu
     -   **Stdio**: Tunneling via standard input/output.
 -   **TProxy Support**: Transparent proxying for TCP and UDP on Linux (requires root/CAP_NET_ADMIN).
 -   **Tun mode (Go-only, Linux client)**: Route whole subnets through the server with a TUN device: `-L 'tun://wst0?route=10.0.0.0/8'` on the client, `--enable-tun` on the server. The server forwards each TCP/UDP flow to the real network through a userspace TCP/IP stack. With `route=default` (`-L 'tun://wst0?route=default'`) the whole host's IPv4 and IPv6 traffic goes through the tunnel. See [docs/TUN.md](docs/TUN.md).
--   **Reverse Tunneling**: Stable support for static reverse TCP and reverse Unix socket tunnels (server-to-client).
+-   **Reverse Tunneling**: Stable support for static reverse TCP, reverse UDP, reverse SOCKS5 and reverse Unix socket tunnels (server-to-client). A reverse UDP tunnel keeps one client connection per peer address and ends a peer after `timeout_sec` of silence (30 seconds by default, `0` for never). A reverse SOCKS5 tunnel (`-R socks5://[bind:]port`, optional `?login=&password=`) runs the SOCKS5 listener on the server and connects out from the client, supporting CONNECT. A reverse listener keeps the settings it was started with; a client that returns with other credentials or timeouts replaces an idle listener, and is refused while visitors are being served.
 -   **Transports**:
     -   **WebSocket-like transport**: Secure WebSocket-style transport (default) with intentional RFC 6455 deviations for compatibility with the original Rust implementation.
     -   **RFC 6455 compliant WebSocket**: Enable strict RFC 6455 compliance with `--mode ws` (compatible with standard Go clients).
@@ -313,9 +313,9 @@ func main() {
 | :--- | :---: | :---: |
 | TCP Forward/Reverse | ✅ | ✅ |
 | UDP Forward | ✅ | ✅ |
-| UDP Reverse | ❌ | ❌ |
+| UDP Reverse | ✅ | ✅ |
 | SOCKS5 Forward | ✅ | ✅ |
-| SOCKS5 Reverse | ❌ | ❌ |
+| SOCKS5 Reverse | ✅ | ✅ |
 | HTTP Proxy (CONNECT) | ✅ | ✅ |
 | Reverse HTTP Proxy | ❌ | ❌ |
 | Unix Sockets | ✅ | ✅ |

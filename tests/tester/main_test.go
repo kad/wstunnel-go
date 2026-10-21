@@ -156,7 +156,7 @@ func runUDPEchoServer(port int) (chan struct{}, error) {
 	go func() {
 		defer close(done)
 		defer func() { _ = conn.Close() }()
-		buf := make([]byte, 2048)
+		buf := make([]byte, 65535)
 		for {
 			n, src, err := conn.ReadFromUDP(buf)
 			if err != nil {
