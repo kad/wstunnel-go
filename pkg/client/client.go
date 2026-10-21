@@ -260,20 +260,26 @@ func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, 
 	}
 
 	dialer := &wst.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout: replyTimeout(p),
 	}
 
 	// Use pool if available, or dial transport directly
+	var connected atomic.Bool
 	dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		var conn net.Conn
+		var err error
 		if c.pool != nil {
-			return c.pool.Get(ctx)
+			conn, err = c.pool.Get(ctx)
+		} else {
+			conn, err = c.dialTransport(ctx, network, addr)
 		}
-		return c.dialTransport(ctx, network, addr)
+		connected.Store(err == nil)
+		return conn, err
 	}
 
 	conn, resp, err := dialer.Dial(u.String(), header)
 	if err != nil {
-		return nil, resp, fmt.Errorf("failed to dial: %w", err)
+		return nil, resp, fmt.Errorf("failed to dial: %w", markReplyTimeout(err, connected.Load()))
 	}
 
 	return conn, resp, nil
@@ -307,8 +313,26 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 	u.Path = fmt.Sprintf("/%s/events", c.Config.PathPrefix)
 
 	pr, pw := io.Pipe()
-	req, err := http.NewRequest("POST", u.String(), pr)
+	// The request context lives as long as the tunnel: the stream is cancelled
+	// when it is closed. For a request answered only when a visitor shows up, it
+	// is also cancelled if no reply comes in time. http.Transport's own
+	// ResponseHeaderTimeout would not do: it starts once the request body is
+	// written, and this body stays open for the whole tunnel.
+	ctx, cancel := context.WithCancel(context.Background())
+	var replyTimedOut, connected atomic.Bool
+	var replyTimer *time.Timer
+	if holdsReply(p) {
+		replyTimer = time.AfterFunc(reverseReplyTimeout, func() {
+			replyTimedOut.Store(true)
+			cancel()
+		})
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", u.String(), pr)
 	if err != nil {
+		cancel()
+		if replyTimer != nil {
+			replyTimer.Stop()
+		}
 		_ = pw.Close()
 		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
@@ -336,15 +360,23 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 	protocols.SetUnencryptedHTTP2(true)
 	tr := &http.Transport{
 		Protocols: protocols,
+		// One transport per tunnel, so nothing reuses its connection. Without
+		// this the connection stays open and idle after the tunnel ends, or after
+		// a held request is cancelled, and they pile up on both peers.
+		DisableKeepAlives: true,
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return c.dialTransport(ctx, network, addr)
+			conn, err := c.dialTransport(ctx, network, addr)
+			connected.Store(err == nil)
+			return conn, err
 		},
 		DialTLSContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// cfg is ignored on purpose: the client's own TLS settings (SNI
 			// override, mTLS material, verification policy) come from Config.
 			// Its ALPN list must still be honoured, otherwise the server
 			// negotiates HTTP/1.1 and never routes to the HTTP/2 handler.
-			return c.dialTransport(ctx, network, addr, "h2")
+			conn, err := c.dialTransport(ctx, network, addr, "h2")
+			connected.Store(err == nil)
+			return conn, err
 		},
 	}
 	if p.Tun != nil && c.Config.PingFrequency > 0 {
@@ -362,29 +394,51 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 	httpClient := &http.Client{Transport: tr}
 
 	resp, err := httpClient.Do(req)
-	if err != nil {
+	// The reply, or its absence, is settled: from here the timer must not cut
+	// an established tunnel short.
+	timedOut := replyTimer != nil && (!replyTimer.Stop() || replyTimedOut.Load())
+	if err != nil || timedOut {
+		cancel()
+		tr.CloseIdleConnections()
 		_ = pw.Close()
+		if resp != nil {
+			_ = resp.Body.Close()
+		}
+		if timedOut {
+			// The timer also runs while the connection is being made; only
+			// running out once connected means the server is just waiting for
+			// a visitor.
+			err = markReplyTimeout(os.ErrDeadlineExceeded, connected.Load())
+			return nil, nil, fmt.Errorf("no reply within %v: %w", reverseReplyTimeout, err)
+		}
 		return nil, nil, fmt.Errorf("failed to send request: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		cancel()
 		_ = pw.Close()
 		_ = resp.Body.Close()
+		tr.CloseIdleConnections()
 		return nil, resp, fmt.Errorf("server rejected request: %s", resp.Status)
 	}
 
 	return &tunnelReadWriteCloser{
 		ReadCloser: resp.Body,
 		Writer:     pw,
+		cancel:     func() { cancel(); tr.CloseIdleConnections() },
 	}, resp, nil
 }
 
 type tunnelReadWriteCloser struct {
 	io.ReadCloser
 	io.Writer
+	cancel context.CancelFunc // ends the request when the stream is closed
 }
 
 func (t *tunnelReadWriteCloser) Close() error {
+	if t.cancel != nil {
+		defer t.cancel()
+	}
 	e1 := t.ReadCloser.Close()
 	var e2 error
 	if closer, ok := t.Writer.(io.Closer); ok {
@@ -456,31 +510,43 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 	}
 
 	dialer := &websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout: replyTimeout(p),
 	}
 	isTLS := u.Scheme == "wss"
 	if isTLS {
-		tlsConfig, err := c.tlsClientConfig(u.Hostname())
-		if err != nil {
+		if _, err := c.tlsClientConfig(u.Hostname()); err != nil {
 			return nil, nil, err
 		}
-		dialer.TLSClientConfig = tlsConfig
 	}
 
+	// The TLS handshake is done in the dial hook, so that once it returns the
+	// only thing left to wait for is the server's reply.
+	var connected atomic.Bool
+	track := func(conn net.Conn, err error) (net.Conn, error) {
+		connected.Store(err == nil)
+		return conn, err
+	}
 	if c.pool != nil && !isTLS {
 		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return c.pool.Get(ctx)
+			return track(c.pool.Get(ctx))
+		}
+	} else if isTLS {
+		dialer.NetDialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return track(c.dialTransport(ctx, network, addr))
 		}
 	} else {
 		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			conn, _, _, err := c.dialRawTransport(ctx, network, addr)
-			return conn, err
+			return track(conn, err)
 		}
 	}
 
 	conn, resp, err := dialer.Dial(u.String(), header)
-	if err != nil && resp != nil {
-		err = fmt.Errorf("%w (server replied %s)", err, resp.Status)
+	if err != nil {
+		err = markReplyTimeout(err, connected.Load())
+		if resp != nil {
+			err = fmt.Errorf("%w (server replied %s)", err, resp.Status)
+		}
 	}
 	return conn, resp, err
 }
@@ -535,7 +601,11 @@ func (c *Client) startPipeMode(local net.Conn, ts *tunnelStream, enforce bool) {
 		defer stop()
 		tunnel.PipeGorillaLive(local, ts.gorilla, live)
 	} else if ts.wt != nil {
-		tunnel.PipeBiDir(local, ts.wt)
+		if framed, ok := ts.wt.(*protocol.FramedUDPReadWriteCloser); ok {
+			tunnel.PipeUDP(local, framed)
+		} else {
+			tunnel.PipeBiDir(local, ts.wt)
+		}
 	} else {
 		tunnel.PipeBiDir(local, ts.h2)
 	}
@@ -655,6 +725,70 @@ func constantTimeEqualBytes(actual, expected []byte) bool {
 	}
 
 	return subtle.ConstantTimeEq(diff, 0) == 1
+}
+
+// reverseMinParked is how long a reverse connection must stay up before its end
+// counts as routine. One that the server drops sooner was refused.
+const reverseMinParked = 5 * time.Second
+
+// reverseReplyTimeout is how long a reverse request that is answered only when a
+// visitor asks for something may wait for its reply, as in Rust.
+var reverseReplyTimeout = 30 * time.Second
+
+// holdsReply reports whether a server may keep the reply to a request for p
+// until a visitor shows up. A Rust server does so for every reverse tunnel,
+// and a Go one for reverse SOCKS5, whose reply carries the visitor's target.
+func holdsReply(p protocol.LocalProtocol) bool {
+	return p.ReverseTcp != nil || p.ReverseUdp != nil || p.ReverseSocks5 != nil
+}
+
+// replyTimeout is how long a request for p may wait for the server's reply.
+func replyTimeout(p protocol.LocalProtocol) time.Duration {
+	if holdsReply(p) {
+		return reverseReplyTimeout
+	}
+	return 10 * time.Second
+}
+
+// parseTargetCookie reads the target a server named in its reply: a JWT whose
+// claims are the protocol, host and port to connect to. The signature is not
+// checked, as in Rust. The host loses the brackets Rust puts around IPv6. A reply without a host, a
+// port, or a single TCP or UDP protocol is not a target.
+func parseTargetCookie(cookie string) (host string, port uint16, proto protocol.LocalProtocol, ok bool) {
+	if cookie == "" {
+		return "", 0, protocol.LocalProtocol{}, false
+	}
+	claims := &protocol.JwtTunnelConfig{}
+	if _, _, err := jwt.NewParser().ParseUnverified(cookie, claims); err != nil || claims.Remote == "" || claims.Port == 0 {
+		return "", 0, protocol.LocalProtocol{}, false
+	}
+	// A target is dialed over TCP or UDP, and exactly one of them.
+	if claims.Protocol.Variants() != 1 || (claims.Protocol.Tcp == nil && claims.Protocol.Udp == nil) {
+		return "", 0, protocol.LocalProtocol{}, false
+	}
+	host = strings.TrimSuffix(strings.TrimPrefix(claims.Remote, "["), "]")
+	return host, claims.Port, claims.Protocol, true
+}
+
+// errReplyTimeout marks a request that connected but got no reply in time. For
+// a reverse SOCKS5 request that only means no visitor came; a timeout while
+// connecting is a failure like any other.
+var errReplyTimeout = errors.New("no reply from the server")
+
+// markReplyTimeout tags err as errReplyTimeout if it is a timeout that happened
+// after the connection was made.
+func markReplyTimeout(err error, connected bool) error {
+	if connected && isTimeout(err) {
+		return fmt.Errorf("%w: %w", errReplyTimeout, err)
+	}
+	return err
+}
+
+// isTimeout reports whether err is a deadline or timeout of any kind.
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, os.ErrDeadlineExceeded) ||
+		(errors.As(err, &ne) && ne.Timeout())
 }
 
 // socks5HandshakeTimeout is how long a SOCKS5 client has to finish its greeting
@@ -904,7 +1038,7 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 }
 
 func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
-	if ltr.Protocol.ReverseUdp != nil || ltr.Protocol.ReverseSocks5 != nil || ltr.Protocol.ReverseHttpProxy != nil {
+	if ltr.Protocol.ReverseHttpProxy != nil {
 		slog.Error("Reverse tunnel protocol is not implemented", "protocol", ltr.Protocol)
 		return
 	}
@@ -917,7 +1051,7 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 	// The server listens on the address carried in the JWT, so for reverse TCP
 	// that is the bind side of the argument; the target is dialed locally.
 	listenHost, listenPort := ltr.Remote, ltr.Port
-	if ltr.Protocol.ReverseTcp != nil {
+	if ltr.Protocol.ReverseTcp != nil || ltr.Protocol.ReverseUdp != nil || ltr.Protocol.ReverseSocks5 != nil {
 		h, ps, err := net.SplitHostPort(ltr.Local)
 		pn, perr := strconv.ParseUint(ps, 10, 16)
 		if err != nil || perr != nil {
@@ -927,10 +1061,19 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 		listenHost, listenPort = h, uint16(pn)
 	}
 
+	// A SOCKS5 tunnel names its target per visitor, so the server answers the
+	// request only when a visitor has asked for something. That reply can take as
+	// long as there is no visitor, and running out of patience is not a failure.
+	dynamic := ltr.Protocol.ReverseSocks5 != nil
+
 	for {
 		c.reverseBackoff.wait()
 		started := time.Now()
 		ts := c.connectToTransport(ltr.Protocol, listenHost, listenPort)
+		if ts.err != nil && errors.Is(ts.err, errReplyTimeout) {
+			slog.Debug("Reverse tunnel: no visitor within the reply timeout, asking again", "timeout", reverseReplyTimeout)
+			continue
+		}
 		if ts.err != nil {
 			// All reverse tunnels share one backoff; only the first failure of
 			// a round is logged.
@@ -940,33 +1083,66 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 			}
 			continue
 		}
-		c.reverseBackoff.success()
 
 		// Check for target in cookies (for dynamic reverse tunnels)
 		targetHost := ltr.Remote
 		targetPort := ltr.Port
 		targetProto := ltr.Protocol
 
-		if ts.r != nil && ts.r.Header.Get("Set-Cookie") != "" {
-			cookieStr := ts.r.Header.Get("Set-Cookie")
-			claims := &protocol.JwtTunnelConfig{}
-			_, _, err := jwt.NewParser().ParseUnverified(cookieStr, claims)
-			if err == nil && claims.Remote != "" {
-				targetHost = claims.Remote
-				targetPort = claims.Port
-				targetProto = claims.Protocol
+		// Rust sends the target in a Cookie response header (some servers in
+		// Set-Cookie). Its host is bracketed for IPv6, which net.Dial does not want.
+		var cookieStr string
+		if ts.r != nil {
+			if cookieStr = ts.r.Header.Get("Cookie"); cookieStr == "" {
+				cookieStr = ts.r.Header.Get("Set-Cookie")
 			}
+		}
+		h, p, proto, parsed := parseTargetCookie(cookieStr)
+		if parsed {
+			targetHost, targetPort, targetProto = h, p, proto
+		}
+		if dynamic && !parsed {
+			// A server that answers without a usable target is failing the
+			// request. Back off like any other failure instead of asking again at
+			// once, and do not dial the placeholder address of the tunnel.
+			wait, escalated := c.reverseBackoff.fail(started, maxDelay)
+			if escalated {
+				slog.Error("Reverse SOCKS5: the server's reply carries no usable target", "retry_in", wait.Round(10*time.Millisecond))
+			}
+			ts.Close()
+			continue
 		}
 
 		// Wait until the server has a connection to hand us, so the local
 		// target is only dialed on demand. Only websocket streams from a
 		// server that advertises the wake-up frame are lazy; others dial eagerly.
-		firstData, lazy, err := c.awaitReverseTrigger(ts)
-		if err != nil {
+		var (
+			firstData []byte
+			lazy      bool
+			err       error
+		)
+		connected := time.Now()
+		if dynamic {
+			// Answered only for a visitor, so the connection is in use already.
+			lazy = true
+		} else if firstData, lazy, err = c.awaitReverseTrigger(ts, ltr.Protocol.ReverseUdp != nil); err != nil {
 			slog.Debug("Reverse tunnel: parked connection ended before use", "err", err)
 			ts.Close()
+			if time.Since(connected) < reverseMinParked {
+				// The server took the request and dropped it at once: it could
+				// not set the listener up (the port is taken, say). Back off
+				// instead of asking again straight away. A connection that
+				// stayed parked for a while and was then reaped is routine.
+				wait, escalated := c.reverseBackoff.fail(started, maxDelay)
+				if escalated {
+					slog.Error("Reverse tunnel: the server dropped the connection at once", "err", err, "retry_in", wait.Round(10*time.Millisecond))
+				}
+			} else {
+				c.reverseBackoff.success()
+			}
 			continue
 		}
+		c.reverseBackoff.success()
 
 		serve := func() {
 			var (
@@ -981,6 +1157,11 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 					path = targetProto.ReverseUnix.Path
 				}
 				localConn, err = net.Dial("unix", path)
+			} else if targetProto.ReverseUdp != nil || targetProto.Udp != nil {
+				// The "connection" to a UDP target is a connected socket: each
+				// message from the tunnel is one datagram to it, and each
+				// datagram it answers with is one message back.
+				localConn, err = net.Dial("udp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
 			} else {
 				localConn, err = net.Dial("tcp", net.JoinHostPort(targetHost, fmt.Sprintf("%d", targetPort)))
 			}
@@ -991,7 +1172,10 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 				return
 			}
 
-			if len(firstData) > 0 {
+			// The first datagram of a reverse UDP tunnel is the trigger and goes
+			// to the target even when it is empty; on a stream an empty wake-up
+			// frame carries nothing.
+			if len(firstData) > 0 || ltr.Protocol.ReverseUdp != nil {
 				if _, err := localConn.Write(firstData); err != nil {
 					slog.Error("Reverse tunnel: failed to write to local destination", "err", err)
 					_ = localConn.Close()
@@ -1019,18 +1203,40 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 // connection. The first binary frame is the trigger; the Go server sends an
 // empty one when it accepts a connection, and any payload is returned so it
 // can be forwarded to the target.
-func (c *Client) awaitReverseTrigger(ts *tunnelStream) (data []byte, lazy bool, err error) {
-	if ts.r == nil || ts.r.Header.Get("X-Wstunnel-Reverse-Wake") == "" {
+//
+// A reverse UDP tunnel always waits, whatever the server says: the peer talks
+// first, so its first datagram is the trigger on any server, and the client can
+// then park the next connection for the next peer.
+func (c *Client) awaitReverseTrigger(ts *tunnelStream, udp bool) (data []byte, lazy bool, err error) {
+	woken := ts.r != nil && ts.r.Header.Get("X-Wstunnel-Reverse-Wake") != ""
+	if !woken && !udp {
 		return nil, false, nil
 	}
 	// A server that advertises its ping interval pings the parked connection,
 	// so silence for several intervals means the path or the server is gone.
 	// Without this the read below would wait for TCP to notice, if it ever does.
 	var silence time.Duration
-	if ms, perr := strconv.ParseInt(ts.r.Header.Get("X-Wstunnel-Reverse-Ping"), 10, 64); perr == nil && ms > 0 {
-		silence = 3 * time.Duration(ms) * time.Millisecond
+	if ts.r != nil {
+		if ms, perr := strconv.ParseInt(ts.r.Header.Get("X-Wstunnel-Reverse-Ping"), 10, 64); perr == nil && ms > 0 {
+			silence = 3 * time.Duration(ms) * time.Millisecond
+		}
 	}
 	switch {
+	case ts.h2 != nil || ts.wt != nil:
+		rwc := ts.h2
+		if ts.wt != nil {
+			rwc = ts.wt
+		}
+		if pr, ok := rwc.(interface{ ReadPacket() ([]byte, error) }); ok {
+			p, err := pr.ReadPacket()
+			return p, true, err
+		}
+		buf := make([]byte, 64*1024)
+		n, err := rwc.Read(buf)
+		if n > 0 {
+			return buf[:n], true, nil
+		}
+		return nil, true, err
 	case ts.ws != nil:
 		// ReadMessage answers pings itself and never returns for them, so the
 		// deadline is refreshed from the ping handler as well as per message.
@@ -1039,12 +1245,15 @@ func (c *Client) awaitReverseTrigger(ts *tunnelStream) (data []byte, lazy bool, 
 				_ = ts.ws.SetReadDeadline(time.Now().Add(silence))
 			}
 		}
-		// No pong: the server does not read a parked connection, so replies
-		// would only pile up in its receive buffer until a visitor arrives.
-		ts.ws.SetPingHandler(func(string) error {
-			arm()
-			return nil
-		})
+		// No pong when the server announced its pings: it does not read a
+		// parked connection, so replies would only pile up in its receive
+		// buffer until a visitor arrives. Any other server gets the default.
+		if silence > 0 {
+			ts.ws.SetPingHandler(func(string) error {
+				arm()
+				return nil
+			})
+		}
 		// The pipe that follows must not inherit the parked-phase handler or
 		// the silence deadline.
 		defer func() {
@@ -1069,10 +1278,12 @@ func (c *Client) awaitReverseTrigger(ts *tunnelStream) (data []byte, lazy bool, 
 				_ = ts.gorilla.SetReadDeadline(time.Now().Add(silence))
 			}
 		}
-		ts.gorilla.SetPingHandler(func(string) error {
-			arm()
-			return nil
-		})
+		if silence > 0 {
+			ts.gorilla.SetPingHandler(func(string) error {
+				arm()
+				return nil
+			})
+		}
 		defer func() {
 			ts.gorilla.SetPingHandler(nil)
 			if silence > 0 {

@@ -76,7 +76,14 @@ func formatResponseHeader(h http.Header) string {
 type Upgrader struct {
 	CheckOrigin  func(r *http.Request) bool
 	Subprotocols []string
+	// WriteTimeout bounds sending the 101 response; zero means
+	// DefaultUpgradeWriteTimeout. A client that stops reading must not hold the
+	// caller, which may be holding a lock, for good.
+	WriteTimeout time.Duration
 }
+
+// DefaultUpgradeWriteTimeout is how long Upgrade may take to send its response.
+const DefaultUpgradeWriteTimeout = 10 * time.Second
 
 func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeader http.Header) (*Conn, error) {
 	// Validate required upgrade headers
@@ -121,6 +128,11 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 	resp += formatResponseHeader(responseHeader)
 	resp += "\r\n"
 
+	timeout := u.WriteTimeout
+	if timeout <= 0 {
+		timeout = DefaultUpgradeWriteTimeout
+	}
+	_ = conn.SetWriteDeadline(time.Now().Add(timeout))
 	if _, err := bufrw.WriteString(resp); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -129,6 +141,7 @@ func (u *Upgrader) Upgrade(w http.ResponseWriter, r *http.Request, responseHeade
 		_ = conn.Close()
 		return nil, err
 	}
+	_ = conn.SetWriteDeadline(time.Time{})
 
 	// We don't reuse bufrw because we want a clean start with our Conn wrapper
 	// but bufrw might have buffered some read data?

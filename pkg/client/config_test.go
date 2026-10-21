@@ -1,6 +1,9 @@
 package client
 
 import (
+	"errors"
+	"io"
+	"os"
 	"reflect"
 	"testing"
 
@@ -104,16 +107,43 @@ func TestParseTunnelArg(t *testing.T) {
 			},
 		},
 		{
-			name:      "Reverse UDP unsupported",
-			arg:       "udp://9090:localhost:443",
+			name:      "Reverse UDP",
+			arg:       "udp://9090:localhost:53",
 			isReverse: true,
-			wantErr:   true,
+			want: &protocol.LocalToRemote{
+				Local:  "127.0.0.1:9090",
+				Remote: "localhost",
+				Port:   53,
+				Protocol: protocol.LocalProtocol{
+					ReverseUdp: &protocol.ReverseUdpProtocol{Timeout: &protocol.Duration{Secs: 30}},
+				},
+			},
 		},
 		{
-			name:      "Reverse SOCKS5 unsupported",
+			name:      "Reverse UDP with timeout",
+			arg:       "udp://0.0.0.0:9090:10.0.0.1:53?timeout_sec=5",
+			isReverse: true,
+			want: &protocol.LocalToRemote{
+				Local:  "0.0.0.0:9090",
+				Remote: "10.0.0.1",
+				Port:   53,
+				Protocol: protocol.LocalProtocol{
+					ReverseUdp: &protocol.ReverseUdpProtocol{Timeout: &protocol.Duration{Secs: 5}},
+				},
+			},
+		},
+		{
+			name:      "Reverse SOCKS5",
 			arg:       "socks5://9090",
 			isReverse: true,
-			wantErr:   true,
+			want: &protocol.LocalToRemote{
+				Local:  "127.0.0.1:9090",
+				Remote: "0.0.0.0",
+				Port:   0,
+				Protocol: protocol.LocalProtocol{
+					ReverseSocks5: &protocol.ReverseSocks5Protocol{Timeout: &protocol.Duration{Secs: 30}},
+				},
+			},
 		},
 		{
 			name:      "Reverse HTTP proxy unsupported",
@@ -134,5 +164,42 @@ func TestParseTunnelArg(t *testing.T) {
 				t.Errorf("ParseTunnelArg() got = %+v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// timeout_sec follows Rust: absent or unreadable is 30 seconds, and 0 turns the
+// timeout off, which is sent as no timeout.
+func TestTimeoutOption(t *testing.T) {
+	cases := []struct {
+		arg  string
+		want *protocol.Duration
+	}{
+		{"udp://9090:localhost:53", &protocol.Duration{Secs: 30}},
+		{"udp://9090:localhost:53?timeout_sec=5", &protocol.Duration{Secs: 5}},
+		{"udp://9090:localhost:53?timeout_sec=0", nil},
+		{"udp://9090:localhost:53?timeout_sec=abc", &protocol.Duration{Secs: 30}},
+		{"udp://9090:localhost:53?timeout_sec=", &protocol.Duration{Secs: 30}},
+	}
+	for _, tc := range cases {
+		ltr, err := ParseTunnelArg(tc.arg, true)
+		if err != nil {
+			t.Fatalf("%s: %v", tc.arg, err)
+		}
+		got := ltr.Protocol.ReverseUdp.Timeout
+		if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+			t.Errorf("%s: timeout = %+v, want %+v", tc.arg, got, tc.want)
+		}
+	}
+}
+
+func TestMarkReplyTimeoutOnlyAfterConnecting(t *testing.T) {
+	if err := markReplyTimeout(os.ErrDeadlineExceeded, false); errors.Is(err, errReplyTimeout) {
+		t.Error("a timeout while connecting was taken for a missing reply")
+	}
+	if err := markReplyTimeout(os.ErrDeadlineExceeded, true); !errors.Is(err, errReplyTimeout) || !isTimeout(err) {
+		t.Errorf("a timeout after connecting was not marked: %v", err)
+	}
+	if err := markReplyTimeout(io.EOF, true); errors.Is(err, errReplyTimeout) {
+		t.Error("a non-timeout error was marked as a missing reply")
 	}
 }

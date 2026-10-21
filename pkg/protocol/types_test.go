@@ -118,3 +118,15 @@ func TestLocalProtocolTunJSON(t *testing.T) {
 		t.Fatalf("Unmarshal Tun = %+v, want mtu 9000", p.Tun)
 	}
 }
+
+func TestLocalProtocolVariants(t *testing.T) {
+	if n := (LocalProtocol{}).Variants(); n != 0 {
+		t.Errorf("empty protocol names %d variants", n)
+	}
+	if n := (LocalProtocol{Tcp: &TcpProtocol{}}).Variants(); n != 1 {
+		t.Errorf("one protocol names %d variants", n)
+	}
+	if n := (LocalProtocol{ReverseTcp: &struct{}{}, ReverseUdp: &ReverseUdpProtocol{}}).Variants(); n != 2 {
+		t.Errorf("two protocols name %d variants", n)
+	}
+}

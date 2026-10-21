@@ -3,6 +3,7 @@ package protocol
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -27,6 +28,20 @@ type LocalProtocol struct {
 	// Tun is a Go-only extension: the connection carries raw IP packets.
 	// Rust wstunnel rejects it as an unknown variant.
 	Tun *TunProtocol `json:"Tun,omitempty"`
+}
+
+// Variants counts the protocols the claim names. A well-formed claim names one;
+// the types allow several, but authorization looks at one of them and dispatch
+// at another, so a claim with more than one must not be served.
+func (p LocalProtocol) Variants() int {
+	v := reflect.ValueOf(p)
+	n := 0
+	for i := 0; i < v.NumField(); i++ {
+		if f := v.Field(i); f.Kind() == reflect.Pointer && !f.IsNil() {
+			n++
+		}
+	}
+	return n
 }
 
 // TunProtocol requests a packet-level tun session. Mtu is the client's TUN

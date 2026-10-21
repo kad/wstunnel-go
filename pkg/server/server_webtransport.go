@@ -17,6 +17,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -249,10 +250,19 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 		return
 	}
 
-	var streamRWC io.ReadWriteCloser = stream
+	// A reverse session ends from this side as well (an expired peer, a client
+	// that went away), and a plain stream's Close only ends its send side, which
+	// leaves the other direction of the pipe blocked. tunStream's Close aborts
+	// both directions.
+	var base io.ReadWriteCloser = stream
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil ||
+		claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil {
+		base = tunStream{stream}
+	}
+	streamRWC := base
 	var udpStream *protocol.FramedUDPReadWriteCloser
-	if claims.Protocol.Udp != nil {
-		udpStream = protocol.NewFramedUDPReadWriteCloser(stream)
+	if claims.Protocol.Udp != nil || claims.Protocol.ReverseUdp != nil {
+		udpStream = protocol.NewFramedUDPReadWriteCloser(base)
 		streamRWC = udpStream
 	}
 
@@ -287,16 +297,161 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil {
-		w.server.rvMgr.HandleClientH2(streamRWC, claims)
+	if claims.Protocol.ReverseSocks5 != nil {
+		// The target the visitor asked for reaches the client as a JWT preamble
+		// on the stream, once a visitor has asked for one.
+		// A stream has no request context to tell that its client gave up and
+		// will ask again, so watch it: while it is held the client sends nothing,
+		// and any end of the stream means it has gone.
+		gone, stopWatching := watchHeldStream(stream)
+		defer stopWatching()
+		// A request that ends before its upgrade has no transport for finish to
+		// close. Close the whole stream, receive side included, so a client that
+		// keeps its send side open cannot hold the stream.
+		defer func() { _ = base.Close() }()
+		if err := w.server.rvMgr.HandleDynamicClient(claims, lazyUpgrade{stream: func(extra http.Header) (io.ReadWriteCloser, error) {
+			stopWatching() // the pipe reads the stream from here on
+			if err := writePreamble(stream, extra.Get("Cookie"), webTransportAuthTimeout); err != nil {
+				return nil, err
+			}
+			return base, nil
+		}}, gone); err != nil {
+			slog.Warn("WebTransport reverse request refused", "tunnel_id", claims.ID, "err", err)
+		}
 		return
 	}
-	if claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil || claims.Protocol.ReverseUdp != nil {
+		// Watch the client's sending half too. The framing for UDP goes over the
+		// watcher so that its kept byte is read as part of the first frame.
+		watched := newWatchedStream(base)
+		var parked io.ReadWriteCloser = watched
+		if claims.Protocol.ReverseUdp != nil {
+			parked = protocol.NewFramedUDPReadWriteCloser(watched)
+		}
+		w.server.rvMgr.HandleClientH2(parked, claims, eitherDone(stream.Context().Done(), watched.Gone()))
+		return
+	}
+	if claims.Protocol.ReverseHttpProxy != nil {
 		slog.Warn("WebTransport unsupported reverse protocol", "protocol", claims.Protocol)
 		return
 	}
 
 	slog.Warn("WebTransport unsupported protocol target", "protocol", claims.Protocol)
+}
+
+// preambleStream is the part of a stream that writePreamble needs.
+type preambleStream interface {
+	Write([]byte) (int, error)
+	SetWriteDeadline(time.Time) error
+}
+
+// writePreamble sends the target JWT on a stream under a deadline. It runs while
+// the entry's lock is held, and a client that withholds flow-control credit
+// would otherwise block the write, and with it every cancellation, for good.
+func writePreamble(stream preambleStream, jwtStr string, timeout time.Duration) error {
+	_ = stream.SetWriteDeadline(time.Now().Add(timeout))
+	err := protocol.WriteJWTStreamPreamble(stream, jwtStr)
+	_ = stream.SetWriteDeadline(time.Time{})
+	return err
+}
+
+// heldStream is the part of a stream that watchHeldStream needs.
+type heldStream interface {
+	Read([]byte) (int, error)
+	SetReadDeadline(time.Time) error
+}
+
+// watchHeldStream reports when the client of a held WebTransport stream ends it,
+// by reading the stream, on which a held client sends nothing. stop ends the
+// watching without consuming anything, and must run before the stream is read for
+// anything else. It is safe to call more than once.
+func watchHeldStream(stream heldStream) (gone <-chan struct{}, stop func()) {
+	g := make(chan struct{})
+	finished := make(chan struct{})
+	var stopped atomic.Bool
+	go func() {
+		defer close(finished)
+		var b [1]byte
+		_, _ = stream.Read(b[:])
+		// A held client sends nothing, so the read finishing, with data as much
+		// as with an error, means the stream is no longer a held request.
+		if !stopped.Load() {
+			close(g)
+		}
+	}()
+	var once sync.Once
+	return g, func() {
+		once.Do(func() {
+			stopped.Store(true)
+			_ = stream.SetReadDeadline(time.Now())
+			<-finished
+			_ = stream.SetReadDeadline(time.Time{})
+		})
+	}
+}
+
+// watchedStream watches a parked stream for the client ending its sending half
+// (closed or reset), which the stream's own context does not report while the
+// session lives on. A parked client normally sends nothing, but one that dials
+// its target eagerly may, so the first byte read is kept and handed to whoever
+// reads the stream next: the watcher never costs the pipe any data.
+type watchedStream struct {
+	io.ReadWriteCloser
+	ready chan struct{} // closed when the watcher's read has returned
+	gone  chan struct{} // closed when that read ended the stream without data
+	b     [1]byte
+	n     int
+	err   error
+	mu    sync.Mutex // guards n, which Read consumes
+}
+
+func newWatchedStream(rwc io.ReadWriteCloser) *watchedStream {
+	w := &watchedStream{ReadWriteCloser: rwc, ready: make(chan struct{}), gone: make(chan struct{})}
+	go func() {
+		for w.n == 0 && w.err == nil {
+			w.n, w.err = rwc.Read(w.b[:])
+		}
+		if w.n == 0 {
+			close(w.gone)
+		}
+		close(w.ready)
+	}()
+	return w
+}
+
+// Gone is closed when the client ended its sending half while the stream was parked.
+func (w *watchedStream) Gone() <-chan struct{} { return w.gone }
+
+func (w *watchedStream) Read(p []byte) (int, error) {
+	<-w.ready
+	w.mu.Lock()
+	if w.n > 0 {
+		// The byte goes first; a read error that came with it is returned by
+		// the next call.
+		n := copy(p, w.b[:w.n])
+		w.n = 0
+		w.mu.Unlock()
+		return n, nil
+	}
+	err := w.err
+	w.mu.Unlock()
+	if err != nil {
+		return 0, err
+	}
+	return w.ReadWriteCloser.Read(p)
+}
+
+// eitherDone returns a channel closed when a or b is.
+func eitherDone(a, b <-chan struct{}) <-chan struct{} {
+	c := make(chan struct{})
+	go func() {
+		select {
+		case <-a:
+		case <-b:
+		}
+		close(c)
+	}()
+	return c
 }
 
 // tunStream adapts a WebTransport stream for tun.Serve, which closes the

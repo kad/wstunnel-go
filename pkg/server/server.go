@@ -232,7 +232,7 @@ func NewServer(config Config) *Server {
 	s := &Server{
 		Config: config,
 		mux:    http.NewServeMux(),
-		rvMgr:  NewReverseTunnelManager(config.SocketSoMark, config.RemoteToLocalServerIdleTimeout).withPingInterval(config.WebsocketPingFrequency),
+		rvMgr:  NewReverseTunnelManager(config.SocketSoMark, config.RemoteToLocalServerIdleTimeout).withPingInterval(config.WebsocketPingFrequency).withCookieSigner(cookieSigner(config.JWTSecret)),
 		rules:  rules,
 
 		tunFlowSlots:    make(chan struct{}, config.TunMaxFlows),
@@ -266,7 +266,22 @@ func (s *Server) Close() error {
 	return s.closeErr
 }
 
+// parseJWTClaims verifies the token and returns its claims. It refuses a claim
+// that names more than one protocol: the restrictions are checked against one of
+// them and the tunnel is served as another, so such a claim could be authorized
+// as a protocol it does not use.
 func (s *Server) parseJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, error) {
+	claims, err := s.verifyJWTClaims(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	if n := claims.Protocol.Variants(); n > 1 {
+		return nil, fmt.Errorf("the tunnel claim names %d protocols, want one", n)
+	}
+	return claims, nil
+}
+
+func (s *Server) verifyJWTClaims(tokenStr string) (*protocol.JwtTunnelConfig, error) {
 	parseUnverified := func() (*protocol.JwtTunnelConfig, error) {
 		claims := &protocol.JwtTunnelConfig{}
 		token, _, err := jwt.NewParser().ParseUnverified(tokenStr, claims)
@@ -492,12 +507,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if s.Config.WebsocketProtocol == "ws" {
 		upgrader := websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool { return true },
+			// Bounds the 101 response, and is cleared once the upgrade is done.
+			HandshakeTimeout: wst.DefaultUpgradeWriteTimeout,
 		}
 		for _, subprotocol := range strings.Split(r.Header.Get("Sec-WebSocket-Protocol"), ",") {
 			if strings.TrimSpace(subprotocol) == "v1" {
 				upgrader.Subprotocols = []string{"v1"}
 				break
 			}
+		}
+
+		if claims.Protocol.ReverseSocks5 != nil {
+			// The reply is held until a visitor has said what to reach; this
+			// handler stays here until the request is over.
+			if err := s.rvMgr.HandleDynamicClient(claims, lazyUpgrade{gorilla: func(extra http.Header) (*websocket.Conn, error) {
+				return upgrader.Upgrade(w, r, extra)
+			}}, r.Context().Done()); err != nil {
+				http.Error(w, err.Error(), http.StatusServiceUnavailable)
+			}
+			return
 		}
 
 		wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims, s.Config.WebsocketPingFrequency))
@@ -522,6 +550,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			upgrader.Subprotocols = []string{"v1"}
 			break
 		}
+	}
+
+	if claims.Protocol.ReverseSocks5 != nil {
+		if err := s.rvMgr.HandleDynamicClient(claims, lazyUpgrade{wst: func(extra http.Header) (*wst.Conn, error) {
+			return upgrader.Upgrade(w, r, extra)
+		}}, r.Context().Done()); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		}
+		return
 	}
 
 	wsConn, err := upgrader.Upgrade(w, r, reverseWakeHeader(claims, s.Config.WebsocketPingFrequency))
@@ -579,11 +616,11 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil {
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil || claims.Protocol.ReverseUdp != nil {
 		s.rvMgr.HandleClient(wsConn, claims)
 		return
 	}
-	if claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
 		slog.Warn("Unsupported reverse protocol", "proto", claims.Protocol)
 		return
 	}
@@ -631,11 +668,11 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil {
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil || claims.Protocol.ReverseUdp != nil {
 		s.rvMgr.HandleGorillaClient(wsConn, claims)
 		return
 	}
-	if claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
 		slog.Warn("Unsupported reverse protocol (gorilla)", "proto", claims.Protocol)
 		return
 	}
@@ -643,7 +680,37 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 	slog.Warn("Unsupported protocol (gorilla)", "proto", claims.Protocol)
 }
 
+// h2HeaderFlushTimeout bounds sending the held reply of a reverse SOCKS5 request
+// over HTTP/2.
+const h2HeaderFlushTimeout = 10 * time.Second
+
 func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
+	if claims.Protocol.ReverseSocks5 != nil {
+		// The response, and with it the visitor's target, waits for a visitor.
+		if err := s.rvMgr.HandleDynamicClient(claims, lazyUpgrade{stream: func(extra http.Header) (io.ReadWriteCloser, error) {
+			for k, v := range extra {
+				w.Header()[k] = v
+			}
+			w.WriteHeader(http.StatusOK)
+			flusher, _ := w.(http.Flusher)
+			if flusher != nil {
+				// A peer that stopped reading would block the flush, with the
+				// held request's lock taken, so bound it.
+				rc := http.NewResponseController(w)
+				_ = rc.SetWriteDeadline(time.Now().Add(h2HeaderFlushTimeout))
+				err := rc.Flush()
+				_ = rc.SetWriteDeadline(time.Time{})
+				if err != nil {
+					return nil, fmt.Errorf("failed to send the reply: %w", err)
+				}
+			}
+			return &http2ReadWriteCloser{ReadCloser: r.Body, writer: w, flusher: flusher, abortRW: w}, nil
+		}}, r.Context().Done()); err != nil {
+			http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		}
+		return
+	}
+
 	w.WriteHeader(http.StatusOK)
 	if f, ok := w.(http.Flusher); ok {
 		f.Flush()
@@ -659,6 +726,7 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 		ReadCloser: r.Body,
 		writer:     w,
 		flusher:    flusher,
+		abortRW:    w,
 	}
 
 	if claims.Protocol.Tun != nil {
@@ -698,11 +766,11 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil {
-		s.rvMgr.HandleClientH2(rwc, claims)
+	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil || claims.Protocol.ReverseUdp != nil {
+		s.rvMgr.HandleClientH2(rwc, claims, r.Context().Done())
 		return
 	}
-	if claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseHttpProxy != nil {
 		slog.Warn("Unsupported reverse protocol for HTTP/2", "proto", claims.Protocol)
 		_ = rwc.Close()
 		return
@@ -785,12 +853,30 @@ func (s *Server) serveTun(pc tun.PacketConn, claims *protocol.JwtTunnelConfig, r
 	log.Info("Tun session closed")
 }
 
+// h2CloseGrace is how long a response write may stay blocked after its stream
+// was closed normally.
+var h2CloseGrace = 10 * time.Second
+
 type http2ReadWriteCloser struct {
 	io.ReadCloser
 	writer  io.Writer
 	flusher http.Flusher
 	// rw, when set, lets Close unblock a Write stuck on flow control.
 	rw http.ResponseWriter
+	// abortRW, when set, lets Abort do the same without Close doing it: a
+	// session that ends normally closes its stream cleanly, but one that is cut
+	// short must not wait for a peer that stopped reading.
+	abortRW http.ResponseWriter
+}
+
+// Abort interrupts a Write blocked on the peer's flow-control window, for a
+// session that is being cut short.
+func (h *http2ReadWriteCloser) Abort() {
+	if h.abortRW != nil {
+		if err := http.NewResponseController(h.abortRW).SetWriteDeadline(time.Now()); err != nil && !errors.Is(err, http.ErrNotSupported) {
+			slog.Debug("HTTP/2 tunnel: could not interrupt writer", "err", err)
+		}
+	}
 }
 
 func (h *http2ReadWriteCloser) Write(p []byte) (int, error) {
@@ -809,15 +895,24 @@ func (h *http2ReadWriteCloser) Close() error {
 		if err != nil && !errors.Is(err, http.ErrNotSupported) {
 			slog.Debug("HTTP/2 tunnel: could not unblock writer", "err", err)
 		}
+	} else if h.abortRW != nil {
+		// A clean end lets a write in flight finish, but not wait for a peer
+		// that ended its request and stopped reading the response: that would
+		// hold the pipe and the session behind it.
+		err := http.NewResponseController(h.abortRW).SetWriteDeadline(time.Now().Add(h2CloseGrace))
+		if err != nil && !errors.Is(err, http.ErrNotSupported) {
+			slog.Debug("HTTP/2 tunnel: could not bound writer", "err", err)
+		}
 	}
 	return h.ReadCloser.Close()
 }
 
 // reverseWakeHeader tells a Go client that this server sends a wake-up frame
 // when it uses a parked reverse connection. Older servers do not, and clients
-// must dial their target eagerly against them.
+// must dial their target eagerly against them. For reverse UDP the first
+// datagram is the wake-up: the client dials its target and forwards it.
 func reverseWakeHeader(claims *protocol.JwtTunnelConfig, ping time.Duration) http.Header {
-	if claims.Protocol.ReverseTcp == nil && claims.Protocol.ReverseUnix == nil {
+	if claims.Protocol.ReverseTcp == nil && claims.Protocol.ReverseUnix == nil && claims.Protocol.ReverseUdp == nil {
 		return nil
 	}
 	h := http.Header{ReverseWakeHeader: []string{"1"}}

@@ -29,19 +29,7 @@ func PipeLive(tcpConn net.Conn, wsConn *wst.Conn, l *Liveness) {
 		defer func() {
 			_ = wsConn.WriteMessage(wst.CloseMessage, wst.FormatCloseMessage(wst.CloseNormalClosure, ""))
 		}()
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := tcpConn.Read(buf)
-			if n > 0 {
-				err = wsConn.WriteMessage(wst.BinaryMessage, buf[:n])
-				if err != nil {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
+		pumpToWebSocket(tcpConn, func(p []byte) error { return wsConn.WriteMessage(wst.BinaryMessage, p) })
 	}()
 
 	// WebSocket -> TCP
@@ -84,19 +72,7 @@ func PipeGorillaLive(tcpConn net.Conn, wsConn *websocket.Conn, l *Liveness) {
 		defer func() {
 			_ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		}()
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := tcpConn.Read(buf)
-			if n > 0 {
-				err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
-				if err != nil {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
+		pumpToWebSocket(tcpConn, func(p []byte) error { return wsConn.WriteMessage(websocket.BinaryMessage, p) })
 	}()
 
 	// WebSocket -> TCP
@@ -109,6 +85,46 @@ func PipeGorillaLive(tcpConn net.Conn, wsConn *websocket.Conn, l *Liveness) {
 	wg.Wait()
 }
 
+// PacketDest is implemented by a destination that is not a net.PacketConn but
+// still sends every Write as one datagram.
+type PacketDest interface{ DatagramWrites() }
+
+func isPacketDest(w io.Writer) bool { return isPacket(w) }
+
+// isPacket reports whether v carries datagrams: a net.PacketConn (a UDP socket)
+// or a PacketDest.
+func isPacket(v any) bool {
+	if _, ok := v.(net.PacketConn); ok {
+		return true
+	}
+	_, ok := v.(PacketDest)
+	return ok
+}
+
+// pumpToWebSocket sends what src yields as WebSocket messages, one per read.
+// From a datagram source that is one message per datagram: the buffer holds the
+// largest UDP payload, so none is cut short, and an empty datagram is sent as an
+// empty message instead of being skipped.
+func pumpToWebSocket(src io.Reader, send func([]byte) error) {
+	packet := isPacket(src)
+	size := 32 * 1024
+	if packet {
+		size = 64 * 1024
+	}
+	buf := make([]byte, size)
+	for {
+		n, err := src.Read(buf)
+		if n > 0 || (packet && err == nil) {
+			if sendErr := send(buf[:n]); sendErr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 // gorillaToWriter forwards data messages from wsConn to dst until the
 // connection or dst fails. gorilla answers control frames itself while reading.
 //
@@ -117,7 +133,7 @@ func PipeGorillaLive(tcpConn net.Conn, wsConn *websocket.Conn, l *Liveness) {
 // empty one, because each Write is a datagram; the message is read whole first,
 // as before, with the read still reporting progress to the watchdog.
 func gorillaToWriter(wsConn *websocket.Conn, dst io.Writer, l *Liveness) {
-	_, packet := dst.(net.PacketConn)
+	packet := isPacketDest(dst)
 	// One buffer for the whole pipe. The wrappers below hide WriterTo and
 	// ReaderFrom, so io.CopyBuffer really uses it; io.Copy would allocate 32 KiB
 	// for every message, even a one byte one.
@@ -165,19 +181,7 @@ func PipeRWLive(rw io.ReadWriteCloser, wsConn *wst.Conn, l *Liveness) {
 		defer func() {
 			_ = wsConn.WriteMessage(wst.CloseMessage, wst.FormatCloseMessage(wst.CloseNormalClosure, ""))
 		}()
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := rw.Read(buf)
-			if n > 0 {
-				err = wsConn.WriteMessage(wst.BinaryMessage, buf[:n])
-				if err != nil {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
+		pumpToWebSocket(rw, func(p []byte) error { return wsConn.WriteMessage(wst.BinaryMessage, p) })
 	}()
 
 	// WebSocket -> RW
@@ -217,19 +221,7 @@ func PipeGorillaRWLive(rw io.ReadWriteCloser, wsConn *websocket.Conn, l *Livenes
 		defer func() {
 			_ = wsConn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 		}()
-		buf := make([]byte, 32*1024)
-		for {
-			n, err := rw.Read(buf)
-			if n > 0 {
-				err = wsConn.WriteMessage(websocket.BinaryMessage, buf[:n])
-				if err != nil {
-					return
-				}
-			}
-			if err != nil {
-				return
-			}
-		}
+		pumpToWebSocket(rw, func(p []byte) error { return wsConn.WriteMessage(websocket.BinaryMessage, p) })
 	}()
 
 	// WebSocket -> RW

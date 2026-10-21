@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"bytes"
 	"io"
 	"net"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/kad/wstunnel-go/pkg/wst"
 )
 
 // Every WebSocket message must reach a UDP destination as exactly one datagram:
@@ -113,4 +115,87 @@ func TestGorillaToWriterReusesItsCopyBuffer(t *testing.T) {
 	if got := after.TotalAlloc - before.TotalAlloc; got > 16<<20 {
 		t.Fatalf("allocated %d bytes for %d one byte messages, want far less than a copy buffer each", got, messages)
 	}
+}
+
+// udpPair returns a socket for the "remote" side of the test, and a connected
+// socket (the one the pipe owns) whose peer is that socket.
+func udpPair(t *testing.T) (remote *net.UDPConn, piped *net.UDPConn) {
+	t.Helper()
+	remote, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	piped, err = net.DialUDP("udp", nil, remote.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = remote.Close(); _ = piped.Close() })
+	return remote, piped
+}
+
+// A datagram larger than the stream pump's 32 KiB buffer, and an empty one, each
+// cross the pipe in both directions as exactly one message and one datagram.
+func TestPipesCarryLargeAndEmptyDatagrams(t *testing.T) {
+	big := bytes.Repeat([]byte{0xAB}, 60000)
+	type end struct {
+		send func([]byte) error
+		recv func() ([]byte, error)
+	}
+
+	check := func(t *testing.T, remote *net.UDPConn, piped *net.UDPConn, peer end) {
+		t.Helper()
+		_ = remote.SetReadDeadline(time.Now().Add(5 * time.Second))
+		for _, payload := range [][]byte{big, {}, []byte("small")} {
+			// UDP socket -> pipe -> websocket peer
+			if _, err := remote.WriteToUDP(payload, piped.LocalAddr().(*net.UDPAddr)); err != nil {
+				t.Fatal(err)
+			}
+			got, err := peer.recv()
+			if err != nil || !bytes.Equal(got, payload) {
+				t.Fatalf("to the websocket: got %d bytes, err %v, want %d", len(got), err, len(payload))
+			}
+			// websocket peer -> pipe -> UDP socket
+			if err := peer.send(payload); err != nil {
+				t.Fatal(err)
+			}
+			buf := make([]byte, 65535)
+			n, _, err := remote.ReadFromUDP(buf)
+			if err != nil || !bytes.Equal(buf[:n], payload) {
+				t.Fatalf("to the socket: got %d bytes, err %v, want %d", n, err, len(payload))
+			}
+		}
+	}
+
+	t.Run("wst", func(t *testing.T) {
+		remote, piped := udpPair(t)
+		a, b := net.Pipe()
+		t.Cleanup(func() { _ = a.Close(); _ = b.Close() })
+		go PipeLive(piped, wst.NewConn(a, false), nil)
+		peer := wst.NewConn(b, false)
+		check(t, remote, piped, end{
+			send: func(p []byte) error { return peer.WriteMessage(wst.BinaryMessage, p) },
+			recv: func() ([]byte, error) { _, p, err := peer.ReadMessage(); return p, err },
+		})
+	})
+
+	t.Run("gorilla", func(t *testing.T) {
+		remote, piped := udpPair(t)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ws, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+			if err != nil {
+				return
+			}
+			PipeGorillaLive(piped, ws, nil)
+		}))
+		defer srv.Close()
+		c, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = c.Close() }()
+		check(t, remote, piped, end{
+			send: func(p []byte) error { return c.WriteMessage(websocket.BinaryMessage, p) },
+			recv: func() ([]byte, error) { _, p, err := c.ReadMessage(); return p, err },
+		})
+	})
 }

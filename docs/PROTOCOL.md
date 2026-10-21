@@ -75,7 +75,17 @@ The protocol supports the following inner protocols via the `p` claim:
 - `http`: HTTP Connect proxying.
 - `stdio`: Forwarding to/from stdin/stdout.
 - `unix`: Unix domain socket forwarding.
+- `ReverseTcp`, `ReverseUdp`, `ReverseUnix`, `ReverseSocks5`: reverse tunnels. See [Reverse tunnels](#reverse-tunnels).
 - `Tun` (Go-only extension): the connection carries raw IP packets. See [Tun mode](#tun-mode-go-only-extension).
+
+## Reverse tunnels
+
+In a reverse tunnel the server listens and the client connects to the target. The client sends a request whose JWT names the address the server should listen on (`r`, `rp`) and the reverse protocol (`p`). Each request is one connection the server may hand to one visitor, so the client keeps asking: a visitor takes a request, and the client sends the next one.
+
+- **Reverse TCP and Unix.** The server upgrades the request at once and keeps the connection parked. When a visitor arrives it sends an empty binary frame, and the client then dials its target. A Go server advertises this with the `X-Wstunnel-Reverse-Wake` response header. Rust servers answer the request only when a visitor arrives, so a client without the header dials its target straight away.
+- **Reverse UDP.** One connection per peer address, one message per datagram, and no wake-up frame: the peer speaks first, so the first datagram wakes the client, which dials a connected UDP socket to the target and forwards it. A peer is dropped after the `timeout` in the `ReverseUdp` claim. A client sends 30 seconds unless `timeout_sec` says otherwise, and `timeout_sec=0` sends no timeout, which means peers never expire (as in Rust). Over WebTransport the stream is framed with a length per datagram, as in forward UDP. Over HTTP/2 UDP travels as a plain byte stream, as in Rust and in forward UDP, so datagram boundaries are best effort there: datagrams sent back to back can merge, and an empty one or one over 32 KiB is not kept apart. Use WebSocket or WebTransport for UDP that depends on boundaries. Rust does not carry an empty datagram over WebSocket either; two Go peers do.
+- **Reverse SOCKS5.** The server runs the SOCKS5 listener (with username and password if the claim carries `credentials`). The target is only known after a visitor sends its CONNECT request, so the client's request is held without a reply until then. The reply carries the target in a `Cookie` response header: a JWT, signed with a key derived from the server secret rather than the secret itself so it cannot be replayed as a request (clients read it unchecked), whose `r`/`rp` give the host (bracketed if IPv6) and port and whose `p` is `Tcp` or `Udp`. Over WebTransport the same JWT is sent as a length-prefixed preamble on the stream. The client waits up to 30 seconds for the reply, then asks again. Only CONNECT is supported on a Go server. A held request is dropped from the pool as soon as its client disconnects or gives up, so a visitor is never handed an abandoned one.
+- **Go extensions.** `X-Wstunnel-Reverse-Ping` (milliseconds) announces that the server pings a parked connection; a client that hears nothing for three intervals drops it and reconnects.
 
 ## Tun mode (Go-only extension)
 

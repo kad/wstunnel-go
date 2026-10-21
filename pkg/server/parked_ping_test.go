@@ -189,7 +189,7 @@ func TestReverseSocks5HandshakeIsBounded(t *testing.T) {
 	t.Cleanup(m.Close)
 	done := make(chan error, 1)
 	go func() {
-		_, _, err := m.handleSocks5Handshake(server)
+		_, _, err := readSocks5Request(server, nil)
 		done <- err
 	}()
 	select {
