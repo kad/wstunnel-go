@@ -1,6 +1,7 @@
 package client
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/tls"
@@ -177,7 +178,7 @@ func TestConnectToGorillaOverWSS(t *testing.T) {
 		WebsocketProtocol: "ws",
 	})
 
-	conn, resp, err := c.connectToGorilla(protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
+	conn, resp, err := c.connectToGorilla(context.Background(), protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
 	if err != nil {
 		t.Fatalf("connectToGorilla() error = %v", err)
 	}
@@ -210,7 +211,7 @@ func TestConnectToGorillaOverWSSIgnoresClosedPool(t *testing.T) {
 	c.pool = &ConnectionPool{}
 	c.pool.closed.Store(true)
 
-	conn, resp, err := c.connectToGorilla(protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
+	conn, resp, err := c.connectToGorilla(context.Background(), protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
 	if err != nil {
 		t.Fatalf("connectToGorilla() error = %v", err)
 	}
@@ -269,7 +270,7 @@ func TestConnectToGorillaOverWSSWithClientCertificate(t *testing.T) {
 		WebsocketProtocol: "ws",
 	})
 
-	conn, resp, err := c.connectToGorilla(protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
+	conn, resp, err := c.connectToGorilla(context.Background(), protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{}}, "example.com", 443)
 	if err != nil {
 		t.Fatalf("connectToGorilla() error = %v", err)
 	}

@@ -55,6 +55,25 @@ func findFreeTCPPort(host string) (int, error) {
 	return port, nil
 }
 
+// findFreeTCPUDPPort returns a port that is free for both TCP and UDP, for a
+// SOCKS5 listener, which binds both at one address (Rust's refuses to start when
+// the UDP side is taken).
+func findFreeTCPUDPPort(host string) (int, error) {
+	for range 50 {
+		port, err := findFreeTCPPort(host)
+		if err != nil {
+			return 0, err
+		}
+		pc, err := net.ListenPacket("udp", net.JoinHostPort(host, fmt.Sprint(port)))
+		if err != nil {
+			continue
+		}
+		_ = pc.Close()
+		return port, nil
+	}
+	return 0, fmt.Errorf("no port free for both TCP and UDP")
+}
+
 func findFreeUDPPort(host string) (int, error) {
 	addr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(host, "0"))
 	if err != nil {

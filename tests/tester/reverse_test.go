@@ -98,6 +98,13 @@ func reverseEnv() []string {
 // it, and returns once the client is up.
 func startReverse(t *testing.T, tc reverseCase, host string, serverPort int, reverseArg string) {
 	t.Helper()
+	startTunnel(t, tc, host, serverPort, "-R", reverseArg)
+}
+
+// startTunnel starts the case's server and a client with one tunnel argument:
+// "-R" for a reverse tunnel, "-L" for a forward one.
+func startTunnel(t *testing.T, tc reverseCase, host string, serverPort int, flag, tunnelArg string) {
+	t.Helper()
 	env := reverseEnv()
 	serverURL := fmt.Sprintf("%s://%s", tc.scheme, net.JoinHostPort(host, fmt.Sprint(serverPort)))
 
@@ -129,7 +136,7 @@ func startReverse(t *testing.T, tc reverseCase, host string, serverPort int, rev
 	if tc.clientBin == goBinary {
 		clientArgs = []string{"--log-lvl", "DEBUG", "client", "--http-upgrade-path-prefix", "v1"}
 	}
-	clientArgs = append(clientArgs, "-R", reverseArg)
+	clientArgs = append(clientArgs, flag, tunnelArg)
 	clientArgs = append(clientArgs, tc.clientOpts...)
 	if tc.tls && tc.clientBin == goBinary {
 		// Rust does not verify the server certificate unless asked to.
@@ -210,7 +217,7 @@ func TestReverseUDP(t *testing.T) {
 				t.Skip(reason)
 			}
 			host := "127.0.0.1"
-			serverPort, err := findFreeTCPPort(host)
+			serverPort, err := findFreeTCPUDPPort(host) // WebTransport listens on UDP at the same port
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -319,7 +326,7 @@ func TestReverseSocks5(t *testing.T) {
 					t.Skip(reason)
 				}
 				host := "127.0.0.1"
-				serverPort, err := findFreeTCPPort(host)
+				serverPort, err := findFreeTCPUDPPort(host) // WebTransport listens on UDP at the same port
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -443,7 +450,7 @@ func TestReverseHTTPProxy(t *testing.T) {
 					t.Skip(reason)
 				}
 				host := "127.0.0.1"
-				serverPort, err := findFreeTCPPort(host)
+				serverPort, err := findFreeTCPUDPPort(host) // WebTransport listens on UDP at the same port
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -518,7 +525,7 @@ func TestReverseHTTPProxyPlainRequest(t *testing.T) {
 				t.Skip(reason)
 			}
 			host := "127.0.0.1"
-			serverPort, err := findFreeTCPPort(host)
+			serverPort, err := findFreeTCPUDPPort(host) // WebTransport listens on UDP at the same port
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -579,5 +586,237 @@ func TestReverseHTTPProxyPlainRequest(t *testing.T) {
 			}
 			t.Fatalf("plain request through the reverse HTTP proxy failed: %v", lastErr)
 		})
+	}
+}
+
+// socks5UDPAssociate asks the SOCKS5 server for a UDP relay and returns the
+// address to send datagrams to, with the TCP connection that keeps it alive. A
+// relay bound to every address is reached at the host the connection used.
+func socks5UDPAssociate(socksAddr string, user, pass string) (*net.UDPAddr, net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", socksAddr, 2*time.Second)
+	if err != nil {
+		return nil, nil, err
+	}
+	fail := func(err error) (*net.UDPAddr, net.Conn, error) {
+		_ = conn.Close()
+		return nil, nil, err
+	}
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	method := byte(0x00)
+	if user != "" {
+		method = 0x02
+	}
+	if _, err := conn.Write([]byte{5, 1, method}); err != nil {
+		return fail(err)
+	}
+	greeting := make([]byte, 2)
+	if _, err := io.ReadFull(conn, greeting); err != nil || greeting[1] != method {
+		return fail(fmt.Errorf("greeting %v: %v", greeting, err))
+	}
+	if user != "" {
+		auth := append(append([]byte{1, byte(len(user))}, user...), byte(len(pass)))
+		if _, err := conn.Write(append(auth, pass...)); err != nil {
+			return fail(err)
+		}
+		status := make([]byte, 2)
+		if _, err := io.ReadFull(conn, status); err != nil || status[1] != 0 {
+			return fail(fmt.Errorf("authentication refused: %v %v", status, err))
+		}
+	}
+	if _, err := conn.Write([]byte{5, 3, 0, 1, 0, 0, 0, 0, 0, 0}); err != nil {
+		return fail(err)
+	}
+	reply := make([]byte, 10)
+	if _, err := io.ReadFull(conn, reply); err != nil || reply[1] != 0 || reply[3] != 1 {
+		return fail(fmt.Errorf("associate reply %v: %v", reply, err))
+	}
+	_ = conn.SetDeadline(time.Time{})
+	relay := &net.UDPAddr{IP: net.IP(reply[4:8]), Port: int(reply[8])<<8 | int(reply[9])}
+	if relay.IP.IsUnspecified() {
+		relay.IP = conn.RemoteAddr().(*net.TCPAddr).IP
+	}
+	return relay, conn, nil
+}
+
+// reverseSocks5UDPEcho sends a datagram for the UDP echo target through the
+// reverse SOCKS5 relay and checks the answer. The listener only exists once the
+// client has connected, so the first attempts may fail.
+func reverseSocks5UDPEcho(t *testing.T, socksAddr string, user, pass string, targetPort int, msg string, burst bool) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		err := func() error {
+			relay, ctrl, err := socks5UDPAssociate(socksAddr, user, pass)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = ctrl.Close() }()
+			sock, err := net.DialUDP("udp", nil, relay)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = sock.Close() }()
+			// SOCKS5 UDP header for 127.0.0.1:targetPort.
+			header := []byte{0, 0, 0, 1, 127, 0, 0, 1, byte(targetPort >> 8), byte(targetPort)}
+			// Two datagrams on one session, to check the session carries on.
+			for _, m := range []string{msg, msg + " again"} {
+				if _, err := sock.Write(append(append([]byte(nil), header...), m...)); err != nil {
+					return err
+				}
+				_ = sock.SetReadDeadline(time.Now().Add(3 * time.Second))
+				buf := make([]byte, 2048)
+				n, err := sock.Read(buf)
+				if err != nil {
+					return err
+				}
+				if n < len(header) {
+					return fmt.Errorf("short answer %v", buf[:n])
+				}
+				if !bytes.Equal(buf[3:len(header)], header[3:]) {
+					return fmt.Errorf("answer header %v, want the target's %v", buf[:len(header)], header)
+				}
+				if got := string(buf[len(header):n]); got != m {
+					t.Fatalf("echo mismatch: sent %q, got %q", m, got)
+				}
+			}
+			if burst {
+				// Datagrams sent back to back must come back as they went, one
+				// by one, on transports that keep boundaries.
+				sent := []string{"a", "bb", strings.Repeat("c", 1200), "dddd"}
+				for _, m := range sent {
+					if _, err := sock.Write(append(append([]byte(nil), header...), m...)); err != nil {
+						return err
+					}
+				}
+				for _, m := range sent {
+					_ = sock.SetReadDeadline(time.Now().Add(3 * time.Second))
+					buf := make([]byte, 4096)
+					n, err := sock.Read(buf)
+					if err != nil {
+						return err
+					}
+					if n < len(header) || string(buf[len(header):n]) != m {
+						t.Fatalf("burst datagram: sent %d bytes, got %d bytes back", len(m), n-len(header))
+					}
+				}
+			}
+			return nil
+		}()
+		if err == nil {
+			return
+		}
+		lastErr = err
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("no echo through the reverse SOCKS5 UDP relay: %v", lastErr)
+}
+
+func TestReverseSocks5UDPAssociate(t *testing.T) {
+	if rustBinary == "" {
+		t.Skip("Rust binary 'wstunnel' not found in PATH. Skipping reverse interoperability tests.")
+	}
+	if _, err := os.Stat(goBinary); os.IsNotExist(err) {
+		t.Fatalf("Go binary not found at %s. Run 'make build' first.", goBinary)
+	}
+	for _, tc := range reverseCases() {
+		for _, withAuth := range []bool{false, true} {
+			name := tc.name
+			if withAuth {
+				name += "-auth"
+			}
+			t.Run(name, func(t *testing.T) {
+				if reason := tc.skipReason(); reason != "" {
+					t.Skip(reason)
+				}
+				if tc.byteStreamUDP {
+					// HTTP/2 carries UDP as a byte stream, which does not keep the
+					// datagrams of a session apart; the echo here is one datagram at
+					// a time, so it still works.
+					t.Log("HTTP/2: datagram boundaries are best effort")
+				}
+				host := "127.0.0.1"
+				serverPort, err := findFreeTCPUDPPort(host) // WebTransport listens on UDP at the same port
+				if err != nil {
+					t.Fatal(err)
+				}
+				targetPort, err := findFreeUDPPort(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				socksPort, err := findFreeTCPUDPPort(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				echo, err := runUDPEchoServer(targetPort)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = echo }()
+
+				arg := fmt.Sprintf("socks5://%s:%d", host, socksPort)
+				user, pass := "", ""
+				if withAuth {
+					arg += "?login=admin&password=secret"
+					user, pass = "admin", "secret"
+				}
+				startReverse(t, tc, host, serverPort, arg)
+				reverseSocks5UDPEcho(t, net.JoinHostPort(host, fmt.Sprint(socksPort)), user, pass, targetPort, "hello udp associate", !tc.byteStreamUDP)
+			})
+		}
+	}
+}
+
+// A forward SOCKS5 listener on the client relays UDP too: datagrams in the SOCKS5
+// UDP header go through the tunnel to the destination they name.
+func TestForwardSocks5UDPAssociate(t *testing.T) {
+	if rustBinary == "" {
+		t.Skip("Rust binary 'wstunnel' not found in PATH. Skipping interoperability tests.")
+	}
+	if _, err := os.Stat(goBinary); os.IsNotExist(err) {
+		t.Fatalf("Go binary not found at %s. Run 'make build' first.", goBinary)
+	}
+	for _, tc := range reverseCases() {
+		for _, withAuth := range []bool{false, true} {
+			name := tc.name
+			if withAuth {
+				name += "-auth"
+			}
+			t.Run(name, func(t *testing.T) {
+				if reason := tc.skipReason(); reason != "" {
+					t.Skip(reason)
+				}
+				host := "127.0.0.1"
+				serverPort, err := findFreeTCPUDPPort(host) // WebTransport listens on UDP at the same port
+				if err != nil {
+					t.Fatal(err)
+				}
+				targetPort, err := findFreeUDPPort(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				socksPort, err := findFreeTCPUDPPort(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				echo, err := runUDPEchoServer(targetPort)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = echo }()
+
+				arg := fmt.Sprintf("socks5://%s:%d", host, socksPort)
+				user, pass := "", ""
+				if withAuth {
+					arg += "?login=admin&password=secret"
+					user, pass = "admin", "secret"
+				}
+				startTunnel(t, tc, host, serverPort, "-L", arg)
+				if err := waitForPort(host, socksPort, 10*time.Second); err != nil {
+					t.Fatal(err)
+				}
+				reverseSocks5UDPEcho(t, net.JoinHostPort(host, fmt.Sprint(socksPort)), user, pass, targetPort, "hello forward udp associate", !tc.byteStreamUDP)
+			})
+		}
 	}
 }

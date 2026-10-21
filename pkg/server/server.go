@@ -415,7 +415,7 @@ func (s *Server) Start() error {
 
 		srv.TLSConfig = tlsConfig
 		if strings.HasPrefix(s.Config.ListenAddr, "wt://") || strings.HasPrefix(s.Config.ListenAddr, "wts://") {
-			if err := s.wtServer.Start(bindAddr, tlsConfig.Clone()); err != nil {
+			if err := s.wtServer.Start(wtBindAddr(bindAddr, ln.Addr()), tlsConfig.Clone()); err != nil {
 				return fmt.Errorf("start WebTransport server: %w", err)
 			}
 			webTransportStarted = true
@@ -425,7 +425,7 @@ func (s *Server) Start() error {
 	}
 
 	if strings.HasPrefix(s.Config.ListenAddr, "wt://") || strings.HasPrefix(s.Config.ListenAddr, "wts://") {
-		if err := s.wtServer.Start(bindAddr, nil); err != nil {
+		if err := s.wtServer.Start(wtBindAddr(bindAddr, ln.Addr()), nil); err != nil {
 			return fmt.Errorf("start WebTransport server: %w", err)
 		}
 		webTransportStarted = true
@@ -680,6 +680,16 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 	}
 
 	slog.Warn("Unsupported protocol (gorilla)", "proto", claims.Protocol)
+}
+
+// wtBindAddr is where the WebTransport (UDP) listener binds. For a configured
+// port of 0 that is the port the TCP listener was given, so both listen at the
+// address the server logs; otherwise it is the configured address as it was.
+func wtBindAddr(configured string, tcp net.Addr) string {
+	if _, port, err := net.SplitHostPort(configured); err == nil && port == "0" {
+		return tcp.String()
+	}
+	return configured
 }
 
 // h2HeaderFlushTimeout bounds sending the held reply of a reverse SOCKS5 request

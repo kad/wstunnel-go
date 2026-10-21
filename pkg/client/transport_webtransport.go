@@ -23,6 +23,9 @@ type WebTransportClient struct {
 	client *Client
 	mu     sync.Mutex
 	sess   *webtransport.Session
+	// dialing is the session being dialed, if any, shared by the callers waiting
+	// for it.
+	dialing *wtDial
 	// sessPinKey records the pinned server addresses sess was dialed for.
 	sessPinKey string
 }
@@ -31,7 +34,112 @@ func NewWebTransportClient(client *Client) *WebTransportClient {
 	return &WebTransportClient{client: client}
 }
 
-func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (io.ReadWriteCloser, *http.Response, error) {
+// wtDial is a session being dialed, shared by the callers that wait for it.
+type wtDial struct {
+	done chan struct{}
+	sess *webtransport.Session
+	resp *http.Response
+	err  error
+}
+
+// session returns the cached session, or dials one. The dial runs on its own
+// and is shared, so a caller whose ctx ends stops waiting for it without
+// aborting it for the others.
+func (w *WebTransportClient) session(ctx context.Context, u *url.URL, host string, isTLS bool, pinKey string) (*webtransport.Session, *http.Response, error) {
+	for {
+		w.mu.Lock()
+		sess := w.sess
+		if sess != nil && !sessionReusable(sess, w.sessPinKey, pinKey) {
+			// A session whose QUIC connection is gone would fail the first stream
+			// open; one dialed for server addresses that are no longer pinned still
+			// talks to an address whose packets now follow the tunnel's own routes.
+			// Dial a fresh one.
+			if !sessionDead(sess) {
+				_ = sess.CloseWithError(0, "server addresses changed")
+			}
+			w.sess = nil
+			sess = nil
+		}
+		if sess != nil {
+			w.mu.Unlock()
+			return sess, nil, nil
+		}
+		d := w.dialing
+		if d == nil {
+			tr, headers, err := w.newTransport(u, host, isTLS)
+			if err != nil {
+				w.mu.Unlock()
+				return nil, nil, err
+			}
+			d = &wtDial{done: make(chan struct{})}
+			w.dialing = d
+			target := u.String()
+			go func() {
+				resp, sess, err := tr.Dial(context.Background(), target, headers)
+				w.mu.Lock()
+				if err == nil {
+					w.sess = sess
+					w.sessPinKey = pinKey
+				}
+				w.dialing = nil
+				d.sess, d.resp, d.err = sess, resp, err
+				w.mu.Unlock()
+				close(d.done)
+			}()
+		}
+		w.mu.Unlock()
+
+		select {
+		case <-d.done:
+			if d.err != nil {
+				return nil, d.resp, fmt.Errorf("failed to dial WebTransport session: %w", d.err)
+			}
+		case <-ctx.Done():
+			return nil, nil, ctx.Err()
+		}
+	}
+}
+
+// newTransport builds the WebTransport transport and request headers for dialing
+// a session.
+func (w *WebTransportClient) newTransport(u *url.URL, host string, isTLS bool) (*webtransport.Transport, http.Header, error) {
+	var tlsConfig *tls.Config
+	if isTLS {
+		var err error
+		tlsConfig, err = w.client.tlsClientConfig(host)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		tlsConfig = &tls.Config{InsecureSkipVerify: true}
+	}
+	if tlsConfig.NextProtos == nil {
+		tlsConfig.NextProtos = []string{"h3"}
+	}
+
+	tr := &webtransport.Transport{
+		TLSClientConfig: tlsConfig,
+		QUICConfig:      newWebTransportQUICConfig(),
+	}
+	if w.client.socketMark() != 0 || w.client.pinnedTargets(u.Host) != nil {
+		// Own dial: marks the socket and/or dials the cached server addresses.
+		tr.DialAddr = w.dialMarkedAddr
+	}
+
+	headers := http.Header{}
+	for k, v := range w.client.Config.Headers {
+		headers.Set(k, v)
+	}
+	for k, v := range w.client.loadHttpHeaders() {
+		headers.Set(k, v)
+	}
+	if w.client.Config.HttpUpgradeCredentials != "" {
+		headers.Set("Authorization", w.client.Config.HttpUpgradeCredentials)
+	}
+	return tr, headers, nil
+}
+
+func (w *WebTransportClient) Connect(ctx context.Context, p protocol.LocalProtocol, remoteHost string, remotePort uint16) (io.ReadWriteCloser, *http.Response, error) {
 	requestID := uuid.New().String()
 	token, err := w.client.generateJWT(requestID, p, remoteHost, remotePort)
 	if err != nil {
@@ -58,85 +166,48 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 	u.Scheme = "https"
 	u.Path = fmt.Sprintf("/%s/events", w.client.Config.PathPrefix)
 
-	ctx := context.Background()
-
-	w.mu.Lock()
-	sess := w.sess
 	pinKey := strings.Join(w.client.pinnedTargets(u.Host), ",")
-	if sess != nil && !sessionReusable(sess, w.sessPinKey, pinKey) {
-		// A session whose QUIC connection is gone would fail the first stream
-		// open; one dialed for server addresses that are no longer pinned still
-		// talks to an address whose packets now follow the tunnel's own routes.
-		// Dial a fresh one.
-		if !sessionDead(sess) {
-			_ = sess.CloseWithError(0, "server addresses changed")
-		}
-		w.sess = nil
-		sess = nil
+	sess, resp0, err := w.session(ctx, u, host, isTLS, pinKey)
+	if err != nil {
+		return nil, resp0, err
 	}
-	if sess == nil {
-		var tlsConfig *tls.Config
-		if isTLS {
-			var err error
-			tlsConfig, err = w.client.tlsClientConfig(host)
-			if err != nil {
-				w.mu.Unlock()
-				return nil, nil, err
-			}
-		} else {
-			tlsConfig = &tls.Config{InsecureSkipVerify: true}
-		}
-		if tlsConfig.NextProtos == nil {
-			tlsConfig.NextProtos = []string{"h3"}
-		}
-
-		tr := &webtransport.Transport{
-			TLSClientConfig: tlsConfig,
-			QUICConfig:      newWebTransportQUICConfig(),
-		}
-		if w.client.socketMark() != 0 || w.client.pinnedTargets(u.Host) != nil {
-			// Own dial: marks the socket and/or dials the cached server addresses.
-			tr.DialAddr = w.dialMarkedAddr
-		}
-
-		headers := http.Header{}
-		for k, v := range w.client.Config.Headers {
-			headers.Set(k, v)
-		}
-		for k, v := range w.client.loadHttpHeaders() {
-			headers.Set(k, v)
-		}
-		if w.client.Config.HttpUpgradeCredentials != "" {
-			headers.Set("Authorization", w.client.Config.HttpUpgradeCredentials)
-		}
-
-		var resp *http.Response
-		resp, sess, err = tr.Dial(ctx, u.String(), headers)
-		if err != nil {
-			w.mu.Unlock()
-			return nil, resp, fmt.Errorf("failed to dial WebTransport session: %w", err)
-		}
-		w.sess = sess
-		w.sessPinKey = pinKey
-	}
-	w.mu.Unlock()
 
 	stream, err := sess.OpenStreamSync(ctx)
 	if err != nil {
+		// A caller that gave up, or a session that is full for now, says nothing
+		// about the session; forget it only if its connection is gone.
 		w.mu.Lock()
-		w.sess = nil
+		if w.sess == sess && sessionDead(sess) {
+			w.sess = nil
+		}
 		w.mu.Unlock()
 		return nil, nil, fmt.Errorf("failed to open WebTransport stream: %w", err)
 	}
 
+	// ctx ending aborts both directions of the stream, which frees a preamble
+	// write that waits for flow control and a target read that waits for a
+	// visitor. The watcher is disarmed before the stream is handed over.
+	stopWatch := context.AfterFunc(ctx, func() {
+		stream.CancelRead(0)
+		stream.CancelWrite(0)
+	})
+	fail := func(err error) error {
+		stopWatch()
+		if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
+			return fmt.Errorf("%w: %w", cerr, err)
+		}
+		return err
+	}
+
 	if err := protocol.WriteJWTStreamPreamble(stream, token); err != nil {
 		_ = stream.Close()
-		return nil, nil, fmt.Errorf("failed to write JWT preamble: %w", err)
+		return nil, nil, fail(fmt.Errorf("failed to write JWT preamble: %w", err))
 	}
 
 	var rwc io.ReadWriteCloser = stream
 	if p.Udp != nil || p.ReverseUdp != nil {
-		rwc = protocol.NewFramedUDPReadWriteCloser(stream)
+		// Closing the tunnel must also end a read that is blocked on it.
+		rwc = protocol.NewFramedUDPReadWriteCloser(reverseStream{stream})
 	}
 
 	var resp *http.Response
@@ -155,11 +226,20 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 			stream.CancelWrite(0)
 			// The stream is open, so a timeout here is the server waiting for a
 			// visitor.
-			return nil, nil, fmt.Errorf("failed to read the target from the server: %w", markReplyTimeout(err, true))
+			return nil, nil, fail(fmt.Errorf("failed to read the target from the server: %w", markReplyTimeout(err, true)))
 		}
 		resp = &http.Response{Header: http.Header{"Cookie": []string{jwtStr}}}
+		// A UDP target is carried one datagram per frame, as in forward UDP;
+		// on a plain stream neighbouring datagrams would merge.
+		if _, _, proto, ok := parseTargetCookie(jwtStr); ok && proto.Udp != nil {
+			rwc = protocol.NewFramedUDPReadWriteCloser(reverseStream{stream})
+		}
 	}
 
+	if !stopWatch() {
+		// ctx ended after all and the watcher has aborted the stream.
+		return nil, nil, fmt.Errorf("failed to open WebTransport stream: %w", ctx.Err())
+	}
 	return rwc, resp, nil
 }
 

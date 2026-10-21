@@ -10,6 +10,7 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"fmt"
+	"github.com/golang-jwt/jwt/v5"
 	"io"
 	"log/slog"
 	"math/big"
@@ -311,8 +312,14 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 		defer func() { _ = base.Close() }()
 		if err := w.server.rvMgr.HandleDynamicClient(claims, lazyUpgrade{stream: func(extra http.Header) (io.ReadWriteCloser, error) {
 			stopWatching() // the pipe reads the stream from here on
-			if err := writePreamble(stream, extra.Get("Cookie"), webTransportAuthTimeout); err != nil {
+			cookie := extra.Get("Cookie")
+			if err := writePreamble(stream, cookie, webTransportAuthTimeout); err != nil {
 				return nil, err
+			}
+			// A UDP target is carried one datagram per frame; the client frames
+			// its end the same way.
+			if cookieNamesUDP(cookie) {
+				return protocol.NewFramedUDPReadWriteCloser(base), nil
 			}
 			return base, nil
 		}}, gone); err != nil {
@@ -333,6 +340,15 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 	}
 
 	slog.Warn("WebTransport unsupported protocol target", "protocol", claims.Protocol)
+}
+
+// cookieNamesUDP reports whether a target cookie names a UDP target.
+func cookieNamesUDP(cookie string) bool {
+	claims := &protocol.JwtTunnelConfig{}
+	if _, _, err := jwt.NewParser().ParseUnverified(cookie, claims); err != nil {
+		return false
+	}
+	return claims.Protocol.Udp != nil
 }
 
 // preambleStream is the part of a stream that writePreamble needs.

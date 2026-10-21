@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -172,6 +173,16 @@ func (c *Client) dialViaHTTPProxy(ctx context.Context, d *net.Dialer, network, a
 		return nil, fmt.Errorf("failed to connect to http proxy: %w", err)
 	}
 
+	// Ending ctx closes the socket, which frees a CONNECT waiting for the proxy.
+	stopWatch := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopWatch()
+	withReason := func(err error) error {
+		if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
+			return fmt.Errorf("%w: %w", cerr, err)
+		}
+		return err
+	}
+
 	user, pass := c.Config.HttpProxyLogin, c.Config.HttpProxyPassword
 	if user == "" && pu.User != nil {
 		user = pu.User.Username()
@@ -195,13 +206,13 @@ func (c *Client) dialViaHTTPProxy(ctx context.Context, d *net.Dialer, network, a
 	_ = conn.SetDeadline(deadline)
 	if err := req.Write(conn); err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("http proxy CONNECT write failed: %w", err)
+		return nil, withReason(fmt.Errorf("http proxy CONNECT write failed: %w", err))
 	}
 	br := bufio.NewReader(conn)
 	resp, err := http.ReadResponse(br, req)
 	if err != nil {
 		_ = conn.Close()
-		return nil, fmt.Errorf("http proxy CONNECT failed: %w", err)
+		return nil, withReason(fmt.Errorf("http proxy CONNECT failed: %w", err))
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {

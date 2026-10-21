@@ -27,7 +27,7 @@ func TestReverseBurst(t *testing.T) {
 	}
 	tc := reverseCase{name: "Go-Go-WS", serverBin: goBinary, clientBin: goBinary, scheme: "ws"}
 	host := "127.0.0.1"
-	serverPort, _ := findFreeTCPPort(host)
+	serverPort, _ := findFreeTCPUDPPort(host)
 	targetPort, _ := findFreeTCPPort(host)
 	revPort, _ := findFreeTCPPort(host)
 	echo, err := runEchoServer(targetPort)
@@ -67,8 +67,8 @@ func TestReverseBurst(t *testing.T) {
 				return
 			}
 			ok.Add(1)
-			if d := time.Since(t0).Milliseconds(); d > slowest.Load() {
-				slowest.Store(d)
+			d := time.Since(t0).Milliseconds()
+			for cur := slowest.Load(); d > cur && !slowest.CompareAndSwap(cur, d); cur = slowest.Load() {
 			}
 		}()
 	}

@@ -35,8 +35,10 @@ type tunnelListener struct {
 	addr      string
 	isUnix    bool
 	protocol  protocol.LocalProtocol
-	ln        net.Listener   // reverse TCP and Unix
-	pc        net.PacketConn // reverse UDP
+	ln        net.Listener             // reverse TCP and Unix
+	pc        net.PacketConn           // reverse UDP
+	relay     net.PacketConn           // UDP relay of a reverse SOCKS5 listener, if it could be bound
+	assoc     protocol.UDPAssociations // senders with an authenticated UDP association, for a relay that asks for credentials
 	waiting   []*waitingConn
 	waitCap   int
 	queueMu   sync.Mutex
@@ -279,6 +281,10 @@ func (m *ReverseTunnelManager) closeTunnelListener(tl *tunnelListener, closeList
 	}
 	if closeListener && tl.pc != nil {
 		_ = tl.pc.Close()
+	}
+	// The relay lives and dies with the TCP listener.
+	if tl.relay != nil {
+		_ = tl.relay.Close()
 	}
 }
 
@@ -616,6 +622,16 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 				return nil, bindAddr, err
 			}
 			tl.ln = ln
+			if claims.Protocol.ReverseSocks5 != nil {
+				// UDP ASSOCIATE needs a UDP socket at the same address. Without
+				// one the listener still serves CONNECT.
+				relay, err := lc.ListenPacket(context.Background(), "udp", ln.Addr().String())
+				if err != nil {
+					slog.Warn("Reverse SOCKS5: no UDP relay, UDP ASSOCIATE is refused", "addr", bindAddr, "err", err)
+				} else {
+					tl.relay = relay
+				}
+			}
 		}
 		tl.queueCond = sync.NewCond(&tl.queueMu)
 		m.listeners[bindAddr] = tl
@@ -623,6 +639,9 @@ func (m *ReverseTunnelManager) getOrCreateListener(claims *protocol.JwtTunnelCon
 			go m.runUDPListener(tl)
 		} else {
 			go m.runListener(tl)
+			if tl.relay != nil {
+				go m.runSocks5UDPRelay(tl, tl.relay)
+			}
 		}
 	}
 	tl.lastUsed = time.Now()
@@ -762,9 +781,37 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	reply := func(bool) error { return nil }
 	switch {
 	case tl.protocol.ReverseSocks5 != nil:
-		targetHost, targetPort, err = readSocks5Request(conn, tl.protocol.ReverseSocks5.Credentials)
+		var cmd byte
+		cmd, targetHost, targetPort, err = readSocks5Command(conn, tl.protocol.ReverseSocks5.Credentials)
 		if err != nil {
 			slog.Warn("Reverse SOCKS5 handshake failed", "err", err)
+			return
+		}
+		if cmd == socks5CmdUDPAssociate {
+			// Datagrams go to the relay socket, not through this connection,
+			// which only says how long the association lasts.
+			if tl.relay == nil {
+				_ = socks5Reply(conn, socks5CommandNotSupported)
+				return
+			}
+			// Registered before the reply: the visitor may send its first
+			// datagram as soon as it has read it.
+			release := tl.assoc.Add(protocol.AddrIP(conn.RemoteAddr()))
+			defer release()
+			if err := socks5ReplyAddr(conn, socks5Succeeded, relayAddrFor(tl.relay.LocalAddr(), conn.LocalAddr())); err != nil {
+				return
+			}
+			// The association ends with this connection, or with the listener.
+			over := make(chan struct{})
+			defer close(over)
+			go func() {
+				select {
+				case <-tl.quit:
+					_ = conn.Close()
+				case <-over:
+				}
+			}()
+			_, _ = io.Copy(io.Discard, conn)
 			return
 		}
 		reply = func(ok bool) error {
@@ -815,7 +862,7 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	if dynamic {
 		// The client's request was held for this: answer it now, with the
 		// target the visitor asked for, then tell the visitor it is connected.
-		if err := m.answerHeldRequest(wait, targetHost, targetPort); err != nil {
+		if err := m.answerHeldRequest(wait, targetHost, targetPort, false); err != nil {
 			slog.Warn("Reverse tunnel: cannot hand the connection to the client", "addr", tl.addr, "err", err)
 			_ = reply(false)
 			wait.finish(true)

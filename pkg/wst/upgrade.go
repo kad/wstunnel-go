@@ -7,6 +7,7 @@ import (
 	"crypto/sha1"
 	"crypto/tls"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -162,6 +163,12 @@ var DefaultDialer = &Dialer{
 }
 
 func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, error) {
+	return d.DialContext(context.Background(), uStr, header)
+}
+
+// DialContext is Dial that gives up, and closes what it has opened, when ctx is
+// done before the handshake is.
+func (d *Dialer) DialContext(ctx context.Context, uStr string, header http.Header) (*Conn, *http.Response, error) {
 	u, err := url.Parse(uStr)
 	if err != nil {
 		return nil, nil, err
@@ -180,7 +187,6 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 	addr := net.JoinHostPort(host, port)
 
 	// Create context with timeout
-	ctx := context.Background()
 	if d.HandshakeTimeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, d.HandshakeTimeout)
@@ -196,6 +202,21 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 	}
 	if err != nil {
 		return nil, nil, err
+	}
+	// Closing the connection when ctx ends unblocks the handshake reads and
+	// writes below; it is disarmed once the handshake is through.
+	// The original connection is captured: conn is replaced by the TLS wrapper
+	// below, and closing the socket interrupts TLS as well.
+	raw := conn
+	stopWatch := context.AfterFunc(ctx, func() { _ = raw.Close() })
+	defer stopWatch()
+	// A handshake cut short by ctx fails with a "closed connection" error, which
+	// says nothing about why. Keep the reason, so a timeout stays a timeout.
+	fail := func(err error) error {
+		if cerr := ctx.Err(); cerr != nil && !errors.Is(err, cerr) {
+			return fmt.Errorf("%w: %w", cerr, err)
+		}
+		return err
 	}
 
 	// Re-checking client.go logic:
@@ -222,7 +243,7 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 		tlsConn := tls.Client(conn, tlsConfig)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			_ = conn.Close()
-			return nil, nil, err
+			return nil, nil, fail(err)
 		}
 		conn = tlsConn
 	}
@@ -243,7 +264,7 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 	}
 	if _, err := conn.Write([]byte(req)); err != nil {
 		_ = conn.Close()
-		return nil, nil, err
+		return nil, nil, fail(err)
 	}
 	_ = conn.SetWriteDeadline(time.Time{}) // Clear deadline
 
@@ -255,7 +276,7 @@ func (d *Dialer) Dial(uStr string, header http.Header) (*Conn, *http.Response, e
 	resp, err := http.ReadResponse(br, &http.Request{Method: "GET"})
 	if err != nil {
 		_ = conn.Close()
-		return nil, nil, err
+		return nil, nil, fail(err)
 	}
 	_ = conn.SetReadDeadline(time.Time{}) // Clear deadline
 

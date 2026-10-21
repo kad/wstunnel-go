@@ -133,11 +133,11 @@ func (w *waitingConn) completeUpgrade(extra http.Header) error {
 
 // answerHeldRequest completes the held upgrade of a waiting request, with the
 // visitor's target in the Cookie header.
-func (m *ReverseTunnelManager) answerHeldRequest(wait *waitingConn, host string, port uint16) error {
+func (m *ReverseTunnelManager) answerHeldRequest(wait *waitingConn, host string, port uint16, udp bool) error {
 	if wait.lazy == nil {
 		return errors.New("the client connection was already upgraded and cannot carry a target")
 	}
-	cookie, err := m.targetCookie(host, port)
+	cookie, err := m.targetCookie(host, port, udp)
 	if err != nil {
 		return err
 	}
@@ -162,19 +162,41 @@ const (
 // request. It sends no reply to the request: that waits until a client has
 // taken the connection.
 func readSocks5Request(conn net.Conn, creds *protocol.Credentials) (host string, port uint16, err error) {
+	cmd, host, port, err := readSocks5Command(conn, creds)
+	if err != nil {
+		return "", 0, err
+	}
+	if cmd != socks5CmdConnect {
+		_ = socks5Reply(conn, socks5CommandNotSupported)
+		return "", 0, fmt.Errorf("unsupported socks command: %d", cmd)
+	}
+	return host, port, nil
+}
+
+const (
+	socks5CmdConnect      = 0x01
+	socks5CmdUDPAssociate = 0x03
+)
+
+// readSocks5Command performs the SOCKS5 greeting (with username and password
+// when the tunnel was set up with credentials) and reads the visitor's command.
+// It sends no reply to a CONNECT: that waits until a client has taken the
+// connection. A command that is neither CONNECT nor UDP ASSOCIATE is returned
+// as read, for the caller to refuse.
+func readSocks5Command(conn net.Conn, creds *protocol.Credentials) (cmd byte, host string, port uint16, err error) {
 	_ = conn.SetDeadline(time.Now().Add(socks5HandshakeTimeout))
 	defer func() { _ = conn.SetDeadline(time.Time{}) }()
 	buf := make([]byte, 256)
 
 	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 	if buf[0] != 0x05 {
-		return "", 0, fmt.Errorf("invalid socks version: %d", buf[0])
+		return 0, "", 0, fmt.Errorf("invalid socks version: %d", buf[0])
 	}
 	nmethods := int(buf[1])
 	if _, err := io.ReadFull(conn, buf[:nmethods]); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 	offers := func(method byte) bool {
 		for _, m := range buf[:nmethods] {
@@ -188,69 +210,71 @@ func readSocks5Request(conn net.Conn, creds *protocol.Credentials) (host string,
 	if creds != nil {
 		if !offers(0x02) {
 			_, _ = conn.Write([]byte{0x05, 0xFF})
-			return "", 0, errors.New("socks5 client offered no username and password method")
+			return 0, "", 0, errors.New("socks5 client offered no username and password method")
 		}
 		if _, err := conn.Write([]byte{0x05, 0x02}); err != nil {
-			return "", 0, err
+			return 0, "", 0, err
 		}
 		if err := readSocks5Credentials(conn, creds); err != nil {
-			return "", 0, err
+			return 0, "", 0, err
 		}
 	} else {
 		if !offers(0x00) {
 			_, _ = conn.Write([]byte{0x05, 0xFF})
-			return "", 0, errors.New("socks5 client offered no unauthenticated method")
+			return 0, "", 0, errors.New("socks5 client offered no unauthenticated method")
 		}
 		if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-			return "", 0, err
+			return 0, "", 0, err
 		}
 	}
 
 	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 	if buf[0] != 0x05 {
-		return "", 0, fmt.Errorf("invalid socks version: %d", buf[0])
+		return 0, "", 0, fmt.Errorf("invalid socks version: %d", buf[0])
 	}
-	if buf[1] != 0x01 { // CONNECT only
+	cmd = buf[1]
+	if cmd != socks5CmdConnect && cmd != socks5CmdUDPAssociate {
 		_ = socks5Reply(conn, socks5CommandNotSupported)
-		return "", 0, fmt.Errorf("unsupported socks command: %d", buf[1])
+		return 0, "", 0, fmt.Errorf("unsupported socks command: %d", cmd)
 	}
 	switch buf[3] {
 	case 0x01:
 		if _, err := io.ReadFull(conn, buf[:4]); err != nil {
-			return "", 0, err
+			return 0, "", 0, err
 		}
 		host = net.IP(buf[:4]).String()
 	case 0x03:
 		if _, err := io.ReadFull(conn, buf[:1]); err != nil {
-			return "", 0, err
+			return 0, "", 0, err
 		}
 		sz := int(buf[0])
 		if _, err := io.ReadFull(conn, buf[:sz]); err != nil {
-			return "", 0, err
+			return 0, "", 0, err
 		}
 		host = string(buf[:sz])
 	case 0x04:
 		if _, err := io.ReadFull(conn, buf[:16]); err != nil {
-			return "", 0, err
+			return 0, "", 0, err
 		}
 		host = net.IP(buf[:16]).String()
 	default:
 		_ = socks5Reply(conn, socks5AddrNotSupported)
-		return "", 0, fmt.Errorf("unsupported address type: %d", buf[3])
+		return 0, "", 0, fmt.Errorf("unsupported address type: %d", buf[3])
 	}
 	if _, err := io.ReadFull(conn, buf[:2]); err != nil {
-		return "", 0, err
+		return 0, "", 0, err
 	}
 	port = binary.BigEndian.Uint16(buf[:2])
-	// The client could not dial such a target, and would back off from the
-	// server for it. Refuse it here, where only this visitor is affected.
-	if host == "" || port == 0 {
+	// A CONNECT target the client could not dial would make it back off from the
+	// server. Refuse it here, where only this visitor is affected. (UDP ASSOCIATE
+	// names the address the visitor sends from, usually 0.0.0.0:0.)
+	if cmd == socks5CmdConnect && (host == "" || port == 0) {
 		_ = socks5Reply(conn, socks5GeneralFailure)
-		return "", 0, fmt.Errorf("invalid socks target %q port %d", host, port)
+		return 0, "", 0, fmt.Errorf("invalid socks target %q port %d", host, port)
 	}
-	return host, port, nil
+	return cmd, host, port, nil
 }
 
 func digest(b []byte) []byte {
@@ -295,16 +319,20 @@ func readSocks5Credentials(conn net.Conn, creds *protocol.Credentials) error {
 // tunnel_to_jwt_token produces. Every client reads it without checking the
 // signature. An IPv6 address is bracketed because Rust parses the host as a URL
 // host.
-func (m *ReverseTunnelManager) targetCookie(host string, port uint16) (string, error) {
+func (m *ReverseTunnelManager) targetCookie(host string, port uint16, udp bool) (string, error) {
 	if m.signCookie == nil {
 		return "", errors.New("no signer for the target cookie")
 	}
 	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
 		host = "[" + host + "]"
 	}
+	proto := protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{ProxyProtocol: false}}
+	if udp {
+		proto = protocol.LocalProtocol{Udp: &protocol.UdpProtocol{}}
+	}
 	claims := protocol.JwtTunnelConfig{
 		ID:       "00000000-0000-0000-0000-000000000000",
-		Protocol: protocol.LocalProtocol{Tcp: &protocol.TcpProtocol{ProxyProtocol: false}},
+		Protocol: proto,
 		Remote:   host,
 		Port:     port,
 	}

@@ -2,6 +2,8 @@ package wst
 
 import (
 	"bufio"
+	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -93,4 +95,43 @@ func TestUpgradeGivesUpOnStalledClient(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Upgrade is still blocked on a client that does not read")
 	}
+}
+
+// A handshake that is cut short by its context fails with the context's reason,
+// so a timeout can be told from a refusal.
+func TestDialContextKeepsTheReasonItWasCutShort(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer func() { _ = c.Close() }() // answers nothing
+		}
+	}()
+	url := "ws://" + ln.Addr().String() + "/x"
+
+	t.Run("handshake timeout", func(t *testing.T) {
+		d := &Dialer{HandshakeTimeout: 200 * time.Millisecond}
+		_, _, err := d.DialContext(context.Background(), url, nil)
+		var ne net.Error
+		timeout := errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())
+		if !timeout {
+			t.Fatalf("err = %v, want a timeout", err)
+		}
+	})
+	t.Run("cancelled", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		go func() { time.Sleep(200 * time.Millisecond); cancel() }()
+		d := &Dialer{HandshakeTimeout: 5 * time.Second}
+		_, _, err := d.DialContext(ctx, url, nil)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context.Canceled", err)
+		}
+	})
 }
