@@ -2,7 +2,10 @@ package server
 
 import (
 	"bytes"
+	"log/slog"
 	"net"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -341,4 +344,50 @@ func TestReverseUDPOversizedClientMessageEndsSession(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("the session survived an oversized message")
 	}
+}
+
+// A reverse listener asked to bind port 0 logs the port it got.
+func TestReverseListenerLogsBoundAddress(t *testing.T) {
+	var buf syncBuffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+
+	mgr := NewReverseTunnelManager(0, time.Minute)
+	t.Cleanup(mgr.Close)
+	tl, _, err := mgr.getOrCreateListener(&protocol.JwtTunnelConfig{
+		ID: "bound", Remote: "127.0.0.1", Port: 0,
+		Protocol: protocol.LocalProtocol{ReverseTcp: &struct{}{}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "bound=" + tl.ln.Addr().String()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && !strings.Contains(buf.String(), want) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !strings.Contains(buf.String(), want) {
+		t.Fatalf("log %q lacks %q", buf.String(), want)
+	}
+	if strings.HasSuffix(tl.ln.Addr().String(), ":0") {
+		t.Fatal("the listener did not get a real port")
+	}
+}
+
+type syncBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (s *syncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.Write(p)
+}
+
+func (s *syncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.b.String()
 }

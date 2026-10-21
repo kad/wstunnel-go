@@ -649,7 +649,7 @@ func (c *Client) runUnixTunnel(ltr *protocol.LocalToRemote) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	slog.Info("Unix Listener started", "path", ltr.Local, "server", c.Config.ServerURL)
+	slog.Info("Unix Listener started", "path", listener.Addr().String(), "server", c.Config.ServerURL)
 
 	for {
 		conn, err := listener.Accept()
@@ -926,7 +926,7 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	slog.Info("SOCKS5 Listener started", "local", ltr.Local, "server", c.Config.ServerURL)
+	slog.Info("SOCKS5 Listener started", "local", listener.Addr().String(), "server", c.Config.ServerURL)
 
 	for {
 		conn, err := listener.Accept()
@@ -974,7 +974,7 @@ func (c *Client) runHttpProxyTunnel(ltr *protocol.LocalToRemote) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	slog.Info("HTTP Proxy Listener started", "local", ltr.Local, "server", c.Config.ServerURL)
+	slog.Info("HTTP Proxy Listener started", "local", listener.Addr().String(), "server", c.Config.ServerURL)
 
 	for {
 		conn, err := listener.Accept()
@@ -1307,7 +1307,7 @@ func (c *Client) runTcpTunnel(ltr *protocol.LocalToRemote) {
 	}
 	defer func() { _ = listener.Close() }()
 
-	slog.Info("TCP Listener started", "local", ltr.Local, "remote", ltr.Remote, "port", ltr.Port)
+	slog.Info("TCP Listener started", "local", listener.Addr().String(), "remote", ltr.Remote, "port", ltr.Port)
 
 	for {
 		conn, err := listener.Accept()
@@ -1342,7 +1342,7 @@ func (c *Client) runUdpTunnel(ltr *protocol.LocalToRemote) {
 	}
 	defer func() { _ = conn.Close() }()
 
-	slog.Info("UDP Listener started", "local", ltr.Local, "remote", ltr.Remote, "port", ltr.Port)
+	slog.Info("UDP Listener started", "local", conn.LocalAddr().String(), "remote", ltr.Remote, "port", ltr.Port)
 
 	clients := make(map[string]*tunnelStream)
 	var mu sync.Mutex
