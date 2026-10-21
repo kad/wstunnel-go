@@ -5,19 +5,25 @@
 # and pkg/caddy (which carries its own go.mod and a replace back to the root).
 version: 2
 updates:
+  # One grouped update across both modules. pkg/caddy replaces the root module with
+  # the local checkout, so a bump of a shared dependency (x/net, quic-go) in the
+  # root alone leaves pkg/caddy's go.mod and go.sum stale, and the caddy lint job
+  # fails with "updates to go.mod needed". Updating both directories in one pull
+  # request lets Dependabot tidy pkg/caddy against the bumped root. When it still
+  # opens a PR that fails that way, run `make update-deps` (or `make tidy tidy-caddy`
+  # on the PR branch) and push.
   - package-ecosystem: "gomod"
-    directory: "/"
+    directories:
+      - "/"
+      - "/pkg/caddy"
     schedule:
       interval: "weekly"
     commit-message:
       prefix: "build(deps)"
-
-  - package-ecosystem: "gomod"
-    directory: "/pkg/caddy"
-    schedule:
-      interval: "weekly"
-    commit-message:
-      prefix: "build(deps)"
+    groups:
+      go-modules:
+        patterns:
+          - "*"
     ignore:
       # cel-go is an indirect dependency that Caddy's celmatcher compiles
       # against directly, so it must track the Caddy release. Bumping it ahead
@@ -25,6 +31,15 @@ updates:
       # interpreter.NewCall, which Caddy 2.11.4 did not compile against).
       # Caddy now imports it as cel.dev/cel-go; let a Caddy upgrade move it.
       - dependency-name: "cel.dev/cel-go"
+      # gvisor is pinned to a pseudo-version, and the newest commit of its master
+      # branch does not always build (it did not on 2026-10-21). Bump it by hand,
+      # as `make update-deps` does not touch it either. Limiting the ignore to the
+      # version-update types keeps security updates coming.
+      - dependency-name: "gvisor.dev/gvisor"
+        update-types:
+          - "version-update:semver-major"
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
 
   - package-ecosystem: "github-actions"
     directory: "/"
