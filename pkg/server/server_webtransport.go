@@ -256,7 +256,7 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 	// both directions.
 	var base io.ReadWriteCloser = stream
 	if claims.Protocol.ReverseTcp != nil || claims.Protocol.ReverseUnix != nil ||
-		claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseSocks5 != nil {
+		claims.Protocol.ReverseUdp != nil || claims.Protocol.ReverseDynamic() {
 		base = tunStream{stream}
 	}
 	streamRWC := base
@@ -297,7 +297,7 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 	}
 
 	// Reverse Tunnel
-	if claims.Protocol.ReverseSocks5 != nil {
+	if claims.Protocol.ReverseDynamic() {
 		// The target the visitor asked for reaches the client as a JWT preamble
 		// on the stream, once a visitor has asked for one.
 		// A stream has no request context to tell that its client gave up and
@@ -329,10 +329,6 @@ func (w *WebTransportServer) handleStream(stream *webtransport.Stream, request w
 			parked = protocol.NewFramedUDPReadWriteCloser(watched)
 		}
 		w.server.rvMgr.HandleClientH2(parked, claims, eitherDone(stream.Context().Done(), watched.Gone()))
-		return
-	}
-	if claims.Protocol.ReverseHttpProxy != nil {
-		slog.Warn("WebTransport unsupported reverse protocol", "protocol", claims.Protocol)
 		return
 	}
 

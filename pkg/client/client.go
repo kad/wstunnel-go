@@ -739,7 +739,7 @@ var reverseReplyTimeout = 30 * time.Second
 // until a visitor shows up. A Rust server does so for every reverse tunnel,
 // and a Go one for reverse SOCKS5, whose reply carries the visitor's target.
 func holdsReply(p protocol.LocalProtocol) bool {
-	return p.ReverseTcp != nil || p.ReverseUdp != nil || p.ReverseSocks5 != nil
+	return p.ReverseTcp != nil || p.ReverseUdp != nil || p.ReverseDynamic()
 }
 
 // replyTimeout is how long a request for p may wait for the server's reply.
@@ -1038,11 +1038,6 @@ func (c *Client) handleHttpProxy(conn net.Conn, ltr *protocol.LocalToRemote) {
 }
 
 func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
-	if ltr.Protocol.ReverseHttpProxy != nil {
-		slog.Error("Reverse tunnel protocol is not implemented", "protocol", ltr.Protocol)
-		return
-	}
-
 	maxDelay := c.Config.ReverseTunnelConnectionRetryMaxBackoff
 	if maxDelay == 0 {
 		maxDelay = 10 * time.Second
@@ -1051,7 +1046,7 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 	// The server listens on the address carried in the JWT, so for reverse TCP
 	// that is the bind side of the argument; the target is dialed locally.
 	listenHost, listenPort := ltr.Remote, ltr.Port
-	if ltr.Protocol.ReverseTcp != nil || ltr.Protocol.ReverseUdp != nil || ltr.Protocol.ReverseSocks5 != nil {
+	if ltr.Protocol.ReverseTcp != nil || ltr.Protocol.ReverseUdp != nil || ltr.Protocol.ReverseDynamic() {
 		h, ps, err := net.SplitHostPort(ltr.Local)
 		pn, perr := strconv.ParseUint(ps, 10, 16)
 		if err != nil || perr != nil {
@@ -1064,7 +1059,7 @@ func (c *Client) StartReverseTunnel(ltr *protocol.LocalToRemote) {
 	// A SOCKS5 tunnel names its target per visitor, so the server answers the
 	// request only when a visitor has asked for something. That reply can take as
 	// long as there is no visitor, and running out of patience is not a failure.
-	dynamic := ltr.Protocol.ReverseSocks5 != nil
+	dynamic := ltr.Protocol.ReverseDynamic()
 
 	for {
 		c.reverseBackoff.wait()

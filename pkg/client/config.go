@@ -205,7 +205,7 @@ func ParseTunnelArg(arg string, isReverse bool) (*protocol.LocalToRemote, error)
 		}
 	case "http":
 		if isReverse {
-			return nil, fmt.Errorf("reverse HTTP proxy tunnels are not implemented")
+			ltr.Protocol = protocol.LocalProtocol{ReverseHttpProxy: &protocol.ReverseHttpProxyProtocol{Timeout: getTimeout(), Credentials: getCredentials()}}
 		} else {
 			ltr.Protocol = protocol.LocalProtocol{HttpProxy: &protocol.HttpProxyProtocol{Timeout: getTimeout(), Credentials: getCredentials(), ProxyProtocol: getProxyProtocol()}}
 		}

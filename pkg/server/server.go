@@ -517,7 +517,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if claims.Protocol.ReverseSocks5 != nil {
+		if claims.Protocol.ReverseDynamic() {
 			// The reply is held until a visitor has said what to reach; this
 			// handler stays here until the request is over.
 			if err := s.rvMgr.HandleDynamicClient(claims, lazyUpgrade{gorilla: func(extra http.Header) (*websocket.Conn, error) {
@@ -552,7 +552,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if claims.Protocol.ReverseSocks5 != nil {
+	if claims.Protocol.ReverseDynamic() {
 		if err := s.rvMgr.HandleDynamicClient(claims, lazyUpgrade{wst: func(extra http.Header) (*wst.Conn, error) {
 			return upgrader.Upgrade(w, r, extra)
 		}}, r.Context().Done()); err != nil {
@@ -620,7 +620,7 @@ func (s *Server) handleConnection(wsConn *wst.Conn, claims *protocol.JwtTunnelCo
 		s.rvMgr.HandleClient(wsConn, claims)
 		return
 	}
-	if claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseDynamic() {
 		slog.Warn("Unsupported reverse protocol", "proto", claims.Protocol)
 		return
 	}
@@ -672,7 +672,7 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 		s.rvMgr.HandleGorillaClient(wsConn, claims)
 		return
 	}
-	if claims.Protocol.ReverseSocks5 != nil || claims.Protocol.ReverseHttpProxy != nil {
+	if claims.Protocol.ReverseDynamic() {
 		slog.Warn("Unsupported reverse protocol (gorilla)", "proto", claims.Protocol)
 		return
 	}
@@ -685,7 +685,7 @@ func (s *Server) handleGorillaConnection(wsConn *websocket.Conn, claims *protoco
 const h2HeaderFlushTimeout = 10 * time.Second
 
 func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, claims *protocol.JwtTunnelConfig, rule *RestrictionConfig) {
-	if claims.Protocol.ReverseSocks5 != nil {
+	if claims.Protocol.ReverseDynamic() {
 		// The response, and with it the visitor's target, waits for a visitor.
 		if err := s.rvMgr.HandleDynamicClient(claims, lazyUpgrade{stream: func(extra http.Header) (io.ReadWriteCloser, error) {
 			for k, v := range extra {
@@ -770,12 +770,6 @@ func (s *Server) handleHttp2Connection(w http.ResponseWriter, r *http.Request, c
 		s.rvMgr.HandleClientH2(rwc, claims, r.Context().Done())
 		return
 	}
-	if claims.Protocol.ReverseHttpProxy != nil {
-		slog.Warn("Unsupported reverse protocol for HTTP/2", "proto", claims.Protocol)
-		_ = rwc.Close()
-		return
-	}
-
 	slog.Warn("Unsupported protocol for HTTP/2", "proto", claims.Protocol)
 	_ = rwc.Close()
 }
