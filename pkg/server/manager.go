@@ -756,22 +756,38 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	var targetPort uint16
 	var err error
 
-	socks5 := tl.protocol.ReverseSocks5 != nil
-	if socks5 {
+	// A dynamic tunnel's visitor names its target through the front-end
+	// protocol, and is told afterwards whether the connection was made.
+	dynamic := tl.protocol.ReverseDynamic()
+	reply := func(bool) error { return nil }
+	switch {
+	case tl.protocol.ReverseSocks5 != nil:
 		targetHost, targetPort, err = readSocks5Request(conn, tl.protocol.ReverseSocks5.Credentials)
 		if err != nil {
 			slog.Warn("Reverse SOCKS5 handshake failed", "err", err)
 			return
 		}
+		reply = func(ok bool) error {
+			if ok {
+				return socks5Reply(conn, socks5Succeeded)
+			}
+			return socks5Reply(conn, socks5GeneralFailure)
+		}
+	case tl.protocol.ReverseHttpProxy != nil:
+		var v *dynamicVisitor
+		v, err = readHTTPProxyRequest(conn, tl.protocol.ReverseHttpProxy.Credentials)
+		if err != nil {
+			slog.Warn("Reverse HTTP proxy request failed", "err", err)
+			return
+		}
+		targetHost, targetPort, reply, conn = v.host, v.port, v.reply, v.conn
 	}
 
 	// Get a waiting client connection
 	wait, ok := m.acquireWaitingConn(tl)
 	if !ok {
 		slog.Error("Reverse tunnel: no client available to handle connection", "addr", tl.addr)
-		if socks5 {
-			_ = socks5Reply(conn, socks5GeneralFailure)
-		}
+		_ = reply(false)
 		return
 	}
 
@@ -796,16 +812,16 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	defer func() { wait.finish(wait.lazy != nil) }()
 	m.touchListener(tl)
 
-	if socks5 {
+	if dynamic {
 		// The client's request was held for this: answer it now, with the
 		// target the visitor asked for, then tell the visitor it is connected.
 		if err := m.answerHeldRequest(wait, targetHost, targetPort); err != nil {
-			slog.Warn("Reverse SOCKS5: cannot hand the connection to the client", "addr", tl.addr, "err", err)
-			_ = socks5Reply(conn, socks5GeneralFailure)
+			slog.Warn("Reverse tunnel: cannot hand the connection to the client", "addr", tl.addr, "err", err)
+			_ = reply(false)
 			wait.finish(true)
 			return
 		}
-		if err := socks5Reply(conn, socks5Succeeded); err != nil {
+		if err := reply(true); err != nil {
 			wait.finish(true)
 			return
 		}
@@ -823,14 +839,14 @@ func (m *ReverseTunnelManager) handleIncoming(tl *tunnelListener, conn net.Conn)
 	// without a watchdog the visitor would hang on it indefinitely.
 	if wait.wsConn != nil {
 		stop, live := tunnel.WatchWst(wait.wsConn, m.pingInterval, "addr", tl.addr)
-		if !socks5 {
+		if !dynamic {
 			_ = wait.wsConn.WriteMessage(wst.BinaryMessage, nil)
 		}
 		tunnel.PipeLive(conn, wait.wsConn, live)
 		stop()
 	} else if wait.gorillaConn != nil {
 		stop, live := tunnel.WatchGorilla(wait.gorillaConn, m.pingInterval, "addr", tl.addr)
-		if !socks5 {
+		if !dynamic {
 			_ = wait.gorillaConn.WriteMessage(websocket.BinaryMessage, nil)
 		}
 		tunnel.PipeGorillaLive(conn, wait.gorillaConn, live)

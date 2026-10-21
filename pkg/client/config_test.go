@@ -146,10 +146,20 @@ func TestParseTunnelArg(t *testing.T) {
 			},
 		},
 		{
-			name:      "Reverse HTTP proxy unsupported",
-			arg:       "http://9090",
+			name:      "Reverse HTTP proxy",
+			arg:       "http://9090?login=admin&password=secret",
 			isReverse: true,
-			wantErr:   true,
+			want: &protocol.LocalToRemote{
+				Local:  "127.0.0.1:9090",
+				Remote: "0.0.0.0",
+				Port:   0,
+				Protocol: protocol.LocalProtocol{
+					ReverseHttpProxy: &protocol.ReverseHttpProxyProtocol{
+						Timeout:     &protocol.Duration{Secs: 30},
+						Credentials: &protocol.Credentials{Username: "admin", Password: "secret"},
+					},
+				},
+			},
 		},
 	}
 

@@ -44,6 +44,24 @@ func (p LocalProtocol) Variants() int {
 	return n
 }
 
+// ReverseDynamic reports whether the protocol is a reverse tunnel whose target is
+// named by each visitor, so the server holds the client's request until one asks.
+func (p LocalProtocol) ReverseDynamic() bool {
+	return p.ReverseSocks5 != nil || p.ReverseHttpProxy != nil
+}
+
+// ReverseDynamicCredentials returns the credentials a dynamic reverse listener
+// asks its visitors for, or nil.
+func (p LocalProtocol) ReverseDynamicCredentials() *Credentials {
+	switch {
+	case p.ReverseSocks5 != nil:
+		return p.ReverseSocks5.Credentials
+	case p.ReverseHttpProxy != nil:
+		return p.ReverseHttpProxy.Credentials
+	}
+	return nil
+}
+
 // TunProtocol requests a packet-level tun session. Mtu is the client's TUN
 // MTU; the server uses the same value for its side of the session.
 type TunProtocol struct {

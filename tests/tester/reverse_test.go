@@ -372,3 +372,212 @@ func TestReverseSocks5(t *testing.T) {
 		}
 	}
 }
+
+// reverseHTTPProxyConnect opens a CONNECT tunnel through the server's reverse HTTP
+// proxy port and checks an echo through it. The listener only exists once the
+// client has connected, so the first attempts may be refused.
+func reverseHTTPProxyConnect(t *testing.T, proxyAddr, targetAddr, msg, authHeader string) {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		err := func() error {
+			conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+			if err != nil {
+				return err
+			}
+			defer func() { _ = conn.Close() }()
+			_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+			req := fmt.Sprintf("CONNECT %s HTTP/1.1\r\nHost: %s\r\n%s\r\n", targetAddr, targetAddr, authHeader)
+			if _, err := io.WriteString(conn, req); err != nil {
+				return err
+			}
+			// Read the response head byte by byte, so nothing of the tunnel is consumed.
+			var head []byte
+			one := make([]byte, 1)
+			for !bytes.HasSuffix(head, []byte("\r\n\r\n")) {
+				if _, err := conn.Read(one); err != nil {
+					return err
+				}
+				head = append(head, one[0])
+			}
+			if !strings.HasPrefix(string(head), "HTTP/1.1 200") {
+				return fmt.Errorf("proxy answered %q", strings.SplitN(string(head), "\r\n", 2)[0])
+			}
+			if _, err := io.WriteString(conn, msg); err != nil {
+				return err
+			}
+			buf := make([]byte, len(msg))
+			if _, err := io.ReadFull(conn, buf); err != nil {
+				return err
+			}
+			if string(buf) != msg {
+				t.Fatalf("echo mismatch: sent %q, got %q", msg, buf)
+			}
+			return nil
+		}()
+		if err == nil {
+			return
+		}
+		lastErr = err
+		time.Sleep(300 * time.Millisecond)
+	}
+	t.Fatalf("no echo through the reverse HTTP proxy tunnel: %v", lastErr)
+}
+
+func TestReverseHTTPProxy(t *testing.T) {
+	if rustBinary == "" {
+		t.Skip("Rust binary 'wstunnel' not found in PATH. Skipping reverse interoperability tests.")
+	}
+	if _, err := os.Stat(goBinary); os.IsNotExist(err) {
+		t.Fatalf("Go binary not found at %s. Run 'make build' first.", goBinary)
+	}
+	for _, tc := range reverseCases() {
+		for _, withAuth := range []bool{false, true} {
+			name := tc.name
+			if withAuth {
+				name += "-auth"
+			}
+			t.Run(name, func(t *testing.T) {
+				if reason := tc.skipReason(); reason != "" {
+					t.Skip(reason)
+				}
+				host := "127.0.0.1"
+				serverPort, err := findFreeTCPPort(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				targetPort, err := findFreeTCPPort(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				proxyPort, err := findFreeTCPPort(host)
+				if err != nil {
+					t.Fatal(err)
+				}
+				// The target answers plain HTTP, and echoes anything else.
+				echo, err := runEchoServer(targetPort)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer func() { _ = echo }()
+
+				arg := fmt.Sprintf("http://%s:%d", host, proxyPort)
+				authHeader := ""
+				if withAuth {
+					arg += "?login=admin&password=secret"
+					authHeader = "Proxy-Authorization: Basic YWRtaW46c2VjcmV0\r\n" // admin:secret
+				}
+				startReverse(t, tc, host, serverPort, arg)
+				proxyAddr := net.JoinHostPort(host, fmt.Sprint(proxyPort))
+				targetAddr := net.JoinHostPort(host, fmt.Sprint(targetPort))
+				reverseHTTPProxyConnect(t, proxyAddr, targetAddr, "hello reverse http proxy", authHeader)
+
+				if withAuth {
+					// Without the credentials the visitor is challenged.
+					conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer func() { _ = conn.Close() }()
+					_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+					_, _ = fmt.Fprintf(conn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetAddr, targetAddr)
+					line, _ := io.ReadAll(conn)
+					if !strings.HasPrefix(string(line), "HTTP/1.1 407") && !strings.HasPrefix(string(line), "HTTP/1.0 407") {
+						t.Fatalf("a visitor without credentials got %q, want a 407", line)
+					}
+				}
+
+				// Several visitors at once each reach the target through the client.
+				var wg sync.WaitGroup
+				for i := range 4 {
+					wg.Add(1)
+					go func() {
+						defer wg.Done()
+						reverseHTTPProxyConnect(t, proxyAddr, targetAddr, fmt.Sprintf("visitor %d", i), authHeader)
+					}()
+				}
+				wg.Wait()
+			})
+		}
+	}
+}
+
+// A plain (non-CONNECT) request through the reverse HTTP proxy reaches the
+// target as it was sent.
+func TestReverseHTTPProxyPlainRequest(t *testing.T) {
+	if rustBinary == "" {
+		t.Skip("Rust binary 'wstunnel' not found in PATH. Skipping reverse interoperability tests.")
+	}
+	if _, err := os.Stat(goBinary); os.IsNotExist(err) {
+		t.Fatalf("Go binary not found at %s. Run 'make build' first.", goBinary)
+	}
+	for _, tc := range reverseCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			if reason := tc.skipReason(); reason != "" {
+				t.Skip(reason)
+			}
+			host := "127.0.0.1"
+			serverPort, err := findFreeTCPPort(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			proxyPort, err := findFreeTCPPort(host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			target, err := net.Listen("tcp", host+":0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = target.Close() }()
+			go func() {
+				for {
+					c, err := target.Accept()
+					if err != nil {
+						return
+					}
+					go func() {
+						defer func() { _ = c.Close() }()
+						_ = c.SetDeadline(time.Now().Add(10 * time.Second))
+						var req []byte
+						one := make([]byte, 1)
+						for !bytes.HasSuffix(req, []byte("\r\n\r\n")) {
+							if _, err := c.Read(one); err != nil {
+								return
+							}
+							req = append(req, one[0])
+						}
+						line := strings.SplitN(string(req), "\r\n", 2)[0]
+						body := "you asked: " + line
+						_, _ = fmt.Fprintf(c, "HTTP/1.1 200 OK\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+					}()
+				}
+			}()
+
+			startReverse(t, tc, host, serverPort, fmt.Sprintf("http://%s:%d", host, proxyPort))
+
+			targetURL := "http://" + target.Addr().String() + "/hello"
+			deadline := time.Now().Add(20 * time.Second)
+			var lastErr error
+			for time.Now().Before(deadline) {
+				conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, fmt.Sprint(proxyPort)), 2*time.Second)
+				if err != nil {
+					lastErr = err
+					time.Sleep(300 * time.Millisecond)
+					continue
+				}
+				_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+				_, _ = fmt.Fprintf(conn, "GET %s HTTP/1.1\r\nHost: %s\r\n\r\n", targetURL, target.Addr())
+				got, _ := io.ReadAll(conn)
+				_ = conn.Close()
+				if strings.Contains(string(got), "you asked: GET "+targetURL) {
+					return
+				}
+				lastErr = fmt.Errorf("unexpected response %q", got)
+				time.Sleep(300 * time.Millisecond)
+			}
+			t.Fatalf("plain request through the reverse HTTP proxy failed: %v", lastErr)
+		})
+	}
+}

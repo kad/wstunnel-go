@@ -140,7 +140,7 @@ func (w *WebTransportClient) Connect(p protocol.LocalProtocol, remoteHost string
 	}
 
 	var resp *http.Response
-	if p.ReverseSocks5 != nil {
+	if p.ReverseDynamic() {
 		rwc = reverseStream{stream}
 		// The server answers once a visitor has asked for a target, and says
 		// which in a JWT preamble on the stream. Surface it as the Cookie header
