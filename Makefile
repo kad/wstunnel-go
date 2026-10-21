@@ -77,6 +77,36 @@ tidy: ## Run go mod tidy
 	@echo "Tidying go modules..."
 	go mod tidy
 
+# The root module and pkg/caddy are separate modules, and pkg/caddy replaces the
+# root with the local checkout, so a bump in one must be tidied in the other.
+# Only direct requirements are moved to their latest release: the indirect ones
+# follow through the module graph. `go get -u` would also push indirect packages
+# ahead of what Caddy compiles against (see the cel-go note in dependabot.yml).
+# Requirements pinned to a pseudo-version (gvisor) are left alone: the newest
+# commit of such a repository may not build, so bump those by hand.
+#
+# The listing is captured on its own so a failing `go list` stops the target,
+# instead of `go get` running with no arguments (which, in pkg/caddy, would
+# target the current package and upgrade nothing).
+UPGRADE_DIRECT_DEPS = list=$$(go list -m -f '{{if and (not .Main) (not .Indirect) (ne .Path "github.com/kad/wstunnel-go")}}{{.Path}} {{.Version}}{{end}}' all) || exit 1; \
+	deps=$$(printf '%s\n' "$$list" | grep -Ev ' v[0-9][^ ]*-[0-9]{14}-[0-9a-f]{12}$$' | awk '{print $$1 "@latest"}'); \
+	[ -n "$$deps" ] || { echo "update-deps: no direct dependencies found" >&2; exit 1; }; \
+	go get $$deps
+
+.PHONY: update-deps
+update-deps: ## Update direct dependencies of BOTH modules to the latest releases, then tidy and build
+	@echo "Updating dependencies (root)..."
+	@$(UPGRADE_DIRECT_DEPS)
+	go mod tidy
+	@echo "Updating dependencies (pkg/caddy)..."
+	@# The root bump makes pkg/caddy's go.mod stale, and go get refuses to run on it.
+	$(MAKE) tidy-caddy
+	@cd pkg/caddy && $(UPGRADE_DIRECT_DEPS)
+	$(MAKE) tidy-caddy
+	go build ./...
+	cd pkg/caddy && go build ./...
+	@git diff --stat -- go.mod go.sum pkg/caddy/go.mod pkg/caddy/go.sum
+
 .PHONY: verify
 verify: ## Run go mod verify
 	@echo "Verifying go modules..."

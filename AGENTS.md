@@ -33,6 +33,7 @@ The `Makefile` provides convenient targets for common development tasks:
 -   `vet`: Runs `go vet` for static analysis.
 -   `fmt`: Formats all Go source files using `go fmt`.
 -   `tidy`: Organizes Go module dependencies (`go mod tidy`).
+-   `update-deps`: Moves the direct dependencies of both Go modules (root and `pkg/caddy`) to their latest releases, tidies both and builds both. Dependencies pinned to a pseudo-version (gvisor) are skipped; bump those by hand. Use it, or `make tidy tidy-caddy` on the PR branch, when a Dependabot PR fails the caddy lint job.
 -   `verify`: Verifies the integrity of module dependencies (`go mod verify`).
 -   `install-tools`: Installs development tools like `golangci-lint` and `goreleaser` locally using `go install`.
 -   `clean`: Removes build artifacts, including the `wstunnel-go` binary and any other temporary files.

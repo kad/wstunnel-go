@@ -21,6 +21,10 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
+      - name: Check go.mod is tidy (caddy)
+        # pkg/caddy replaces the root module, so a root dependency bump leaves it
+        # stale. Say so here instead of letting golangci-lint fail obscurely.
+        run: cd pkg/caddy && go mod tidy -diff
       - name: golangci-lint (caddy)
         uses: golangci/golangci-lint-action@v9
         with:
