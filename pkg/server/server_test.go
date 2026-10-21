@@ -617,3 +617,13 @@ func TestGetProtoNameTun(t *testing.T) {
 		t.Fatalf("getProtoName(Tun) = %q, want Tun", got)
 	}
 }
+
+func TestWTBindAddrFollowsTheTCPPortForPortZero(t *testing.T) {
+	tcp := &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 43210}
+	if got := wtBindAddr("127.0.0.1:0", tcp); got != "127.0.0.1:43210" {
+		t.Errorf("port 0: got %q, want the TCP listener's address", got)
+	}
+	if got := wtBindAddr("127.0.0.1:4433", tcp); got != "127.0.0.1:4433" {
+		t.Errorf("a configured port must be kept: got %q", got)
+	}
+}

@@ -52,8 +52,11 @@ func (b *udpBudget) release(n int) { b.used.Add(-int64(n)) }
 // net.Conn whose reads return the peer's datagrams and whose writes send a
 // datagram back to it. It is what the tunnel pipe copies to and from the client.
 type udpPeer struct {
-	pc     net.PacketConn
-	addr   net.Addr
+	pc   net.PacketConn
+	addr net.Addr
+	// hdr, when set, is put in front of every datagram sent back to the peer:
+	// the SOCKS5 UDP header of the destination the peer addressed.
+	hdr    []byte
 	budget *udpBudget
 	in     chan []byte
 	closed chan struct{}
@@ -112,7 +115,13 @@ func (p *udpPeer) Write(b []byte) (int, error) {
 	default:
 	}
 	p.touch()
-	return p.pc.WriteTo(b, p.addr)
+	if p.hdr == nil {
+		return p.pc.WriteTo(b, p.addr)
+	}
+	out := make([]byte, 0, len(p.hdr)+len(b))
+	out = append(append(out, p.hdr...), b...)
+	n, err := p.pc.WriteTo(out, p.addr)
+	return max(n-len(p.hdr), 0), err
 }
 
 func (p *udpPeer) Close() error {
@@ -153,15 +162,28 @@ func isClosed(c <-chan struct{}) bool {
 	}
 }
 
+// udpDatagram is a datagram received by a reverse UDP listener, sorted into the
+// session it belongs to.
+type udpDatagram struct {
+	key     string
+	payload []byte
+	// For a SOCKS5 relay: the destination the peer addressed, and the header to
+	// put in front of what comes back from it.
+	target *socks5Target
+	hdr    []byte
+}
+
+type socks5Target struct {
+	host string
+	port uint16
+}
+
 // runUDPListener reads the reverse listener's socket and routes datagrams to the
 // session of their source address, starting one for a new peer.
 func (m *ReverseTunnelManager) runUDPListener(tl *tunnelListener) {
 	defer func() { _ = tl.pc.Close() }()
 	slog.Info("Reverse tunnel listener started", "addr", tl.addr, "bound", tl.pc.LocalAddr().String(), "proto", getProtoName(tl.protocol))
 
-	var mu sync.Mutex
-	peers := make(map[string]*udpPeer)
-	var budget udpBudget
 	// How long a peer may stay silent before its session ends. The client sends
 	// its choice (30 seconds unless it was told otherwise), and no timeout, or a
 	// zero one, means the sessions never expire, as in Rust.
@@ -169,10 +191,29 @@ func (m *ReverseTunnelManager) runUDPListener(tl *tunnelListener) {
 	if d := tl.protocol.ReverseUdp.Timeout; d != nil {
 		timeout = time.Duration(d.Secs)*time.Second + time.Duration(d.Nanos)
 	}
+	classify := func(b []byte, from net.Addr) (udpDatagram, bool) {
+		return udpDatagram{key: from.String(), payload: b}, true
+	}
+	m.runUDPSessions(tl, tl.pc, timeout, classify)
+
+	m.closeTunnelListener(tl, false)
+	m.mu.Lock()
+	if current, ok := m.listeners[tl.addr]; ok && current == tl {
+		delete(m.listeners, tl.addr)
+	}
+	m.mu.Unlock()
+}
+
+// runUDPSessions reads pc until it fails, giving every datagram to the session
+// classify assigns it to and starting a session the first time a key is seen.
+func (m *ReverseTunnelManager) runUDPSessions(tl *tunnelListener, pc net.PacketConn, timeout time.Duration, classify func([]byte, net.Addr) (udpDatagram, bool)) {
+	var mu sync.Mutex
+	peers := make(map[string]*udpPeer)
+	var budget udpBudget
 
 	buf := make([]byte, 64*1024)
 	for {
-		n, addr, err := tl.pc.ReadFrom(buf)
+		n, addr, err := pc.ReadFrom(buf)
 		if err != nil {
 			select {
 			case <-tl.quit:
@@ -184,45 +225,43 @@ func (m *ReverseTunnelManager) runUDPListener(tl *tunnelListener) {
 				_ = p.Close()
 			}
 			mu.Unlock()
-			m.closeTunnelListener(tl, false)
-			m.mu.Lock()
-			if current, ok := m.listeners[tl.addr]; ok && current == tl {
-				delete(m.listeners, tl.addr)
-			}
-			m.mu.Unlock()
 			return
 		}
 
-		key := addr.String()
-		mu.Lock()
-		p, ok := peers[key]
-		if !ok && len(peers) >= maxUDPPeers {
-			mu.Unlock()
-			slog.Debug("Reverse tunnel: too many UDP peers, dropping datagram", "addr", tl.addr, "peer", key, "limit", maxUDPPeers)
+		d, ok := classify(buf[:n], addr)
+		if !ok {
 			continue
 		}
-		if !ok {
-			slog.Debug("Reverse tunnel: new UDP peer", "addr", tl.addr, "peer", key)
-			p = newUDPPeer(tl.pc, addr, &budget)
-			peers[key] = p
+		mu.Lock()
+		p, found := peers[d.key]
+		if !found && len(peers) >= maxUDPPeers {
+			mu.Unlock()
+			slog.Debug("Reverse tunnel: too many UDP peers, dropping datagram", "addr", tl.addr, "peer", d.key, "limit", maxUDPPeers)
+			continue
+		}
+		if !found {
+			slog.Debug("Reverse tunnel: new UDP peer", "addr", tl.addr, "peer", d.key)
+			p = newUDPPeer(pc, addr, &budget)
+			p.hdr = d.hdr
+			peers[d.key] = p
 			m.beginIncoming(tl)
 			go func() {
-				m.serveUDPPeer(tl, p, timeout)
+				m.serveUDPPeer(tl, p, timeout, d.target)
 				mu.Lock()
-				if peers[key] == p {
-					delete(peers, key)
+				if peers[d.key] == p {
+					delete(peers, d.key)
 				}
 				mu.Unlock()
 			}()
 		}
 		mu.Unlock()
-		p.deliver(append([]byte(nil), buf[:n]...))
+		p.deliver(append([]byte(nil), d.payload...))
 	}
 }
 
 // serveUDPPeer gives a peer a parked client connection and pipes datagrams
 // between them until either side ends or the peer has been silent for timeout.
-func (m *ReverseTunnelManager) serveUDPPeer(tl *tunnelListener, p *udpPeer, timeout time.Duration) {
+func (m *ReverseTunnelManager) serveUDPPeer(tl *tunnelListener, p *udpPeer, timeout time.Duration, target *socks5Target) {
 	defer m.updateActivePipes(tl, -1)
 	defer func() { _ = p.Close() }()
 
@@ -276,13 +315,24 @@ func (m *ReverseTunnelManager) serveUDPPeer(tl *tunnelListener, p *udpPeer, time
 		return
 	}
 	defer wait.endPipe() // after the finish below; see waitForUseOrTimeout
-	defer wait.finish(false)
+	// A connection upgraded here, for a held request, has no handler of its own
+	// to close it afterwards.
+	defer func() { wait.finish(wait.lazy != nil) }()
 	assigned.Store(wait)
 	if isClosed(expired) { // it ran out between acquiring and now
 		wait.abort()
 		return
 	}
 	m.touchListener(tl)
+	if target != nil {
+		// A SOCKS5 relay: the client's request was held until a destination was
+		// known; answer it with that, as a UDP target.
+		if err := m.answerHeldRequest(wait, target.host, target.port, true); err != nil {
+			slog.Warn("Reverse tunnel: cannot hand the UDP session to the client", "addr", tl.addr, "err", err)
+			wait.finish(true)
+			return
+		}
+	}
 
 	start := time.Now()
 	slog.Info("Reverse tunnel: forwarding UDP peer to client", "addr", tl.addr, "peer", p.addr.String())

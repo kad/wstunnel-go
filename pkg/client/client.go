@@ -216,7 +216,7 @@ func (c *Client) loadHttpHeaders() map[string]string {
 	return headers
 }
 
-func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (*wst.Conn, *http.Response, error) {
+func (c *Client) connectToWstunnel(ctx context.Context, p protocol.LocalProtocol, remoteHost string, remotePort uint16) (*wst.Conn, *http.Response, error) {
 	requestID := uuid.New().String()
 	token, err := c.generateJWT(requestID, p, remoteHost, remotePort)
 	if err != nil {
@@ -277,7 +277,7 @@ func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, 
 		return conn, err
 	}
 
-	conn, resp, err := dialer.Dial(u.String(), header)
+	conn, resp, err := dialer.DialContext(ctx, u.String(), header)
 	if err != nil {
 		return nil, resp, fmt.Errorf("failed to dial: %w", markReplyTimeout(err, connected.Load()))
 	}
@@ -285,7 +285,7 @@ func (c *Client) connectToWstunnel(p protocol.LocalProtocol, remoteHost string, 
 	return conn, resp, nil
 }
 
-func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (io.ReadWriteCloser, *http.Response, error) {
+func (c *Client) connectToHttp2(parent context.Context, p protocol.LocalProtocol, remoteHost string, remotePort uint16) (io.ReadWriteCloser, *http.Response, error) {
 	requestID := uuid.New().String()
 	token, err := c.generateJWT(requestID, p, remoteHost, remotePort)
 	if err != nil {
@@ -318,7 +318,7 @@ func (c *Client) connectToHttp2(p protocol.LocalProtocol, remoteHost string, rem
 	// is also cancelled if no reply comes in time. http.Transport's own
 	// ResponseHeaderTimeout would not do: it starts once the request body is
 	// written, and this body stays open for the whole tunnel.
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(parent)
 	var replyTimedOut, connected atomic.Bool
 	var replyTimer *time.Timer
 	if holdsReply(p) {
@@ -474,7 +474,7 @@ func (ts *tunnelStream) Close() {
 	}
 }
 
-func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, remotePort uint16) (*websocket.Conn, *http.Response, error) {
+func (c *Client) connectToGorilla(ctx context.Context, p protocol.LocalProtocol, remoteHost string, remotePort uint16) (*websocket.Conn, *http.Response, error) {
 	requestID := uuid.New().String()
 	token, err := c.generateJWT(requestID, p, remoteHost, remotePort)
 	if err != nil {
@@ -522,10 +522,25 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 	// The TLS handshake is done in the dial hook, so that once it returns the
 	// only thing left to wait for is the server's reply.
 	var connected atomic.Bool
+	// gorilla stops dialing when ctx ends but not while it waits for the
+	// handshake, so the connection is closed here to cut that short.
+	var dialed atomic.Pointer[net.Conn]
 	track := func(conn net.Conn, err error) (net.Conn, error) {
 		connected.Store(err == nil)
+		if err == nil {
+			dialed.Store(&conn)
+			if ctx.Err() != nil {
+				_ = conn.Close()
+			}
+		}
 		return conn, err
 	}
+	stopWatch := context.AfterFunc(ctx, func() {
+		if c := dialed.Load(); c != nil {
+			_ = (*c).Close()
+		}
+	})
+	defer stopWatch()
 	if c.pool != nil && !isTLS {
 		dialer.NetDialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 			return track(c.pool.Get(ctx))
@@ -541,7 +556,7 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 		}
 	}
 
-	conn, resp, err := dialer.Dial(u.String(), header)
+	conn, resp, err := dialer.DialContext(ctx, u.String(), header)
 	if err != nil {
 		err = markReplyTimeout(err, connected.Load())
 		if resp != nil {
@@ -552,27 +567,34 @@ func (c *Client) connectToGorilla(p protocol.LocalProtocol, remoteHost string, r
 }
 
 func (c *Client) connectToTransport(p protocol.LocalProtocol, remoteHost string, remotePort uint16) *tunnelStream {
+	return c.connectToTransportContext(context.Background(), p, remoteHost, remotePort)
+}
+
+// connectToTransportContext is connectToTransport that stops opening the tunnel
+// when ctx ends. Once the tunnel is open ctx no longer matters, except over
+// HTTP/2, where the request lives as long as the tunnel and ctx ending closes it.
+func (c *Client) connectToTransportContext(ctx context.Context, p protocol.LocalProtocol, remoteHost string, remotePort uint16) *tunnelStream {
 	u, err := url.Parse(c.Config.ServerURL)
 	if err != nil {
 		return &tunnelStream{err: fmt.Errorf("invalid server URL: %w", err)}
 	}
 
 	if u.Scheme == "wt" || u.Scheme == "wts" {
-		wt, resp, err := c.wtClient.Connect(p, remoteHost, remotePort)
+		wt, resp, err := c.wtClient.Connect(ctx, p, remoteHost, remotePort)
 		return &tunnelStream{wt: wt, r: resp, err: err}
 	}
 
 	if u.Scheme == "http" || u.Scheme == "https" {
-		h2, resp, err := c.connectToHttp2(p, remoteHost, remotePort)
+		h2, resp, err := c.connectToHttp2(ctx, p, remoteHost, remotePort)
 		return &tunnelStream{h2: h2, r: resp, err: err}
 	}
 
 	if c.Config.WebsocketProtocol == "ws" {
-		ws, resp, err := c.connectToGorilla(p, remoteHost, remotePort)
+		ws, resp, err := c.connectToGorilla(ctx, p, remoteHost, remotePort)
 		return &tunnelStream{gorilla: ws, r: resp, err: err}
 	}
 
-	ws, resp, err := c.connectToWstunnel(p, remoteHost, remotePort)
+	ws, resp, err := c.connectToWstunnel(ctx, p, remoteHost, remotePort)
 	return &tunnelStream{ws: ws, r: resp, err: err}
 }
 
@@ -875,9 +897,12 @@ func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) 
 	if _, err := io.ReadFull(conn, buf[:4]); err != nil {
 		return "", 0, nil, err
 	}
-	if buf[0] != 0x05 || buf[1] != 0x01 {
+	if buf[0] != 0x05 || (buf[1] != 0x01 && buf[1] != 0x03) {
+		// Reply too, so the visitor is told rather than left waiting.
+		_, _ = conn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
 		return "", 0, nil, fmt.Errorf("unsupported socks command: %d", buf[1])
 	}
+	associate := buf[1] == 0x03
 
 	var host string
 	switch buf[3] {
@@ -908,6 +933,9 @@ func (c *Client) handleSocks5(conn net.Conn, credentials *protocol.Credentials) 
 		return "", 0, nil, err
 	}
 	port := binary.BigEndian.Uint16(buf[:2])
+	if associate {
+		return host, port, nil, errSocks5UDPAssociate
+	}
 
 	replyFunc := func(rep byte) error {
 		resp := []byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
@@ -928,6 +956,24 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 
 	slog.Info("SOCKS5 Listener started", "local", listener.Addr().String(), "server", c.Config.ServerURL)
 
+	// UDP ASSOCIATE needs a UDP socket at the same address. Without one the
+	// listener still serves CONNECT and refuses UDP ASSOCIATE.
+	var relay net.PacketConn
+	var assoc *protocol.UDPAssociations // limits the relay to authenticated senders when the listener has credentials
+	if ltr.Protocol.Socks5.Credentials != nil {
+		assoc = &protocol.UDPAssociations{}
+	}
+	if pc, err := net.ListenPacket("udp", listener.Addr().String()); err != nil {
+		slog.Warn("SOCKS5: no UDP relay, UDP ASSOCIATE is refused", "local", listener.Addr().String(), "err", err)
+	} else {
+		relay = pc
+		var timeout time.Duration
+		if t := ltr.Protocol.Socks5.Timeout; t != nil {
+			timeout = time.Duration(t.Secs)*time.Second + time.Duration(t.Nanos)
+		}
+		go c.runSocks5UDPRelay(pc, timeout, assoc)
+	}
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -942,6 +988,26 @@ func (c *Client) runSocks5Tunnel(ltr *protocol.LocalToRemote) {
 				credentials = ltr.Protocol.Socks5.Credentials
 			}
 			targetHost, targetPort, replyFunc, err := c.handleSocks5Bounded(netConn, credentials)
+			if errors.Is(err, errSocks5UDPAssociate) {
+				if relay == nil {
+					_, _ = netConn.Write([]byte{0x05, 0x07, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+					return
+				}
+				// The association lasts as long as this connection, and the
+				// sender it names is the one the relay serves if there are
+				// credentials: the handshake above has authenticated it. It is
+				// registered before the reply, since the visitor may send its
+				// first datagram as soon as it has read it.
+				if assoc != nil {
+					release := assoc.Add(protocol.AddrIP(netConn.RemoteAddr()))
+					defer release()
+				}
+				if err := socks5UDPReplyAddr(netConn, relay.LocalAddr()); err != nil {
+					return
+				}
+				_, _ = io.Copy(io.Discard, netConn)
+				return
+			}
 			if err != nil {
 				slog.Warn("SOCKS5 handshake failed", "err", err)
 				return

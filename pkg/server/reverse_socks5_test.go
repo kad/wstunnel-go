@@ -79,12 +79,12 @@ func TestReadSocks5RequestRejectsUnsupportedCommand(t *testing.T) {
 	_, _, err := runSocks5Request(t, nil, func(c net.Conn) {
 		_, _ = c.Write([]byte{5, 1, 0})
 		drain(c, 2)
-		_, _ = c.Write([]byte{5, 3, 0, 1}) // UDP ASSOCIATE; the rest is never read (the pipe is unbuffered)
+		_, _ = c.Write([]byte{5, 2, 0, 1}) // BIND; the rest is never read (the pipe is unbuffered)
 		reply = make([]byte, 10)
 		_, _ = c.Read(reply)
 	})
 	if err == nil {
-		t.Fatal("UDP ASSOCIATE was accepted")
+		t.Fatal("BIND was accepted")
 	}
 	if len(reply) < 2 || reply[1] != socks5CommandNotSupported {
 		t.Fatalf("reply %v, want command-not-supported", reply)
@@ -173,7 +173,7 @@ func TestTargetCookieCarriesTheTarget(t *testing.T) {
 		{"10.1.2.3", "10.1.2.3"},
 		{"2001:db8::1", "[2001:db8::1]"}, // Rust parses the host as a URL host
 	} {
-		tok, err := m.targetCookie(tc.host, 8443)
+		tok, err := m.targetCookie(tc.host, 8443, false)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -912,7 +912,7 @@ func TestTargetCookieCannotBeReplayedAsARequest(t *testing.T) {
 	mgr := NewReverseTunnelManager(0, time.Minute).withCookieSigner(cookieSigner(secret))
 	t.Cleanup(mgr.Close)
 
-	cookie, err := mgr.targetCookie("10.0.0.1", 22)
+	cookie, err := mgr.targetCookie("10.0.0.1", 22, false)
 	if err != nil {
 		t.Fatal(err)
 	}

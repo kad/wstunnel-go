@@ -372,7 +372,7 @@ func TestHTTP2ReplyTimeoutOfAHeldRequest(t *testing.T) {
 	// No answer: a timeout error, well before the 30 seconds, and the server
 	// sees the request cancelled.
 	start := time.Now()
-	_, _, err := c.connectToHttp2(proto, "127.0.0.1", 1080)
+	_, _, err := c.connectToHttp2(context.Background(), proto, "127.0.0.1", 1080)
 	if err == nil || !isTimeout(err) {
 		t.Fatalf("got %v, want a timeout", err)
 	}
@@ -387,7 +387,7 @@ func TestHTTP2ReplyTimeoutOfAHeldRequest(t *testing.T) {
 
 	// An answer: the tunnel outlives the timeout and still carries data.
 	close(released)
-	rwc, _, err := c.connectToHttp2(proto, "127.0.0.1", 1080)
+	rwc, _, err := c.connectToHttp2(context.Background(), proto, "127.0.0.1", 1080)
 	if err != nil {
 		t.Fatalf("answered request failed: %v", err)
 	}
@@ -448,14 +448,14 @@ func TestHTTP2TunnelConnectionIsClosedWithTheTunnel(t *testing.T) {
 	held := protocol.LocalProtocol{ReverseSocks5: &protocol.ReverseSocks5Protocol{}}
 
 	// A held request that times out takes its connection with it.
-	if _, _, err := c.connectToHttp2(held, "127.0.0.1", 1080); err == nil {
+	if _, _, err := c.connectToHttp2(context.Background(), held, "127.0.0.1", 1080); err == nil {
 		t.Fatal("an unanswered request succeeded")
 	}
 	waitFor("after a held request timed out", 0)
 
 	// An established tunnel does too, once it is closed.
 	close(answer)
-	rwc, _, err := c.connectToHttp2(held, "127.0.0.1", 1080)
+	rwc, _, err := c.connectToHttp2(context.Background(), held, "127.0.0.1", 1080)
 	if err != nil {
 		t.Fatal(err)
 	}
