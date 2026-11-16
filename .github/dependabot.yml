@@ -31,6 +31,13 @@ updates:
       # interpreter.NewCall, which Caddy 2.11.4 did not compile against).
       # Caddy now imports it as cel.dev/cel-go; let a Caddy upgrade move it.
       - dependency-name: "cel.dev/cel-go"
+      # quic-go v0.65.0 changed http3.HTTPStreamer.HTTPStream to return
+      # (*Stream, error). webtransport-go (latest v0.13.0) and Caddy v2.11.9
+      # do not build against it yet. Hold at 0.64.x until both catch up, then
+      # drop this ignore. Security updates are unaffected by this rule.
+      - dependency-name: "github.com/quic-go/quic-go"
+        versions:
+          - ">= 0.65.0"
       # gvisor is pinned to a pseudo-version, and the newest commit of its master
       # branch does not always build (it did not on 2026-10-21). Bump it by hand,
       # as `make update-deps` does not touch it either. Limiting the ignore to the
